@@ -141,12 +141,17 @@ struct __attribute__((packed)) MonitorPacket {
 - Host unit tests with captured advertisement bytes.
 - **Done when:** Serial shows correct live SoC/V/current matching the app.
 
-### Phase 2 — Aggregation
-- `DeviceRegistry`: MAC → {AES key, last value, last-seen timestamp}.
+### Phase 2 — Aggregation + WiFi AP / API  *(AP folded in here, was Phase 4)*
+- `DeviceRegistry`: per-device {key, type, last value, last-seen} with
+  staleness/out-of-range flagging. *(done — `src/master/Registry.h`)*
 - Parsers for SmartShunt, SmartSolar MPPT, DC-DC.
-- Staleness/out-of-range handling (flag values older than N seconds).
 - `Aggregator` derives system status (charging / discharging / idle).
-- **Done when:** multiple devices tracked concurrently with stale-flagging.
+- **WiFi AP** + captive portal + `GET /api/data` JSON. *(AP + API + live
+  registry done in `src/master/`; runs headless on the AtomS3.)*
+- **Config portal -> NVS**: web form to add/list/remove devices (name, type,
+  32-hex key); registry loads keys from NVS instead of the static table. *(next)*
+- **Done when:** devices configured via the portal, tracked concurrently with
+  stale-flagging, and served over the AP.
 
 ### Phase 3 — Master display *(Guition board)*
 - LVGL bring-up on JC3248W535 (display + capacitive touch driver).
@@ -156,9 +161,11 @@ struct __attribute__((packed)) MonitorPacket {
 
 ### Phase 4 — Slaves & transport
 - Master: ESP-NOW broadcast of `MonitorPacket` on each update.
-- Master: WiFi AP + captive portal for AES-key entry; `GET /api/data` returns the same data as JSON.
-- Slave (T-Display-S3): ESP-NOW receive + LVGL SoC/current screen; HTTP poll fallback if no ESP-NOW for N seconds; reconnection logic; button to force reconnect.
+- Slave (T-Display-S3): ESP-NOW receive + LVGL SoC/current screen; HTTP poll
+  fallback against the Phase-2 `GET /api/data` if no ESP-NOW for N seconds;
+  reconnection logic; button to force reconnect.
 - **Done when:** slave mirrors master live; survives master reboot.
+- *(WiFi AP + captive portal + HTTP API moved up to Phase 2.)*
 
 ### Phase 5 — Vehicle integration (+ optional GATT)
 - Mounting, 12/24V→5V supply, vibration check, UI polish.
