@@ -30,13 +30,20 @@ enum class Role : uint8_t {
     BatterySOC = 0,
     BatteryV,
     BatteryA,
+    BatteryConsumed,
+    BatteryStarterV,
+    BatteryTTG,
     SolarA,
     SolarW,
+    ChargerA,
     DcDcInA,
     DcDcOutA,
     LoadA,
     COUNT,
 };
+
+// Sentinel device name for a computed (not directly measured) signal.
+constexpr const char* kDerived = "(derived)";
 constexpr size_t kRoleCount = static_cast<size_t>(Role::COUNT);
 
 const char* roleKey(Role r);    // machine name, e.g. "battery_soc"

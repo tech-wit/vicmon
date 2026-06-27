@@ -131,23 +131,30 @@ static String buildPanelJson() {
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved bv = R(sig::Role::BatteryV, now);
     sig::Resolved ba = R(sig::Role::BatteryA, now);
+    sig::Resolved con = R(sig::Role::BatteryConsumed, now);
+    sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
+    sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
     sig::Resolved sa = R(sig::Role::SolarA, now);
     sig::Resolved sw = R(sig::Role::SolarW, now);
+    sig::Resolved chg = R(sig::Role::ChargerA, now);
     sig::Resolved dia = R(sig::Role::DcDcInA, now);
     sig::Resolved doa = R(sig::Role::DcDcOutA, now);
-    sig::Resolved la = R(sig::Role::LoadA, now);
 
     const char* mode = "unknown";
     if (ba.valid) mode = ba.value > 0.5f ? "charging" : (ba.value < -0.5f ? "discharging" : "idle");
 
-    // Load: dedicated binding wins; otherwise derive from energy balance.
+    // Load: dedicated binding wins; "(derived)" computes from energy balance.
+    const sig::Binding& lb = gSignals.binding(sig::Role::LoadA);
+    bool loadDerivedSel = strcmp(lb.device, sig::kDerived) == 0;
+    sig::Resolved la = loadDerivedSel ? sig::Resolved{} : R(sig::Role::LoadA, now);
     bool loadValid = false, loadDerived = false;
     float loadV = 0.0f;
     if (la.valid) {
         loadV = la.value;
         loadValid = true;
-    } else if (ba.valid) {
-        float chargeIn = (sa.valid ? sa.value : 0.0f) + (doa.valid ? doa.value : 0.0f);
+    } else if (loadDerivedSel && ba.valid) {
+        float chargeIn = (sa.valid ? sa.value : 0.0f) + (doa.valid ? doa.value : 0.0f) +
+                         (chg.valid ? chg.value : 0.0f);
         loadV = chargeIn - ba.value;  // sources - net battery (charge +)
         if (loadV < 0) loadV = 0;
         loadValid = true;
@@ -162,10 +169,15 @@ static String buildPanelJson() {
     j += "\"battery\":{\"valid\":" + jbool(battValid) +
          ",\"soc\":" + String(soc.value, 1) +
          ",\"v\":" + String(bv.value, 2) +
-         ",\"a\":" + String(ba.value, 2) + "},";
+         ",\"a\":" + String(ba.value, 2) +
+         ",\"consumed\":" + String(con.value, 1) + ",\"consumed_valid\":" + jbool(con.valid) +
+         ",\"starter_v\":" + String(stv.value, 2) + ",\"starter_valid\":" + jbool(stv.valid) +
+         ",\"ttg\":" + String(ttg.value, 0) + ",\"ttg_valid\":" + jbool(ttg.valid) + "},";
     j += "\"solar\":{\"valid\":" + jbool(sa.valid) +
          ",\"a\":" + String(sa.value, 1) +
          ",\"w\":" + String(sw.value, 0) + "},";
+    j += "\"charger\":{\"valid\":" + jbool(chg.valid) +
+         ",\"a\":" + String(chg.value, 1) + "},";
     j += "\"dcdc\":{\"valid\":" + jbool(dcdcValid) +
          ",\"out_a\":" + String(doa.value, 1) +
          ",\"in_a\":" + String(dia.value, 1) + "},";
@@ -215,11 +227,13 @@ button.ghost{background:transparent;color:var(--muted);border:1px solid #2c3a4a}
 input,select{background:#0d1620;color:var(--fg);border:1px solid #2c3a4a;border-radius:8px;padding:.45em;font-size:.92em}
 label{font-size:.8em;color:var(--muted);display:block;margin-bottom:.2em}
 form.inline{display:flex;gap:.6em;flex-wrap:wrap;align-items:end;margin:0}
-.stats{display:flex;gap:1em;justify-content:center;flex-wrap:wrap}
-.stat{text-align:center}.stat b{font-size:1.3em}.stat span{display:block;color:var(--muted);font-size:.75em}
+.banner{text-align:center;font-weight:700;letter-spacing:.18em;padding:.5em;
+border:1px solid #2c3a4a;border-radius:10px;margin-top:.6em;color:var(--muted)}
 line{stroke-width:4;stroke-linecap:round;fill:none}
 .flow{stroke-dasharray:7 7;animation:dash 1s linear infinite}
+.flowrev{stroke-dasharray:7 7;animation:dashrev 1s linear infinite}
 @keyframes dash{to{stroke-dashoffset:-14}}
+@keyframes dashrev{to{stroke-dashoffset:14}}
 svg text{fill:#e6edf3;font-family:system-ui,sans-serif}
 svg text.muted{fill:var(--muted)}
 .muted{color:var(--muted)}
@@ -227,50 +241,69 @@ svg text.muted{fill:var(--muted)}
 
 static const char kMimicPage[] = R"HTML(
 <div class=card>
-<svg viewBox="0 0 320 340" id="mimic" style="width:100%;max-width:420px;display:block;margin:auto">
-  <line id="lineSolar" x1="75" y1="72" x2="140" y2="128" stroke="#2c3a4a" />
-  <line id="lineDcdc" x1="245" y1="72" x2="180" y2="128" stroke="#2c3a4a" />
-  <line id="lineLoad" x1="160" y1="205" x2="160" y2="278" stroke="#2c3a4a" />
-  <rect x="130" y="115" width="60" height="92" rx="9" fill="#0d1620" stroke="#2c3a4a" stroke-width="3" />
-  <rect id="fill" x="133" y="204" width="54" height="0" fill="#34d399" opacity="0.85" />
-  <rect id="batt" x="130" y="115" width="60" height="92" rx="9" fill="none" stroke="#7d8da1" stroke-width="3" />
-  <rect x="147" y="110" width="26" height="7" rx="2" fill="#7d8da1" />
-  <text id="soc" x="160" y="167" text-anchor="middle" font-size="21" font-weight="700">--</text>
-  <text x="55" y="40" text-anchor="middle" font-size="24">&#9728;&#65039;</text>
-  <text x="55" y="60" text-anchor="middle" font-size="11" class="muted">Solar</text>
-  <text id="solarTxt" x="55" y="92" text-anchor="middle" font-size="14">--</text>
-  <text x="265" y="40" text-anchor="middle" font-size="24">&#9889;</text>
-  <text x="265" y="60" text-anchor="middle" font-size="11" class="muted">DC-DC</text>
-  <text id="dcdcTxt" x="265" y="92" text-anchor="middle" font-size="14">--</text>
-  <text x="160" y="305" text-anchor="middle" font-size="24">&#128161;</text>
-  <text id="loadTxt" x="160" y="330" text-anchor="middle" font-size="14">--</text>
+<svg viewBox="0 0 360 350" id="mimic" style="width:100%;max-width:460px;display:block;margin:auto">
+  <line id="lineSolar"   x1="62"  y1="86" x2="150" y2="152" stroke="#2c3a4a" />
+  <line id="lineCharger" x1="180" y1="78" x2="180" y2="150" stroke="#2c3a4a" />
+  <line id="lineDcdc"    x1="298" y1="86" x2="210" y2="152" stroke="#2c3a4a" />
+  <line id="lineLoad"    x1="180" y1="244" x2="180" y2="298" stroke="#2c3a4a" />
+  <rect x="150" y="150" width="60" height="92" rx="9" fill="#0d1620" stroke="#2c3a4a" stroke-width="3" />
+  <rect id="fill" x="153" y="242" width="54" height="0" fill="#34d399" opacity="0.85" />
+  <rect id="batt" x="150" y="150" width="60" height="92" rx="9" fill="none" stroke="#7d8da1" stroke-width="3" />
+  <rect x="167" y="145" width="26" height="7" rx="2" fill="#7d8da1" />
+  <text id="soc" x="180" y="202" text-anchor="middle" font-size="20" font-weight="700">--</text>
+  <text x="50" y="40" text-anchor="middle" font-size="22">&#9728;&#65039;</text>
+  <text x="50" y="57" text-anchor="middle" font-size="10" class="muted">Solar</text>
+  <text id="solarTxt" x="50" y="76" text-anchor="middle" font-size="13">--</text>
+  <text x="180" y="32" text-anchor="middle" font-size="22">&#128268;</text>
+  <text x="180" y="49" text-anchor="middle" font-size="10" class="muted">Charger</text>
+  <text id="chargerTxt" x="180" y="68" text-anchor="middle" font-size="13">--</text>
+  <text x="310" y="40" text-anchor="middle" font-size="22">&#9889;</text>
+  <text x="310" y="57" text-anchor="middle" font-size="10" class="muted">DC-DC</text>
+  <text id="dcdcTxt" x="310" y="76" text-anchor="middle" font-size="13">--</text>
+  <text x="152" y="318" text-anchor="middle" font-size="22">&#128161;</text>
+  <text id="loadTxt" x="172" y="314" text-anchor="start" font-size="13">Load --</text>
+  <text id="dV" x="222" y="170" text-anchor="start" font-size="13">--</text>
+  <text id="dA" x="222" y="188" text-anchor="start" font-size="13">--</text>
+  <text id="dAh" x="222" y="206" text-anchor="start" font-size="13" class="muted">--</text>
+  <text id="dStarter" x="222" y="224" text-anchor="start" font-size="13" class="muted">--</text>
+  <text id="dTTG" x="222" y="242" text-anchor="start" font-size="13" class="muted">--</text>
 </svg>
-<div class=stats>
-  <div class=stat><b id=bv>--</b><span>VOLTS</span></div>
-  <div class=stat><b id=ba>--</b><span>AMPS</span></div>
-  <div class=stat><b id=mode>--</b><span>MODE</span></div>
-</div>
+<div id="modeBanner" class="banner">--</div>
 </div>
 <script>
-function setLine(id,on,col){var e=document.getElementById(id);
- e.setAttribute('stroke',on?col:'#2c3a4a');on?e.classList.add('flow'):e.classList.remove('flow');}
+function set(id,t){document.getElementById(id).textContent=t;}
+function setNode(id,valid,a){set(id,valid?a.toFixed(1)+'A':'--');}
+function setLine(id,mode,col){var e=document.getElementById(id);e.classList.remove('flow','flowrev');
+ if(!mode){e.setAttribute('stroke','#2c3a4a');return;}e.setAttribute('stroke',col);
+ e.classList.add(mode==1?'flow':'flowrev');}
+function ttgStr(m){return m>=6000?Math.round(m/60)+'h':Math.round(m)+'m';}
 async function tick(){
  let p; try{p=await(await fetch('/api/panel')).json();}catch(e){return;}
  var b=p.battery,soc=b.valid?b.soc:0;
- document.getElementById('soc').textContent=b.valid?Math.round(soc)+'%':'--';
- document.getElementById('bv').textContent=b.valid?b.v.toFixed(2):'--';
- document.getElementById('ba').textContent=b.valid?(b.a>=0?'+':'')+b.a.toFixed(1):'--';
- var h=Math.max(0,Math.min(1,soc/100))*86,f=document.getElementById('fill');
- f.setAttribute('y',204-h);f.setAttribute('height',h);
+ set('soc',b.valid?Math.round(soc)+'%':'--');
+ set('dV',b.valid?b.v.toFixed(2)+' V':'--');
+ set('dA',b.valid?(b.a>=0?'+':'')+b.a.toFixed(1)+' A':'--');
+ set('dAh',b.consumed_valid?b.consumed.toFixed(1)+' Ah used':'-- Ah');
+ set('dStarter',b.starter_valid?'Starter '+b.starter_v.toFixed(2)+' V':'Starter --');
+ set('dTTG',b.ttg_valid?'TTG '+ttgStr(b.ttg):'TTG ∞');
+ var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');
+ f.setAttribute('y',242-h);f.setAttribute('height',h);
  var col=p.mode=='charging'?'#34d399':p.mode=='discharging'?'#f87171':'#7d8da1';
  document.getElementById('batt').setAttribute('stroke',col);f.setAttribute('fill',col);
- var m=document.getElementById('mode');m.textContent=p.mode;m.style.color=col;
- setLine('lineSolar',p.solar.valid&&p.solar.a>0.05,'#34d399');
- document.getElementById('solarTxt').textContent=p.solar.valid?p.solar.a.toFixed(1)+'A':'--';
- setLine('lineDcdc',p.dcdc.valid&&p.dcdc.out_a>0.05,'#34d399');
- document.getElementById('dcdcTxt').textContent=p.dcdc.valid?p.dcdc.out_a.toFixed(1)+'A':'--';
- setLine('lineLoad',p.load.valid&&p.load.a>0.05,'#fbbf24');
- document.getElementById('loadTxt').textContent=p.load.valid?p.load.a.toFixed(1)+'A':'--';
+ var mb=document.getElementById('modeBanner');mb.textContent=p.mode.toUpperCase();
+ mb.style.color=col;mb.style.borderColor=col;
+ setLine('lineSolar',(p.solar.valid&&p.solar.a>0.05)?1:0,'#34d399');
+ setNode('solarTxt',p.solar.valid,p.solar.a);
+ setLine('lineCharger',(p.charger.valid&&p.charger.a>0.05)?1:0,'#34d399');
+ setNode('chargerTxt',p.charger.valid,p.charger.a);
+ setLine('lineDcdc',(p.dcdc.valid&&p.dcdc.out_a>0.05)?1:0,'#34d399');
+ setNode('dcdcTxt',p.dcdc.valid,p.dcdc.out_a);
+ // battery<->load line follows charge/discharge: charging pulls UP into the
+ // battery (green), discharging pushes DOWN to the load (amber).
+ var lm=0,lc='#fbbf24';
+ if(b.valid){if(b.a>0.5){lm=2;lc='#34d399';}else if(b.a<-0.5){lm=1;lc='#fbbf24';}}
+ setLine('lineLoad',lm,lc);
+ set('loadTxt','Load '+(p.load.valid?p.load.a.toFixed(1)+'A':'--'));
 }
 setInterval(tick,1000);tick();
 </script>
@@ -365,7 +398,8 @@ static String bindingsPage() {
     String h = pageHead("/bindings");
     h += "<div class=card><h3>Panel signals</h3>"
          "<p class=muted>Tag which device field feeds each signal the mimic / "
-         "display uses. Load is derived if left unbound.</p>"
+         "display uses. Load can be set to <b>Derived</b> to compute it from the "
+         "solar / charger / DC-DC inputs minus net battery current.</p>"
          "<form method=post action=/bind>";
 
     for (size_t r = 0; r < sig::kRoleCount; ++r) {
@@ -374,6 +408,11 @@ static String bindingsPage() {
         h += "<div style='margin-bottom:.7em'><label>" + String(sig::roleLabel(role)) +
              "</label><select name=" + sig::roleKey(role) + " style='min-width:240px'>";
         h += "<option value=''>&mdash; none &mdash;</option>";
+        if (role == sig::Role::LoadA) {
+            bool sel = strcmp(cur.device, sig::kDerived) == 0;
+            h += String("<option value='(derived)|0'") + (sel ? " selected" : "") +
+                 ">Derived (computed)</option>";
+        }
         for (size_t i = 0; i < gConfig.count(); ++i) {
             DeviceSlot& s = gConfig.slots()[i];
             sig::Field fields[8];

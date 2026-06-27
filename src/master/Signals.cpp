@@ -11,8 +11,12 @@ const char* roleKey(Role r) {
         case Role::BatterySOC: return "battery_soc";
         case Role::BatteryV: return "battery_v";
         case Role::BatteryA: return "battery_a";
+        case Role::BatteryConsumed: return "battery_consumed";
+        case Role::BatteryStarterV: return "battery_starter_v";
+        case Role::BatteryTTG: return "battery_ttg";
         case Role::SolarA: return "solar_a";
         case Role::SolarW: return "solar_w";
+        case Role::ChargerA: return "charger_a";
         case Role::DcDcInA: return "dcdc_in_a";
         case Role::DcDcOutA: return "dcdc_out_a";
         case Role::LoadA: return "load_a";
@@ -25,8 +29,12 @@ const char* roleLabel(Role r) {
         case Role::BatterySOC: return "Battery SOC";
         case Role::BatteryV: return "Battery Voltage";
         case Role::BatteryA: return "Battery Current";
+        case Role::BatteryConsumed: return "Battery Consumed (Ah)";
+        case Role::BatteryStarterV: return "Starter Voltage";
+        case Role::BatteryTTG: return "Time to Go";
         case Role::SolarA: return "Solar Current";
         case Role::SolarW: return "Solar Power";
+        case Role::ChargerA: return "Charger Current";
         case Role::DcDcInA: return "DC-DC Input Current";
         case Role::DcDcOutA: return "DC-DC Output Current";
         case Role::LoadA: return "Load Current";
@@ -115,13 +123,13 @@ Resolved resolveField(DeviceSlot* slots, size_t n, const char* device, Field f,
 // ---- SignalMap (NVS) -------------------------------------------------------
 
 namespace {
-const char* kNamespace = "vicsig";
+const char* kNamespace = "vicsig2";  // bumped: role set changed (index-keyed)
 }
 
 void SignalMap::begin(DeviceSlot* slots, size_t n) {
     load();
     bool any = false;
-    for (size_t i = 0; i < kRoleCount; ++i) if (b_[i].bound()) any = true;
+    for (size_t i = 0; i < kRoleCount; ++i) if (b_[i].device[0] != '\0') any = true;
     if (!any) {
         seedDefaults(slots, n);
         save();
@@ -174,11 +182,16 @@ void SignalMap::seedDefaults(DeviceSlot* slots, size_t n) {
         set(Role::BatterySOC, bmv, Field::BattSOC);
         set(Role::BatteryV, bmv, Field::BattV);
         set(Role::BatteryA, bmv, Field::BattA);
+        set(Role::BatteryConsumed, bmv, Field::BattConsumed);
+        set(Role::BatteryStarterV, bmv, Field::BattAuxStarterV);
+        set(Role::BatteryTTG, bmv, Field::BattTTG);
     }
     if (orion) {
         set(Role::DcDcInA, orion, Field::DcDcInA);
         set(Role::DcDcOutA, orion, Field::DcDcOutA);
     }
+    // Load is computed from sources - net battery current by default.
+    set(Role::LoadA, kDerived, Field::None);
 }
 
 }  // namespace sig
