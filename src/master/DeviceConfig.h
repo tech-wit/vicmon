@@ -21,6 +21,8 @@ public:
     DeviceSlot* slots() { return slots_; }
 
     bool add(const char* name, victron::Record type, const uint8_t key[16]);
+    // Update device at index. Pass key=nullptr to keep the existing key.
+    bool update(size_t idx, const char* name, victron::Record type, const uint8_t* key);
     bool remove(const char* name);
     void save();
 

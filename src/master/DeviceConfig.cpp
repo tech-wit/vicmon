@@ -87,6 +87,17 @@ bool DeviceConfig::add(const char* name, victron::Record type, const uint8_t key
     return true;
 }
 
+bool DeviceConfig::update(size_t idx, const char* name, victron::Record type,
+                          const uint8_t* key) {
+    if (idx >= count_ || name == nullptr || name[0] == '\0') return false;
+    DeviceSlot& s = slots_[idx];
+    strncpy(s.name, name, sizeof(s.name) - 1);
+    s.name[sizeof(s.name) - 1] = '\0';
+    s.type = type;
+    if (key != nullptr) memcpy(s.key, key, 16);
+    return true;
+}
+
 bool DeviceConfig::remove(const char* name) {
     for (size_t i = 0; i < count_; ++i) {
         if (strncmp(slots_[i].name, name, sizeof(slots_[i].name)) == 0) {
