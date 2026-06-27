@@ -229,6 +229,7 @@ label{font-size:.8em;color:var(--muted);display:block;margin-bottom:.2em}
 form.inline{display:flex;gap:.6em;flex-wrap:wrap;align-items:end;margin:0}
 .banner{text-align:center;font-weight:700;letter-spacing:.18em;padding:.5em;
 border:1px solid #2c3a4a;border-radius:10px;margin-top:.6em;color:var(--muted)}
+.legend{font-size:.8em;display:flex;gap:1em;flex-wrap:wrap;margin-top:.5em}
 line{stroke-width:4;stroke-linecap:round;fill:none}
 .flow{stroke-dasharray:7 7;animation:dash 1s linear infinite}
 .flowrev{stroke-dasharray:7 7;animation:dashrev 1s linear infinite}
@@ -270,6 +271,11 @@ static const char kMimicPage[] = R"HTML(
 </svg>
 <div id="modeBanner" class="banner">--</div>
 </div>
+<div class=card>
+  <h3 style="margin-top:0">Trend &middot; last 3 min</h3>
+  <canvas id="chart" width="680" height="150" style="width:100%;height:150px"></canvas>
+  <div id="legend" class="legend"></div>
+</div>
 <script>
 function set(id,t){document.getElementById(id).textContent=t;}
 function setNode(id,valid,a){set(id,valid?a.toFixed(1)+'A':'--');}
@@ -300,11 +306,47 @@ async function tick(){
  setNode('dcdcTxt',p.dcdc.valid,p.dcdc.out_a);
  // battery<->load line follows charge/discharge: charging pulls UP into the
  // battery (green), discharging pushes DOWN to the load (amber).
- var lm=0,lc='#fbbf24';
- if(b.valid){if(b.a>0.5){lm=2;lc='#34d399';}else if(b.a<-0.5){lm=1;lc='#fbbf24';}}
+ var ba=b.valid?b.a:0,lm=0,lc='#fbbf24',lbl='Load',val='--';
+ if(b.valid&&ba>0.5){           // charging
+   lm=2;lc='#34d399';
+   if(p.load.valid&&p.load.a>0.05){val=p.load.a.toFixed(1)+'A';}  // real load known
+   else{lbl='Charge';val=ba.toFixed(1)+'A';}                      // show charge rate
+ }else if(b.valid&&ba<-0.5){    // discharging
+   lm=1;lc='#fbbf24';
+   val=(p.load.valid?p.load.a:Math.abs(ba)).toFixed(1)+'A';
+ }else if(p.load.valid){val=p.load.a.toFixed(1)+'A';}
  setLine('lineLoad',lm,lc);
- set('loadTxt','Load '+(p.load.valid?p.load.a.toFixed(1)+'A':'--'));
+ set('loadTxt',lbl+' '+val);
+ pushHist(p);drawChart();
 }
+var SERIES=[
+ {k:'battery',label:'Battery',color:'#22d3ee',get:function(p){return p.battery.valid?p.battery.a:null;}},
+ {k:'solar',label:'Solar',color:'#facc15',get:function(p){return p.solar.valid?p.solar.a:null;}},
+ {k:'charger',label:'Charger',color:'#60a5fa',get:function(p){return p.charger.valid?p.charger.a:null;}},
+ {k:'dcdc',label:'DC-DC',color:'#a78bfa',get:function(p){return p.dcdc.valid?p.dcdc.out_a:null;}},
+ {k:'load',label:'Load',color:'#f87171',get:function(p){return p.load.valid?p.load.a:null;}}
+];
+var MAXN=180,hist={};SERIES.forEach(function(s){hist[s.k]=[];});
+function pushHist(p){SERIES.forEach(function(s){var v=s.get(p);hist[s.k].push(v);
+ if(hist[s.k].length>MAXN)hist[s.k].shift();});}
+function drawChart(){
+ var c=document.getElementById('chart');if(!c||!c.getContext)return;
+ var ctx=c.getContext('2d'),W=c.width,H=c.height,pad=6;ctx.clearRect(0,0,W,H);
+ var mn=0,mx=0;SERIES.forEach(function(s){hist[s.k].forEach(function(v){
+  if(v!=null){if(v<mn)mn=v;if(v>mx)mx=v;}});});
+ if(mx-mn<1)mx=mn+1;
+ function Y(v){return H-pad-(H-2*pad)*((v-mn)/(mx-mn));}
+ function X(idx){return pad+(W-2*pad)*(idx/(MAXN-1));}
+ ctx.strokeStyle='#2c3a4a';ctx.lineWidth=1;ctx.beginPath();
+ ctx.moveTo(pad,Y(0));ctx.lineTo(W-pad,Y(0));ctx.stroke();
+ SERIES.forEach(function(s){var a=hist[s.k],off=MAXN-a.length;
+  ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();var started=false;
+  for(var i=0;i<a.length;i++){var v=a[i];if(v==null){started=false;continue;}
+   var x=X(off+i),y=Y(v);if(started)ctx.lineTo(x,y);else{ctx.moveTo(x,y);started=true;}}
+  ctx.stroke();});
+}
+document.getElementById('legend').innerHTML=SERIES.map(function(s){
+ return '<span style="color:'+s.color+'">&#9632; '+s.label+'</span>';}).join('');
 setInterval(tick,1000);tick();
 </script>
 )HTML";
