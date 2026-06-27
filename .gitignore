@@ -1,0 +1,6 @@
+.pio/
+.piovenv/
+.vscode/
+*.o
+*.elf
+*.bin
