@@ -72,7 +72,7 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
 }
 
 static void pollBle() {
-    NimBLEScanResults results = gScan->start(3 /*seconds*/, false);
+    NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
     for (int i = 0; i < results.getCount(); ++i) {
         NimBLEAdvertisedDevice d = results.getDevice(i);
         ingest(&d);
@@ -202,7 +202,7 @@ void setup() {
     Serial.printf("Loaded %u device(s) from NVS\n", (unsigned)gConfig.count());
 
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(kApSsid, kApPass);
+    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
     IPAddress ip = WiFi.softAPIP();
     Serial.printf("AP '%s' up at http://%s/  (pass: %s)\n", kApSsid,
                   ip.toString().c_str(), kApPass);
@@ -213,8 +213,11 @@ void setup() {
     NimBLEDevice::init("");
     gScan = NimBLEDevice::getScan();
     gScan->setActiveScan(false);
-    gScan->setInterval(100);
-    gScan->setWindow(99);
+    // Keep BLE duty cycle low so the WiFi AP gets enough radio airtime to stay
+    // joinable (window/interval ~= 30%). Victron advertises ~1/s, so this still
+    // catches every device.
+    gScan->setInterval(160);
+    gScan->setWindow(48);
 }
 
 void loop() {
