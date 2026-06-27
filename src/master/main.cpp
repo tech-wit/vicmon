@@ -221,28 +221,29 @@ line{stroke-width:4;stroke-linecap:round;fill:none}
 .flow{stroke-dasharray:7 7;animation:dash 1s linear infinite}
 @keyframes dash{to{stroke-dashoffset:-14}}
 svg text{fill:#e6edf3;font-family:system-ui,sans-serif}
+svg text.muted{fill:var(--muted)}
 .muted{color:var(--muted)}
 )CSS";
 
 static const char kMimicPage[] = R"HTML(
 <div class=card>
-<svg viewBox="0 0 320 340" id=mimic style="width:100%;max-width:420px;display:block;margin:auto">
-  <line id=lineSolar x1=75 y1=72 x2=140 y2=128 stroke=#2c3a4a/>
-  <line id=lineDcdc  x1=245 y1=72 x2=180 y2=128 stroke=#2c3a4a/>
-  <line id=lineLoad  x1=160 y1=205 x2=160 y2=278 stroke=#2c3a4a/>
-  <rect x=130 y=115 width=60 height=92 rx=9 fill=#0d1620 stroke=#2c3a4a stroke-width=3/>
-  <rect id=fill x=133 y=204 width=54 height=0 fill=#34d399 opacity=.85/>
-  <rect id=batt x=130 y=115 width=60 height=92 rx=9 fill=none stroke=#7d8da1 stroke-width=3/>
-  <rect x=147 y=110 width=26 height=7 rx=2 fill=#7d8da1/>
-  <text id=soc x=160 y=167 text-anchor=middle font-size=21 font-weight=700>--</text>
-  <text x=55 y=40 text-anchor=middle font-size=24>&#9728;&#65039;</text>
-  <text x=55 y=60 text-anchor=middle font-size=11 class=muted>Solar</text>
-  <text id=solarTxt x=55 y=92 text-anchor=middle font-size=14>--</text>
-  <text x=265 y=40 text-anchor=middle font-size=24>&#9889;</text>
-  <text x=265 y=60 text-anchor=middle font-size=11 class=muted>DC-DC</text>
-  <text id=dcdcTxt x=265 y=92 text-anchor=middle font-size=14>--</text>
-  <text x=160 y=305 text-anchor=middle font-size=24>&#128161;</text>
-  <text id=loadTxt x=160 y=330 text-anchor=middle font-size=14>--</text>
+<svg viewBox="0 0 320 340" id="mimic" style="width:100%;max-width:420px;display:block;margin:auto">
+  <line id="lineSolar" x1="75" y1="72" x2="140" y2="128" stroke="#2c3a4a" />
+  <line id="lineDcdc" x1="245" y1="72" x2="180" y2="128" stroke="#2c3a4a" />
+  <line id="lineLoad" x1="160" y1="205" x2="160" y2="278" stroke="#2c3a4a" />
+  <rect x="130" y="115" width="60" height="92" rx="9" fill="#0d1620" stroke="#2c3a4a" stroke-width="3" />
+  <rect id="fill" x="133" y="204" width="54" height="0" fill="#34d399" opacity="0.85" />
+  <rect id="batt" x="130" y="115" width="60" height="92" rx="9" fill="none" stroke="#7d8da1" stroke-width="3" />
+  <rect x="147" y="110" width="26" height="7" rx="2" fill="#7d8da1" />
+  <text id="soc" x="160" y="167" text-anchor="middle" font-size="21" font-weight="700">--</text>
+  <text x="55" y="40" text-anchor="middle" font-size="24">&#9728;&#65039;</text>
+  <text x="55" y="60" text-anchor="middle" font-size="11" class="muted">Solar</text>
+  <text id="solarTxt" x="55" y="92" text-anchor="middle" font-size="14">--</text>
+  <text x="265" y="40" text-anchor="middle" font-size="24">&#9889;</text>
+  <text x="265" y="60" text-anchor="middle" font-size="11" class="muted">DC-DC</text>
+  <text id="dcdcTxt" x="265" y="92" text-anchor="middle" font-size="14">--</text>
+  <text x="160" y="305" text-anchor="middle" font-size="24">&#128161;</text>
+  <text id="loadTxt" x="160" y="330" text-anchor="middle" font-size="14">--</text>
 </svg>
 <div class=stats>
   <div class=stat><b id=bv>--</b><span>VOLTS</span></div>
