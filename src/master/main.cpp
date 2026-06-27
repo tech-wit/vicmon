@@ -1,7 +1,7 @@
 // Master firmware (headless dev build on AtomS3; Guition display added in
-// Phase 3). Scans Victron BLE advertisements, keeps a registry of the latest
-// values, and serves them over a WiFi access point:
-//   - captive config portal (root page)
+// Phase 3). Scans Victron BLE advertisements, keeps an NVS-backed registry of
+// devices and their latest values, and serves them over a WiFi access point:
+//   - captive config portal (root page): add/list/remove devices + live data
 //   - GET /api/data  -> JSON snapshot for slaves / debugging
 //
 // Build/flash:  pio run -e atoms3 -t upload   (then tools/monitor.py)
@@ -14,32 +14,33 @@
 
 #include <string>
 
+#include "DeviceConfig.h"
 #include "Registry.h"
 #include "VictronDecrypt.h"
 #include "VictronParser.h"
 #include "VictronTypes.h"
 
-// ---- Configuration ---------------------------------------------------------
-
 static const char* kApSsid = "Vicmon-Master";
 static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
 
-// Monitored devices (name, type, AES key). Phase 2 will load these from NVS.
-static DeviceSlot gDevices[] = {
-    {"BMV", victron::Record::BatteryMonitor,
-     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
-    {"OrionXS", victron::Record::OrionXs,
-     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
-};
-static const size_t kNumDevices = sizeof(gDevices) / sizeof(gDevices[0]);
-
-// ---- Globals ---------------------------------------------------------------
-
+static DeviceConfig gConfig;
 static NimBLEScan* gScan = nullptr;
 static AsyncWebServer gServer(80);
 static DNSServer gDns;
+
+// ---- type <-> string helpers ----------------------------------------------
+
+static victron::Record parseType(const String& t) {
+    if (t == "dcdc") return victron::Record::OrionXs;
+    return victron::Record::BatteryMonitor;
+}
+static const char* typeName(victron::Record r) {
+    switch (r) {
+        case victron::Record::OrionXs: return "dcdc";
+        case victron::Record::BatteryMonitor: return "battery";
+        default: return "?";
+    }
+}
 
 // ---- BLE ingestion ---------------------------------------------------------
 
@@ -54,8 +55,8 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
     size_t extraLen = md.size() - 2;
 
     uint8_t out[32];
-    for (size_t i = 0; i < kNumDevices; ++i) {
-        DeviceSlot& s = gDevices[i];
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        DeviceSlot& s = gConfig.slots()[i];
         int n = victron::decrypt(extra, extraLen, s.key, out, sizeof(out));
         if (n < 0) continue;  // not this device's key
 
@@ -81,14 +82,14 @@ static void pollBle() {
 
 // ---- API / portal ----------------------------------------------------------
 
-// Builds the aggregated snapshot shared by GET /api/data and the root page.
 static String buildJson() {
     uint32_t now = millis();
     const DeviceSlot* bmv = nullptr;
     const DeviceSlot* orion = nullptr;
-    for (size_t i = 0; i < kNumDevices; ++i) {
-        if (gDevices[i].type == victron::Record::BatteryMonitor) bmv = &gDevices[i];
-        else if (gDevices[i].type == victron::Record::OrionXs) orion = &gDevices[i];
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        DeviceSlot& s = gConfig.slots()[i];
+        if (s.type == victron::Record::BatteryMonitor) bmv = &s;
+        else if (s.type == victron::Record::OrionXs) orion = &s;
     }
 
     String j = "{";
@@ -113,25 +114,80 @@ static String buildJson() {
     return j;
 }
 
-static void handleRoot(AsyncWebServerRequest* req) {
-    String html = "<!doctype html><html><head><meta name=viewport "
-                  "content='width=device-width,initial-scale=1'>"
-                  "<title>Vicmon Master</title></head><body style='font-family:sans-serif'>"
-                  "<h2>Vicmon Master</h2><pre id=d>loading...</pre>"
-                  "<script>setInterval(async()=>{let r=await fetch('/api/data');"
-                  "document.getElementById('d').textContent="
-                  "JSON.stringify(await r.json(),null,2);},1000);</script>"
-                  "</body></html>";
-    req->send(200, "text/html", html);
+static String rootPage() {
+    uint32_t now = millis();
+    String h =
+        "<!doctype html><html><head><meta name=viewport "
+        "content='width=device-width,initial-scale=1'><title>Vicmon Master</title>"
+        "<style>body{font-family:sans-serif;margin:1em}table{border-collapse:collapse}"
+        "td,th{border:1px solid #ccc;padding:4px 8px}</style></head><body>"
+        "<h2>Vicmon Master</h2>";
+
+    h += "<h3>Devices</h3><table><tr><th>Name</th><th>Type</th><th>State</th><th></th></tr>";
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        DeviceSlot& s = gConfig.slots()[i];
+        h += "<tr><td>" + String(s.name) + "</td><td>" + typeName(s.type) + "</td><td>";
+        if (s.stale(now)) {
+            h += "stale";
+        } else if (s.type == victron::Record::BatteryMonitor) {
+            h += String(s.battery.soc, 1) + "% " + String(s.battery.voltage, 2) + "V";
+        } else if (s.type == victron::Record::OrionXs) {
+            h += "out " + String(s.dcdc.outputVoltage, 2) + "V";
+        } else {
+            h += "ok";
+        }
+        h += "</td><td><form method=post action=/del style=margin:0>"
+             "<input type=hidden name=name value='" + String(s.name) + "'>"
+             "<button>delete</button></form></td></tr>";
+    }
+    h += "</table>";
+
+    h += "<h3>Add device</h3><form method=post action=/add>"
+         "Name <input name=name required> "
+         "Type <select name=type><option value=battery>battery</option>"
+         "<option value=dcdc>dcdc</option></select> "
+         "Key (32 hex) <input name=key pattern='[0-9a-fA-F]{32}' size=34 required> "
+         "<button>add</button></form>";
+
+    h += "<h3>Live JSON</h3><pre id=d>loading...</pre>"
+         "<script>setInterval(async()=>{let r=await fetch('/api/data');"
+         "document.getElementById('d').textContent=JSON.stringify(await r.json(),null,2);"
+         "},1000);</script></body></html>";
+    return h;
+}
+
+static void handleAdd(AsyncWebServerRequest* req) {
+    String name = req->hasParam("name", true) ? req->getParam("name", true)->value() : "";
+    String type = req->hasParam("type", true) ? req->getParam("type", true)->value() : "";
+    String key = req->hasParam("key", true) ? req->getParam("key", true)->value() : "";
+    uint8_t k[16];
+    if (name.length() && DeviceConfig::parseHexKey(key, k)) {
+        gConfig.add(name.c_str(), parseType(type), k);
+        gConfig.save();
+    }
+    req->redirect("/");
+}
+
+static void handleDel(AsyncWebServerRequest* req) {
+    if (req->hasParam("name", true)) {
+        gConfig.remove(req->getParam("name", true)->value().c_str());
+        gConfig.save();
+    }
+    req->redirect("/");
 }
 
 static void setupServer() {
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildJson());
     });
-    gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) { handleRoot(req); });
-    // Captive-portal: send everything else to the root page.
-    gServer.onNotFound([](AsyncWebServerRequest* req) { handleRoot(req); });
+    gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", rootPage());
+    });
+    gServer.on("/add", HTTP_POST, handleAdd);
+    gServer.on("/del", HTTP_POST, handleDel);
+    gServer.onNotFound([](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", rootPage());  // captive portal
+    });
     gServer.begin();
 }
 
@@ -142,13 +198,16 @@ void setup() {
     delay(300);
     Serial.println("\nVicmon Master (headless): BLE + WiFi AP");
 
+    gConfig.begin();
+    Serial.printf("Loaded %u device(s) from NVS\n", (unsigned)gConfig.count());
+
     WiFi.mode(WIFI_AP);
     WiFi.softAP(kApSsid, kApPass);
     IPAddress ip = WiFi.softAPIP();
     Serial.printf("AP '%s' up at http://%s/  (pass: %s)\n", kApSsid,
                   ip.toString().c_str(), kApPass);
 
-    gDns.start(53, "*", ip);  // captive portal: resolve all names to us
+    gDns.start(53, "*", ip);
     setupServer();
 
     NimBLEDevice::init("");
@@ -164,8 +223,8 @@ void loop() {
 
     uint32_t now = millis();
     Serial.print("[state]");
-    for (size_t i = 0; i < kNumDevices; ++i) {
-        const DeviceSlot& s = gDevices[i];
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        const DeviceSlot& s = gConfig.slots()[i];
         Serial.printf(" %s=%s", s.name, s.stale(now) ? "stale" : "ok");
         if (!s.stale(now) && s.type == victron::Record::BatteryMonitor) {
             Serial.printf("(%.1f%%,%.2fV)", s.battery.soc, s.battery.voltage);

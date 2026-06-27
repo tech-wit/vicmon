@@ -7,9 +7,9 @@
 // when they were last refreshed. (Phase 2 will move the key list into NVS via
 // the config portal; for now it is seeded from a static table.)
 struct DeviceSlot {
-    const char* name;
-    victron::Record type;
-    uint8_t key[16];
+    char name[20] = {0};
+    victron::Record type = victron::Record::Unknown;
+    uint8_t key[16] = {0};
 
     bool everSeen = false;
     uint32_t lastSeenMs = 0;
