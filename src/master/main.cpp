@@ -82,6 +82,15 @@ static void pollBle() {
 
 // ---- API / portal ----------------------------------------------------------
 
+// Derives overall system status from battery current (charge positive).
+static const char* systemStatus(const DeviceSlot* bmv, uint32_t now) {
+    if (!bmv || bmv->stale(now) || !bmv->battery.currentValid) return "unknown";
+    float i = bmv->battery.current;
+    if (i > 0.5f) return "charging";
+    if (i < -0.5f) return "discharging";
+    return "idle";
+}
+
 static String buildJson() {
     uint32_t now = millis();
     const DeviceSlot* bmv = nullptr;
@@ -93,6 +102,7 @@ static String buildJson() {
     }
 
     String j = "{";
+    j += "\"system_status\":\"" + String(systemStatus(bmv, now)) + "\",";
     if (bmv && !bmv->stale(now)) {
         j += "\"battery_soc\":" + String(bmv->battery.soc, 1) + ",";
         j += "\"battery_voltage\":" + String(bmv->battery.voltage, 2) + ",";
@@ -122,6 +132,12 @@ static String rootPage() {
         "<style>body{font-family:sans-serif;margin:1em}table{border-collapse:collapse}"
         "td,th{border:1px solid #ccc;padding:4px 8px}</style></head><body>"
         "<h2>Vicmon Master</h2>";
+
+    const DeviceSlot* bmv = nullptr;
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        if (gConfig.slots()[i].type == victron::Record::BatteryMonitor) bmv = &gConfig.slots()[i];
+    }
+    h += "<p><b>Status:</b> " + String(systemStatus(bmv, now)) + "</p>";
 
     h += "<h3>Devices</h3><table><tr><th>Name</th><th>Type</th><th>State</th><th></th></tr>";
     for (size_t i = 0; i < gConfig.count(); ++i) {
