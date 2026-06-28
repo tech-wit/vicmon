@@ -11,6 +11,9 @@ struct DeviceSlot {
     victron::Record type = victron::Record::Unknown;
     uint8_t key[16] = {0};
 
+    char mac[20] = {0};     // learned from the matching advertisement
+    char btname[24] = {0};  // learned BLE friendly name, if advertised
+
     bool everSeen = false;
     uint32_t lastSeenMs = 0;
     victron::BatteryData battery;  // valid when type == BatteryMonitor

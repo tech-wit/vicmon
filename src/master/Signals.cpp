@@ -122,7 +122,9 @@ Resolved resolveField(DeviceSlot* slots, size_t n, const char* device, Field f,
     for (size_t i = 0; i < n; ++i) {
         if (strncmp(slots[i].name, device, sizeof(slots[i].name)) == 0) { s = &slots[i]; break; }
     }
-    if (s == nullptr || s->stale(now)) return r;
+    // Hold the last cached value for a few minutes after the last sighting so
+    // the mimic/chart show last-known data instead of blanking on brief gaps.
+    if (s == nullptr || !s->everSeen || (now - s->lastSeenMs) > 300000) return r;
 
     const victron::BatteryData& b = s->battery;
     const victron::DcDcData& d = s->dcdc;

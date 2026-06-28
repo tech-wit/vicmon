@@ -90,12 +90,15 @@ static void noteDiscovered(const char* mac, const char* name, uint16_t model, in
     }
 }
 
+static int gScanVictron = 0, gScanDecoded = 0;  // per-scan diagnostics
+
 static void ingest(NimBLEAdvertisedDevice* dev) {
     if (!dev->haveManufacturerData()) return;
     std::string md = dev->getManufacturerData();
     if (md.size() < 2 + 9) return;
     const uint8_t* p = reinterpret_cast<const uint8_t*>(md.data());
     if (!(p[0] == 0xE1 && p[1] == 0x02)) return;  // Victron company id
+    ++gScanVictron;
 
     const uint8_t* extra = p + 2;
     size_t extraLen = md.size() - 2;
@@ -123,6 +126,10 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
         }
         s.everSeen = true;
         s.lastSeenMs = millis();
+        ++gScanDecoded;
+        strncpy(s.mac, dev->getAddress().toString().c_str(), sizeof(s.mac) - 1);
+        if (dev->getName().size())
+            strncpy(s.btname, dev->getName().c_str(), sizeof(s.btname) - 1);
         return;
     }
     // No configured key matched -> a device we could adopt.
@@ -131,6 +138,8 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
 }
 
 static void pollBle() {
+    gScanVictron = 0;
+    gScanDecoded = 0;
     NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
     for (int i = 0; i < results.getCount(); ++i) {
         NimBLEAdvertisedDevice d = results.getDevice(i);
@@ -423,6 +432,7 @@ td,th{padding:.5em;border-bottom:1px solid var(--line);text-align:left;font-size
 button{background:var(--accent);color:#06121a;border:0;border-radius:8px;padding:.45em .8em;font-weight:600;cursor:pointer}
 button.danger{background:var(--red);color:#1a0606}
 button.ghost{background:transparent;color:var(--muted);border:1px solid #2c3a4a}
+.winbtn.active{background:var(--accent);color:#06121a;border-color:var(--accent)}
 input,select{background:#0d1620;color:var(--fg);border:1px solid #2c3a4a;border-radius:8px;padding:.45em;font-size:.92em}
 label{font-size:.8em;color:var(--muted);display:block;margin-bottom:.2em}
 form.inline{display:flex;gap:.6em;flex-wrap:wrap;align-items:end;margin:0}
@@ -669,6 +679,9 @@ static String devicesPage() {
              String(s.name) + "</b><span class=muted style='font-size:.8em'>" + typeName(s.type) +
              "</span></div>";
         h += "<div style='margin:.25em 0;font-size:1.05em'>" + deviceSummary(s, now) + "</div>";
+        if (s.mac[0])
+            h += "<div class=muted style='font-size:.78em'>" + String(s.mac) +
+                 (s.btname[0] ? " &middot; " + String(s.btname) : "") + "</div>";
         h += "<details><summary class=muted style='cursor:pointer;font-size:.85em'>edit</summary>";
         h += "<form class=inline method=post action=/edit style='margin:.5em 0'>";
         h += "<input type=hidden name=idx value=" + String(i) + ">";
@@ -698,6 +711,13 @@ static String devicesPage() {
     size_t shown = 0;
     for (size_t i = 0; i < gDiscN; ++i) {
         if (now - gDisc[i].lastSeenMs > 30000) continue;  // only recently seen
+        bool configured = false;  // hide devices we've already adopted
+        for (size_t j = 0; j < gConfig.count(); ++j)
+            if (strncmp(gConfig.slots()[j].mac, gDisc[i].mac, sizeof(gDisc[i].mac)) == 0) {
+                configured = true;
+                break;
+            }
+        if (configured) continue;
         char model[8];
         snprintf(model, sizeof(model), "0x%04X", gDisc[i].model);
         String nm = gDisc[i].name[0] ? String(gDisc[i].name) : String("(unnamed)");
@@ -1017,7 +1037,9 @@ void setup() {
 
     NimBLEDevice::init("");
     gScan = NimBLEDevice::getScan();
-    gScan->setActiveScan(false);
+    // Active scan so we also receive scan responses, which carry the device's
+    // friendly name (Victron puts it there, not in the advertisement).
+    gScan->setActiveScan(true);
     // Keep BLE duty cycle low so the WiFi AP gets enough radio airtime to stay
     // joinable (window/interval ~= 30%). Victron advertises ~1/s.
     gScan->setInterval(160);
@@ -1030,7 +1052,7 @@ void loop() {
     sampleHistory();  // continuous logging, regardless of any connected client
 
     uint32_t now = millis();
-    Serial.print("[state]");
+    Serial.printf("[state] victron_adverts=%d decoded=%d |", gScanVictron, gScanDecoded);
     for (size_t i = 0; i < gConfig.count(); ++i) {
         const DeviceSlot& s = gConfig.slots()[i];
         Serial.printf(" %s=%s", s.name, s.stale(now) ? "stale" : "ok");
