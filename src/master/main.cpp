@@ -596,8 +596,7 @@ static String pageHead(const char* active) {
     struct {
         const char* href;
         const char* name;
-    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Settings"},
-                 {"/profiles", "Profiles"}, {"/wifi", "WiFi"}};
+    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Settings"}};
     for (auto& l : links) {
         h += "<a href='";
         h += l.href;
@@ -720,8 +719,12 @@ location.hash='#add';document.getElementById('addKey').focus();}</script>)JS";
     return h;
 }
 
+static String wifiCard();
+static String profilesCard();
+
 static String bindingsPage() {
     String h = pageHead("/bindings");
+    h += profilesCard();
     h += "<div class=card><h3>Panel signals</h3>"
          "<p class=muted>Tag which device field feeds each signal the mimic / "
          "display uses. Load can be set to <b>Derived</b> to compute it from the "
@@ -775,6 +778,7 @@ static String bindingsPage() {
          "<p class=muted>Capacity shows remaining Ah on the mimic. Currents within "
          "&plusmn;deadband read as <i>idle</i>.</p></div>";
 
+    h += wifiCard();
     h += pageFoot();
     return h;
 }
@@ -850,8 +854,7 @@ static void handleBind(AsyncWebServerRequest* req) {
     req->redirect("/bindings");
 }
 
-static String wifiPage() {
-    String h = pageHead("/wifi");
+static String wifiCard() {
     String status;
     if (gStaSsid.length()) {
         status = (WiFi.status() == WL_CONNECTED)
@@ -860,19 +863,17 @@ static String wifiPage() {
     } else {
         status = "<span class=muted>Not configured (AP only)</span>";
     }
-    h += "<div class=card><h3>Join a WiFi network</h3>"
-         "<p class=muted>The master always keeps its own <b>" + String(kApSsid) +
-         "</b> access point, and can additionally join an existing network (e.g. a "
-         "van router) so you can reach it there too.</p>"
-         "<p>Status: " + status + "</p>"
-         "<form class=inline method=post action=/wifi>"
-         "<div><label>SSID</label><input name=ssid value='" + gStaSsid + "' required></div>"
-         "<div><label>Password (blank = keep)</label><input name=pass type=password></div>"
-         "<button>save &amp; connect</button></form>"
-         "<form method=post action=/wifi style='margin-top:.6em'>"
-         "<input type=hidden name=ssid value=''><button class=ghost>forget</button></form></div>";
-    h += pageFoot();
-    return h;
+    return "<div class=card><h3>Join a WiFi network</h3>"
+           "<p class=muted>The master always keeps its own <b>" + String(kApSsid) +
+           "</b> access point, and can additionally join an existing network (e.g. a "
+           "van router) so you can reach it there too.</p>"
+           "<p>Status: " + status + "</p>"
+           "<form class=inline method=post action=/wifi>"
+           "<div><label>SSID</label><input name=ssid value='" + gStaSsid + "' required></div>"
+           "<div><label>Password (blank = keep)</label><input name=pass type=password></div>"
+           "<button>save &amp; connect</button></form>"
+           "<form method=post action=/wifi style='margin-top:.6em'>"
+           "<input type=hidden name=ssid value=''><button class=ghost>forget</button></form></div>";
 }
 
 static void handleWifi(AsyncWebServerRequest* req) {
@@ -881,7 +882,7 @@ static void handleWifi(AsyncWebServerRequest* req) {
         saveWifiCreds("", "");
         gStaSsid = ""; gStaPass = "";
         WiFi.disconnect();
-        req->redirect("/wifi");
+        req->redirect("/bindings");
         return;
     }
     if (pass.length() == 0) pass = gStaPass;  // keep existing when blank
@@ -889,12 +890,11 @@ static void handleWifi(AsyncWebServerRequest* req) {
     gStaSsid = ssid; gStaPass = pass;
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(gStaSsid.c_str(), gStaPass.c_str());
-    req->redirect("/wifi");
+    req->redirect("/bindings");
 }
 
-static String profilesPage() {
-    String h = pageHead("/profiles");
-    h += "<div class=card><h3>Profiles</h3>"
+static String profilesCard() {
+    String h = "<div class=card><h3>Profiles</h3>"
          "<p class=muted>Each profile has its own devices, signal bindings and "
          "settings (e.g. Home vs 4WD). Switching applies immediately.</p>";
     for (int i = 0; i < ProfileManager::kMax; ++i) {
@@ -925,7 +925,6 @@ static String profilesPage() {
     else
         h += "<p class=muted>Maximum profiles reached.</p>";
     h += "</div>";
-    h += pageFoot();
     return h;
 }
 
@@ -937,11 +936,11 @@ static void handleProfileSwitch(AsyncWebServerRequest* req) {
 static void handleProfileNew(AsyncWebServerRequest* req) {
     String name = param(req, "name");
     if (name.length()) gProfiles.create(name.c_str());
-    req->redirect("/profiles");
+    req->redirect("/bindings");
 }
 static void handleProfileRename(AsyncWebServerRequest* req) {
     gProfiles.rename(param(req, "id").toInt(), param(req, "name").c_str());
-    req->redirect("/profiles");
+    req->redirect("/bindings");
 }
 static void handleProfileDel(AsyncWebServerRequest* req) {
     int id = param(req, "id").toInt();
@@ -949,7 +948,7 @@ static void handleProfileDel(AsyncWebServerRequest* req) {
         wipeProfile(id);
         gProfiles.remove(id);
     }
-    req->redirect("/profiles");
+    req->redirect("/bindings");
 }
 
 static void setupServer() {
@@ -975,13 +974,7 @@ static void setupServer() {
         int mins = req->hasParam("mins") ? req->getParam("mins")->value().toInt() : 10;
         req->send(200, "application/json", buildHistoryJson(mins));
     });
-    gServer.on("/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", wifiPage());
-    });
     gServer.on("/wifi", HTTP_POST, handleWifi);
-    gServer.on("/profiles", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", profilesPage());
-    });
     gServer.on("/profile/switch", HTTP_POST, handleProfileSwitch);
     gServer.on("/profile/new", HTTP_POST, handleProfileNew);
     gServer.on("/profile/rename", HTTP_POST, handleProfileRename);
