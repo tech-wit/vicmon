@@ -21,6 +21,7 @@
 #include <string>
 
 #include "DeviceConfig.h"
+#include "Profiles.h"
 #include "Registry.h"
 #include "Signals.h"
 #include "VictronDecrypt.h"
@@ -32,6 +33,7 @@ static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the fie
 
 static DeviceConfig gConfig;
 static sig::SignalMap gSignals;
+static ProfileManager gProfiles;
 static NimBLEScan* gScan = nullptr;
 static AsyncWebServer gServer(80);
 static DNSServer gDns;
@@ -277,21 +279,47 @@ static String buildHistoryJson(int mins) {
 
 static float gBattCapacity = 0;     // Ah, 0 = unknown
 static float gDeadband = 0.2f;      // A; |current| below this reads as idle
-static void loadSettings() {
+static String settingsNs(int profile) {
+    return profile == 0 ? String("vicset") : "vicset" + String(profile);
+}
+static void loadSettings(int profile) {
     Preferences p;
-    p.begin("vicset", true);
+    p.begin(settingsNs(profile).c_str(), true);
     gBattCapacity = p.getFloat("battcap", 0);
     gDeadband = p.getFloat("deadband", 0.2f);
     p.end();
 }
 static void saveSettings(float capacity, float deadband) {
     Preferences p;
-    p.begin("vicset", false);
+    p.begin(settingsNs(gProfiles.active()).c_str(), false);
     p.putFloat("battcap", capacity);
     p.putFloat("deadband", deadband);
     p.end();
     gBattCapacity = capacity;
     gDeadband = deadband;
+}
+
+// Loads a profile's config/signals/settings and clears runtime caches so the
+// mimic, history and discovery don't mix data across profiles.
+static void applyProfile(int pid) {
+    gConfig.begin(pid);
+    gSignals.begin(gConfig.slots(), gConfig.count(), pid);
+    loadSettings(pid);
+    gDiscN = 0;
+    gHistCount = 0;
+    gHistHead = 0;
+    gLastSample = 0;
+}
+
+// Erases a profile's persisted data (devices / signals / settings).
+static void wipeProfile(int pid) {
+    String dns = pid == 0 ? String("vicmon") : "vicmon" + String(pid);
+    String sns = pid == 0 ? String("vicsig2") : "vicsig2_" + String(pid);
+    String tns = settingsNs(pid);
+    Preferences p;
+    p.begin(dns.c_str(), false); p.clear(); p.end();
+    p.begin(sns.c_str(), false); p.clear(); p.end();
+    p.begin(tns.c_str(), false); p.clear(); p.end();
 }
 
 static String gStaSsid, gStaPass;
@@ -478,7 +506,10 @@ async function tick(){
  else if(b.consumed_valid){set('dAh',Math.abs(b.consumed).toFixed(1)+' Ah used');}
  else set('dAh','-- Ah');
  set('dStarter',b.starter_valid?'Starter '+b.starter_v.toFixed(2)+' V':'Starter --');
- set('dTTG',b.ttg_valid?'TTG '+ttgStr(b.ttg):'TTG ∞');
+ if(p.mode=='charging'&&b.capacity>0&&b.valid&&b.a>0.05){
+  var mins=(b.capacity*(1-b.soc/100))/b.a*60;set('dTTG','Full '+ttgStr(mins));}
+ else if(b.ttg_valid)set('dTTG','TTG '+ttgStr(b.ttg));
+ else set('dTTG','TTG ∞');
  var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');
  f.setAttribute('y',242-h);f.setAttribute('height',h);
  var col=p.mode=='charging'?'#34d399':p.mode=='discharging'?'#f87171':'#7d8da1';
@@ -559,12 +590,14 @@ static String pageHead(const char* active) {
     String h = F("<!doctype html><html><head><meta charset=utf-8>"
                  "<meta name=viewport content='width=device-width,initial-scale=1'>"
                  "<title>Vicmon</title><link rel=stylesheet href=/style.css></head><body>"
-                 "<header><h1>VICMON</h1><nav>");
+                 "<header><h1>VICMON</h1>");
+    h += "<span class=muted style='font-size:.8em'>" + String(gProfiles.name(gProfiles.active())) +
+         "</span><nav>";
     struct {
         const char* href;
         const char* name;
     } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Settings"},
-                 {"/wifi", "WiFi"}};
+                 {"/profiles", "Profiles"}, {"/wifi", "WiFi"}};
     for (auto& l : links) {
         h += "<a href='";
         h += l.href;
@@ -764,6 +797,8 @@ static void handleAdd(AsyncWebServerRequest* req) {
     if (name.length() && DeviceConfig::parseHexKey(key, k)) {
         gConfig.add(name.c_str(), parseType(type), k);
         gConfig.save();
+        // Auto-bind sensible defaults if this profile has no bindings yet.
+        gSignals.begin(gConfig.slots(), gConfig.count(), gProfiles.active());
     }
     req->redirect("/devices");
 }
@@ -857,6 +892,66 @@ static void handleWifi(AsyncWebServerRequest* req) {
     req->redirect("/wifi");
 }
 
+static String profilesPage() {
+    String h = pageHead("/profiles");
+    h += "<div class=card><h3>Profiles</h3>"
+         "<p class=muted>Each profile has its own devices, signal bindings and "
+         "settings (e.g. Home vs 4WD). Switching applies immediately.</p>";
+    for (int i = 0; i < ProfileManager::kMax; ++i) {
+        if (!gProfiles.used(i)) continue;
+        bool act = (i == gProfiles.active());
+        h += "<div style='padding:.5em 0;border-bottom:1px solid var(--line);display:flex;"
+             "gap:.5em;align-items:center;flex-wrap:wrap'>";
+        h += "<b style='flex:1'>" + String(gProfiles.name(i)) +
+             (act ? " <span class=muted>(active)</span>" : "") + "</b>";
+        if (!act)
+            h += "<form method=post action=/profile/switch style='margin:0'>"
+                 "<input type=hidden name=id value=" + String(i) + "><button>switch</button></form>";
+        h += "<form class=inline method=post action=/profile/rename style='margin:0'>"
+             "<input type=hidden name=id value=" + String(i) + ">"
+             "<input name=name value='" + String(gProfiles.name(i)) + "' size=12>"
+             "<button class=ghost>rename</button></form>";
+        if (!act && gProfiles.usedCount() > 1)
+            h += "<form method=post action=/profile/del style='margin:0' "
+                 "onsubmit=\"return confirm('Delete this profile and all its data?')\">"
+                 "<input type=hidden name=id value=" + String(i) + ">"
+                 "<button class=danger>delete</button></form>";
+        h += "</div>";
+    }
+    if (gProfiles.usedCount() < ProfileManager::kMax)
+        h += "<form class=inline method=post action=/profile/new style='margin-top:.8em'>"
+             "<div><label>New profile name</label><input name=name required></div>"
+             "<button>create</button></form>";
+    else
+        h += "<p class=muted>Maximum profiles reached.</p>";
+    h += "</div>";
+    h += pageFoot();
+    return h;
+}
+
+static void handleProfileSwitch(AsyncWebServerRequest* req) {
+    gProfiles.setActive(param(req, "id").toInt());
+    applyProfile(gProfiles.active());
+    req->redirect("/");
+}
+static void handleProfileNew(AsyncWebServerRequest* req) {
+    String name = param(req, "name");
+    if (name.length()) gProfiles.create(name.c_str());
+    req->redirect("/profiles");
+}
+static void handleProfileRename(AsyncWebServerRequest* req) {
+    gProfiles.rename(param(req, "id").toInt(), param(req, "name").c_str());
+    req->redirect("/profiles");
+}
+static void handleProfileDel(AsyncWebServerRequest* req) {
+    int id = param(req, "id").toInt();
+    if (id != gProfiles.active()) {
+        wipeProfile(id);
+        gProfiles.remove(id);
+    }
+    req->redirect("/profiles");
+}
+
 static void setupServer() {
     gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/css", kStyle);
@@ -884,6 +979,13 @@ static void setupServer() {
         req->send(200, "text/html", wifiPage());
     });
     gServer.on("/wifi", HTTP_POST, handleWifi);
+    gServer.on("/profiles", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", profilesPage());
+    });
+    gServer.on("/profile/switch", HTTP_POST, handleProfileSwitch);
+    gServer.on("/profile/new", HTTP_POST, handleProfileNew);
+    gServer.on("/profile/rename", HTTP_POST, handleProfileRename);
+    gServer.on("/profile/del", HTTP_POST, handleProfileDel);
     gServer.on("/add", HTTP_POST, handleAdd);
     gServer.on("/edit", HTTP_POST, handleEdit);
     gServer.on("/del", HTTP_POST, handleDel);
@@ -902,10 +1004,10 @@ void setup() {
     delay(300);
     Serial.println("\nVicmon Master (headless): BLE + WiFi AP");
 
-    gConfig.begin();
-    gSignals.begin(gConfig.slots(), gConfig.count());
-    loadSettings();
-    Serial.printf("Loaded %u device(s) from NVS\n", (unsigned)gConfig.count());
+    gProfiles.begin();
+    applyProfile(gProfiles.active());
+    Serial.printf("Profile '%s': %u device(s)\n", gProfiles.name(gProfiles.active()),
+                  (unsigned)gConfig.count());
 
     loadWifi();
     WiFi.mode(gStaSsid.length() ? WIFI_AP_STA : WIFI_AP);

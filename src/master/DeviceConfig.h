@@ -14,8 +14,9 @@ class DeviceConfig {
 public:
     static constexpr size_t kMax = 8;
 
-    // Load from NVS; if empty, seed with the known BMV + Orion XS and persist.
-    void begin();
+    // Load profile `profile` from NVS. Profile 0 (the original namespace) seeds
+    // the known BMV + Orion XS when empty; other profiles start empty.
+    void begin(int profile);
 
     size_t count() const { return count_; }
     DeviceSlot* slots() { return slots_; }
@@ -32,7 +33,9 @@ public:
 private:
     void load();
     void seedDefaults();
+    String ns() const;
 
     DeviceSlot slots_[kMax];
     size_t count_ = 0;
+    int profile_ = 0;
 };

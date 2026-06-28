@@ -5,8 +5,6 @@
 #include <cstring>
 
 namespace {
-const char* kNamespace = "vicmon";
-
 // Fixed-size record persisted per device.
 struct StoredDevice {
     char name[20];
@@ -33,9 +31,14 @@ bool DeviceConfig::parseHexKey(const String& hex, uint8_t out[16]) {
     return true;
 }
 
-void DeviceConfig::begin() {
+String DeviceConfig::ns() const {
+    return profile_ == 0 ? String("vicmon") : "vicmon" + String(profile_);
+}
+
+void DeviceConfig::begin(int profile) {
+    profile_ = profile;
     load();
-    if (count_ == 0) {
+    if (count_ == 0 && profile_ == 0) {  // seed only the original profile
         seedDefaults();
         save();
     }
@@ -43,7 +46,7 @@ void DeviceConfig::begin() {
 
 void DeviceConfig::load() {
     Preferences prefs;
-    prefs.begin(kNamespace, /*readOnly=*/true);
+    prefs.begin(ns().c_str(), /*readOnly=*/true);
     count_ = prefs.getUChar("ndev", 0);
     if (count_ > kMax) count_ = kMax;
     for (size_t i = 0; i < count_; ++i) {
@@ -62,7 +65,7 @@ void DeviceConfig::load() {
 
 void DeviceConfig::save() {
     Preferences prefs;
-    prefs.begin(kNamespace, /*readOnly=*/false);
+    prefs.begin(ns().c_str(), /*readOnly=*/false);
     prefs.putUChar("ndev", static_cast<uint8_t>(count_));
     for (size_t i = 0; i < count_; ++i) {
         char k[8];

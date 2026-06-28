@@ -84,8 +84,8 @@ struct Binding {
 // NVS-backed role -> binding table.
 class SignalMap {
 public:
-    // Load from NVS; if empty, auto-bind sensible defaults from the device list.
-    void begin(DeviceSlot* slots, size_t n);
+    // Load profile `profile` from NVS; if empty, auto-bind sensible defaults.
+    void begin(DeviceSlot* slots, size_t n, int profile);
 
     const Binding& binding(Role r) const { return b_[static_cast<size_t>(r)]; }
     void set(Role r, const char* device, Field f);
@@ -94,7 +94,9 @@ public:
 private:
     void load();
     void seedDefaults(DeviceSlot* slots, size_t n);
+    String ns() const;
     Binding b_[kRoleCount];
+    int profile_ = 0;
 };
 
 }  // namespace sig

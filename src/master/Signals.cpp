@@ -154,11 +154,12 @@ Resolved resolveField(DeviceSlot* slots, size_t n, const char* device, Field f,
 
 // ---- SignalMap (NVS) -------------------------------------------------------
 
-namespace {
-const char* kNamespace = "vicsig2";  // bumped: role set changed (index-keyed)
+String SignalMap::ns() const {
+    return profile_ == 0 ? String("vicsig2") : "vicsig2_" + String(profile_);
 }
 
-void SignalMap::begin(DeviceSlot* slots, size_t n) {
+void SignalMap::begin(DeviceSlot* slots, size_t n, int profile) {
+    profile_ = profile;
     load();
     bool any = false;
     for (size_t i = 0; i < kRoleCount; ++i) if (b_[i].device[0] != '\0') any = true;
@@ -170,7 +171,7 @@ void SignalMap::begin(DeviceSlot* slots, size_t n) {
 
 void SignalMap::load() {
     Preferences prefs;
-    prefs.begin(kNamespace, /*readOnly=*/true);
+    prefs.begin(ns().c_str(), /*readOnly=*/true);
     for (size_t i = 0; i < kRoleCount; ++i) {
         char dk[8], fk[8];
         snprintf(dk, sizeof(dk), "d%u", static_cast<unsigned>(i));
@@ -184,7 +185,7 @@ void SignalMap::load() {
 
 void SignalMap::save() {
     Preferences prefs;
-    prefs.begin(kNamespace, /*readOnly=*/false);
+    prefs.begin(ns().c_str(), /*readOnly=*/false);
     for (size_t i = 0; i < kRoleCount; ++i) {
         char dk[8], fk[8];
         snprintf(dk, sizeof(dk), "d%u", static_cast<unsigned>(i));
