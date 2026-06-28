@@ -234,8 +234,8 @@ void SignalMap::seedDefaults(DeviceSlot* slots, size_t n) {
     if (charger) {
         set(Role::ChargerA, charger, Field::ChgBattA);
     }
-    // Load is computed from sources - net battery current by default.
-    set(Role::LoadA, kDerived, Field::None);
+    // Load defaults to the derived "load (0 when charging)" signal.
+    set(Role::LoadA, kLoadOnly, Field::None);
 }
 
 }  // namespace sig

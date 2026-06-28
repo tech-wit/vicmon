@@ -148,35 +148,35 @@ static sig::Resolved R(sig::Role role, uint32_t now) {
 
 static String jbool(bool b) { return b ? "true" : "false"; }
 
-// Resolve a role honouring derived sentinels:
-//   (charge_only) = max(0, +battery current)   [0 when discharging / load]
-//   (load_only)   = max(0, -battery current)   [0 when charging]
-//   (derived)     = measured sources - net battery current  [full load]
+// Sum of the measured charge sources (solar + DC-DC output + charger).
+static float measuredSources(uint32_t now) {
+    sig::Resolved sa = R(sig::Role::SolarA, now);
+    sig::Resolved doa = R(sig::Role::DcDcOutA, now);
+    sig::Resolved cg = R(sig::Role::ChargerA, now);
+    return (sa.valid ? sa.value : 0) + (doa.valid ? doa.value : 0) + (cg.valid ? cg.value : 0);
+}
+
+// Resolve a role honouring derived sentinels (let bat = net battery current
+// (+charge/-discharge), src = measured sources):
+//   (charge_only)        = max(0, bat - src)   charge not explained by sources
+//   (load_only)/(derived) = bat < 0 ? (src - bat) : 0   load, 0 when charging
 // Otherwise resolves the bound device field directly.
 static sig::Resolved resolveSignal(sig::Role role, uint32_t now) {
     const sig::Binding& b = gSignals.binding(role);
-    if (strcmp(b.device, sig::kChargeOnly) == 0 || strcmp(b.device, sig::kLoadOnly) == 0) {
+    bool chargeOnly = strcmp(b.device, sig::kChargeOnly) == 0;
+    bool load = strcmp(b.device, sig::kLoadOnly) == 0 || strcmp(b.device, sig::kDerived) == 0;
+    if (chargeOnly || load) {
         sig::Resolved ba = R(sig::Role::BatteryA, now);
         sig::Resolved r;
         if (ba.valid) {
+            float src = measuredSources(now);
             r.valid = true;
-            bool charge = strcmp(b.device, sig::kChargeOnly) == 0;
-            r.value = charge ? (ba.value > 0 ? ba.value : 0) : (ba.value < 0 ? -ba.value : 0);
-        }
-        return r;
-    }
-    if (strcmp(b.device, sig::kDerived) == 0) {
-        sig::Resolved ba = R(sig::Role::BatteryA, now);
-        sig::Resolved r;
-        if (ba.valid) {
-            sig::Resolved sa = R(sig::Role::SolarA, now);
-            sig::Resolved doa = R(sig::Role::DcDcOutA, now);
-            sig::Resolved cg = R(sig::Role::ChargerA, now);
-            float in = (sa.valid ? sa.value : 0) + (doa.valid ? doa.value : 0) + (cg.valid ? cg.value : 0);
-            float l = in - ba.value;
-            if (l < 0) l = 0;
-            r.valid = true;
-            r.value = l;
+            if (chargeOnly) {
+                float v = ba.value - src;
+                r.value = v > 0 ? v : 0;
+            } else {
+                r.value = ba.value < 0 ? (src - ba.value) : 0;
+            }
         }
         return r;
     }
@@ -730,8 +730,9 @@ static String bindingsPage() {
     h += profilesCard();
     h += "<div class=card><h3>Panel signals</h3>"
          "<p class=muted>Tag which device field feeds each signal the mimic / "
-         "display uses. Load can be set to <b>Derived</b> to compute it from the "
-         "solar / charger / DC-DC inputs minus net battery current.</p>"
+         "display uses. Derived options compute from the battery current vs the "
+         "measured sources: <b>charge unexplained</b> = battery charge beyond "
+         "solar/charger/DC-DC; <b>load</b> = consumption, 0 while net charging.</p>"
          "<form method=post action=/bind>";
 
     for (size_t r = 0; r < sig::kRoleCount; ++r) {
@@ -743,18 +744,14 @@ static String bindingsPage() {
         bool currentRole = (role == sig::Role::SolarA || role == sig::Role::ChargerA ||
                             role == sig::Role::DcDcInA || role == sig::Role::DcDcOutA ||
                             role == sig::Role::LoadA);
-        if (role == sig::Role::LoadA) {
-            bool sel = strcmp(cur.device, sig::kDerived) == 0;
-            h += String("<option value='(derived)|0'") + (sel ? " selected" : "") +
-                 ">Derived: full load (sources &minus; battery)</option>";
-        }
         if (currentRole) {
             bool selC = strcmp(cur.device, sig::kChargeOnly) == 0;
-            bool selL = strcmp(cur.device, sig::kLoadOnly) == 0;
+            bool selL = strcmp(cur.device, sig::kLoadOnly) == 0 ||
+                        strcmp(cur.device, sig::kDerived) == 0;
             h += String("<option value='(charge_only)|0'") + (selC ? " selected" : "") +
-                 ">Derived: charge only (0 when load)</option>";
+                 ">Derived: charge unexplained by sources</option>";
             h += String("<option value='(load_only)|0'") + (selL ? " selected" : "") +
-                 ">Derived: load only (0 when charging)</option>";
+                 ">Derived: load (0 when charging)</option>";
         }
         for (size_t i = 0; i < gConfig.count(); ++i) {
             DeviceSlot& s = gConfig.slots()[i];
