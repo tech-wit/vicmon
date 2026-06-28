@@ -12,6 +12,7 @@ enum class Record : uint8_t {
     Inverter = 0x03,
     DcDcConverter = 0x04,
     SmartLithium = 0x05,
+    AcCharger = 0x08,
     OrionXs = 0x0F,
 };
 
@@ -67,6 +68,35 @@ struct DcDcData {
     bool outputIValid = false;
     float outputCurrent = 0.0f;  // A
     uint32_t offReason = 0;
+};
+
+// Decoded SmartSolar MPPT advertisement (record type 0x01). UNVERIFIED scaling.
+struct SolarData {
+    bool valid = false;
+    uint8_t deviceState = 0;
+    uint8_t chargerError = 0;
+    bool battVValid = false;
+    float batteryVoltage = 0.0f;  // V
+    bool battIValid = false;
+    float batteryCurrent = 0.0f;  // A (into battery)
+    bool pvValid = false;
+    float pvPower = 0.0f;  // W
+    bool yieldValid = false;
+    float yieldToday = 0.0f;  // kWh
+    bool loadValid = false;
+    float loadCurrent = 0.0f;  // A
+};
+
+// Decoded AC charger advertisement (record type 0x08). Minimal + UNVERIFIED:
+// only the primary output is parsed.
+struct AcChargerData {
+    bool valid = false;
+    uint8_t deviceState = 0;
+    uint8_t chargerError = 0;
+    bool battVValid = false;
+    float batteryVoltage = 0.0f;  // V (output 1)
+    bool battIValid = false;
+    float batteryCurrent = 0.0f;  // A (output 1)
 };
 
 }  // namespace victron

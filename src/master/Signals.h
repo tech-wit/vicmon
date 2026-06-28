@@ -23,6 +23,15 @@ enum class Field : uint8_t {
     DcDcInA,
     DcDcOutA,
     DcDcState,
+    SolarBattV,
+    SolarBattA,
+    SolarPvW,
+    SolarYield,
+    SolarLoadA,
+    SolarState,
+    ChgBattV,
+    ChgBattA,
+    ChgState,
 };
 
 // Logical panel signals the mimic/display consume.
@@ -42,8 +51,10 @@ enum class Role : uint8_t {
     COUNT,
 };
 
-// Sentinel device name for a computed (not directly measured) signal.
-constexpr const char* kDerived = "(derived)";
+// Sentinel device names for computed (not directly measured) signals.
+constexpr const char* kDerived = "(derived)";        // load = sources - net battery
+constexpr const char* kChargeOnly = "(charge_only)"; // max(0, +battery current)
+constexpr const char* kLoadOnly = "(load_only)";     // max(0, -battery current)
 constexpr size_t kRoleCount = static_cast<size_t>(Role::COUNT);
 
 const char* roleKey(Role r);    // machine name, e.g. "battery_soc"

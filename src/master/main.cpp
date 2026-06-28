@@ -13,8 +13,10 @@
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 #include <WiFi.h>
 
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -37,6 +39,7 @@ static DNSServer gDns;
 // Victron devices seen but not configured (no matching key).
 struct Discovered {
     char mac[20] = {0};
+    char name[24] = {0};  // BLE advertised (friendly) name, if any
     uint16_t model = 0;
     int rssi = 0;
     uint32_t lastSeenMs = 0;
@@ -48,31 +51,37 @@ static size_t gDiscN = 0;
 
 static victron::Record parseType(const String& t) {
     if (t == "dcdc") return victron::Record::OrionXs;
+    if (t == "solar") return victron::Record::SolarCharger;
+    if (t == "charger") return victron::Record::AcCharger;
     return victron::Record::BatteryMonitor;
 }
 static const char* typeName(victron::Record r) {
     switch (r) {
         case victron::Record::OrionXs: return "dcdc";
         case victron::Record::BatteryMonitor: return "battery";
+        case victron::Record::SolarCharger: return "solar";
+        case victron::Record::AcCharger: return "charger";
         default: return "?";
     }
 }
 
 // ---- BLE ingestion ---------------------------------------------------------
 
-static void noteDiscovered(const char* mac, uint16_t model, int rssi) {
+static void noteDiscovered(const char* mac, const char* name, uint16_t model, int rssi) {
     uint32_t now = millis();
     for (size_t i = 0; i < gDiscN; ++i) {
         if (strncmp(gDisc[i].mac, mac, sizeof(gDisc[i].mac)) == 0) {
             gDisc[i].rssi = rssi;
             gDisc[i].model = model;
             gDisc[i].lastSeenMs = now;
+            if (name && name[0]) strncpy(gDisc[i].name, name, sizeof(gDisc[i].name) - 1);
             return;
         }
     }
     if (gDiscN < (sizeof(gDisc) / sizeof(gDisc[0]))) {
         Discovered& d = gDisc[gDiscN++];
         strncpy(d.mac, mac, sizeof(d.mac) - 1);
+        if (name) strncpy(d.name, name, sizeof(d.name) - 1);
         d.model = model;
         d.rssi = rssi;
         d.lastSeenMs = now;
@@ -94,18 +103,29 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
         DeviceSlot& s = gConfig.slots()[i];
         int n = victron::decrypt(extra, extraLen, s.key, out, sizeof(out));
         if (n < 0) continue;
-        if (s.type == victron::Record::BatteryMonitor) {
-            if (!victron::parseBatteryMonitor(out, n, s.battery)) return;
-        } else if (s.type == victron::Record::OrionXs) {
-            if (!victron::parseOrionXs(out, n, s.dcdc)) return;
+        switch (s.type) {
+            case victron::Record::BatteryMonitor:
+                if (!victron::parseBatteryMonitor(out, n, s.battery)) return;
+                break;
+            case victron::Record::OrionXs:
+                if (!victron::parseOrionXs(out, n, s.dcdc)) return;
+                break;
+            case victron::Record::SolarCharger:
+                if (!victron::parseSolarCharger(out, n, s.solar)) return;
+                break;
+            case victron::Record::AcCharger:
+                if (!victron::parseAcCharger(out, n, s.charger)) return;
+                break;
+            default:
+                break;
         }
         s.everSeen = true;
         s.lastSeenMs = millis();
         return;
     }
     // No configured key matched -> a device we could adopt.
-    noteDiscovered(dev->getAddress().toString().c_str(), victron::modelId(extra),
-                   dev->getRSSI());
+    noteDiscovered(dev->getAddress().toString().c_str(), dev->getName().c_str(),
+                   victron::modelId(extra), dev->getRSSI());
 }
 
 static void pollBle() {
@@ -126,6 +146,151 @@ static sig::Resolved R(sig::Role role, uint32_t now) {
 
 static String jbool(bool b) { return b ? "true" : "false"; }
 
+// Resolve a role honouring derived sentinels:
+//   (charge_only) = max(0, +battery current)   [0 when discharging / load]
+//   (load_only)   = max(0, -battery current)   [0 when charging]
+//   (derived)     = measured sources - net battery current  [full load]
+// Otherwise resolves the bound device field directly.
+static sig::Resolved resolveSignal(sig::Role role, uint32_t now) {
+    const sig::Binding& b = gSignals.binding(role);
+    if (strcmp(b.device, sig::kChargeOnly) == 0 || strcmp(b.device, sig::kLoadOnly) == 0) {
+        sig::Resolved ba = R(sig::Role::BatteryA, now);
+        sig::Resolved r;
+        if (ba.valid) {
+            r.valid = true;
+            bool charge = strcmp(b.device, sig::kChargeOnly) == 0;
+            r.value = charge ? (ba.value > 0 ? ba.value : 0) : (ba.value < 0 ? -ba.value : 0);
+        }
+        return r;
+    }
+    if (strcmp(b.device, sig::kDerived) == 0) {
+        sig::Resolved ba = R(sig::Role::BatteryA, now);
+        sig::Resolved r;
+        if (ba.valid) {
+            sig::Resolved sa = R(sig::Role::SolarA, now);
+            sig::Resolved doa = R(sig::Role::DcDcOutA, now);
+            sig::Resolved cg = R(sig::Role::ChargerA, now);
+            float in = (sa.valid ? sa.value : 0) + (doa.valid ? doa.value : 0) + (cg.valid ? cg.value : 0);
+            float l = in - ba.value;
+            if (l < 0) l = 0;
+            r.valid = true;
+            r.value = l;
+        }
+        return r;
+    }
+    return R(role, now);
+}
+
+static bool roleIsDerived(sig::Role role) {
+    const char* d = gSignals.binding(role).device;
+    return strcmp(d, sig::kDerived) == 0 || strcmp(d, sig::kChargeOnly) == 0 ||
+           strcmp(d, sig::kLoadOnly) == 0;
+}
+
+// The five trended currents (shared by the panel API and the history sampler).
+struct Currents {
+    float battery = 0, solar = 0, charger = 0, dcdc = 0, load = 0;
+    bool bV = false, sV = false, cV = false, dV = false, lV = false;
+};
+static Currents computeCurrents(uint32_t now) {
+    Currents c;
+    sig::Resolved ba = resolveSignal(sig::Role::BatteryA, now);
+    sig::Resolved sa = resolveSignal(sig::Role::SolarA, now);
+    sig::Resolved cg = resolveSignal(sig::Role::ChargerA, now);
+    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
+    sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
+    c.battery = ba.value; c.bV = ba.valid;
+    c.solar = sa.value; c.sV = sa.valid;
+    c.charger = cg.value; c.cV = cg.valid;
+    c.dcdc = doa.value; c.dV = doa.valid;
+    c.load = la.value; c.lV = la.valid;
+    return c;
+}
+
+// ---- continuous history (server-side ring buffer) --------------------------
+
+static const size_t HIST_CAP = 720;          // 60 min @ 5 s
+static const uint32_t HIST_INTERVAL = 5000;  // ms
+struct HistSample {
+    int16_t battery, solar, charger, dcdc, load;  // deci-amps, -32768 = n/a
+};
+static HistSample gHist[HIST_CAP];
+static size_t gHistHead = 0, gHistCount = 0;
+static uint32_t gLastSample = 0;
+
+static int16_t encA(bool v, float a) {
+    return v ? static_cast<int16_t>(lroundf(a * 10.0f)) : -32768;
+}
+static int16_t sampleField(const HistSample& s, int idx) {
+    switch (idx) {
+        case 0: return s.battery;
+        case 1: return s.solar;
+        case 2: return s.charger;
+        case 3: return s.dcdc;
+        default: return s.load;
+    }
+}
+
+// Runs continuously from loop() regardless of any connected client.
+static void sampleHistory() {
+    uint32_t now = millis();
+    if (gHistCount > 0 && now - gLastSample < HIST_INTERVAL) return;
+    gLastSample = now;
+    Currents c = computeCurrents(now);
+    HistSample s;
+    s.battery = encA(c.bV, c.battery);
+    s.solar = encA(c.sV, c.solar);
+    s.charger = encA(c.cV, c.charger);
+    s.dcdc = encA(c.dV, c.dcdc);
+    s.load = encA(c.lV, c.load);
+    gHist[gHistHead] = s;
+    gHistHead = (gHistHead + 1) % HIST_CAP;
+    if (gHistCount < HIST_CAP) ++gHistCount;
+}
+
+static String buildHistoryJson(int mins) {
+    if (mins < 1) mins = 1;
+    if (mins > 60) mins = 60;
+    int want = mins * 60 * 1000 / static_cast<int>(HIST_INTERVAL);
+    if (want > static_cast<int>(gHistCount)) want = gHistCount;
+    if (want < 0) want = 0;
+    size_t start = (gHistHead + HIST_CAP - want) % HIST_CAP;
+    const char* names[5] = {"battery", "solar", "charger", "dcdc", "load"};
+    String j = "{\"interval\":" + String(HIST_INTERVAL / 1000) +
+               ",\"mins\":" + String(mins) + ",\"series\":{";
+    for (int f = 0; f < 5; ++f) {
+        j += "\"" + String(names[f]) + "\":[";
+        for (int k = 0; k < want; ++k) {
+            size_t idx = (start + k) % HIST_CAP;
+            int16_t v = sampleField(gHist[idx], f);
+            if (k) j += ",";
+            j += (v == -32768) ? "null" : String(v / 10.0f, 1);
+        }
+        j += "]";
+        if (f < 4) j += ",";
+    }
+    j += "}}";
+    return j;
+}
+
+// ---- WiFi STA (join an existing network) -----------------------------------
+
+static String gStaSsid, gStaPass;
+static void loadWifi() {
+    Preferences p;
+    p.begin("vicwifi", true);
+    gStaSsid = p.getString("ssid", "");
+    gStaPass = p.getString("pass", "");
+    p.end();
+}
+static void saveWifiCreds(const String& s, const String& pw) {
+    Preferences p;
+    p.begin("vicwifi", false);
+    p.putString("ssid", s);
+    p.putString("pass", pw);
+    p.end();
+}
+
 static String buildPanelJson() {
     uint32_t now = millis();
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
@@ -134,32 +299,20 @@ static String buildPanelJson() {
     sig::Resolved con = R(sig::Role::BatteryConsumed, now);
     sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
     sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
-    sig::Resolved sa = R(sig::Role::SolarA, now);
+    sig::Resolved sa = resolveSignal(sig::Role::SolarA, now);
     sig::Resolved sw = R(sig::Role::SolarW, now);
-    sig::Resolved chg = R(sig::Role::ChargerA, now);
-    sig::Resolved dia = R(sig::Role::DcDcInA, now);
-    sig::Resolved doa = R(sig::Role::DcDcOutA, now);
+    sig::Resolved chg = resolveSignal(sig::Role::ChargerA, now);
+    sig::Resolved dia = resolveSignal(sig::Role::DcDcInA, now);
+    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
 
     const char* mode = "unknown";
     if (ba.valid) mode = ba.value > 0.5f ? "charging" : (ba.value < -0.5f ? "discharging" : "idle");
 
-    // Load: dedicated binding wins; "(derived)" computes from energy balance.
-    const sig::Binding& lb = gSignals.binding(sig::Role::LoadA);
-    bool loadDerivedSel = strcmp(lb.device, sig::kDerived) == 0;
-    sig::Resolved la = loadDerivedSel ? sig::Resolved{} : R(sig::Role::LoadA, now);
-    bool loadValid = false, loadDerived = false;
-    float loadV = 0.0f;
-    if (la.valid) {
-        loadV = la.value;
-        loadValid = true;
-    } else if (loadDerivedSel && ba.valid) {
-        float chargeIn = (sa.valid ? sa.value : 0.0f) + (doa.valid ? doa.value : 0.0f) +
-                         (chg.valid ? chg.value : 0.0f);
-        loadV = chargeIn - ba.value;  // sources - net battery (charge +)
-        if (loadV < 0) loadV = 0;
-        loadValid = true;
-        loadDerived = true;
-    }
+    // Load honours derived sentinels ((derived)/(charge_only)/(load_only)).
+    sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
+    bool loadValid = la.valid;
+    bool loadDerived = roleIsDerived(sig::Role::LoadA);
+    float loadV = la.value;
 
     bool battValid = soc.valid || bv.valid || ba.valid;
     bool dcdcValid = doa.valid || dia.valid;
@@ -272,8 +425,16 @@ static const char kMimicPage[] = R"HTML(
 <div id="modeBanner" class="banner">--</div>
 </div>
 <div class=card>
-  <h3 style="margin-top:0">Trend &middot; last 3 min</h3>
-  <canvas id="chart" width="680" height="150" style="width:100%;height:150px"></canvas>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5em">
+    <h3 style="margin:0">Trend</h3>
+    <div id="winbtns">
+      <button class="winbtn ghost" data-m="1">1m</button>
+      <button class="winbtn ghost" data-m="10">10m</button>
+      <button class="winbtn ghost" data-m="30">30m</button>
+      <button class="winbtn ghost" data-m="60">60m</button>
+    </div>
+  </div>
+  <canvas id="chart" width="700" height="160" style="width:100%;height:160px;margin-top:.5em"></canvas>
   <div id="legend" class="legend"></div>
 </div>
 <script>
@@ -317,37 +478,57 @@ async function tick(){
  }else if(p.load.valid){val=p.load.a.toFixed(1)+'A';}
  setLine('lineLoad',lm,lc);
  set('loadTxt',lbl+' '+val);
- pushHist(p);drawChart();
 }
 var SERIES=[
- {k:'battery',label:'Battery',color:'#22d3ee',get:function(p){return p.battery.valid?p.battery.a:null;}},
- {k:'solar',label:'Solar',color:'#facc15',get:function(p){return p.solar.valid?p.solar.a:null;}},
- {k:'charger',label:'Charger',color:'#60a5fa',get:function(p){return p.charger.valid?p.charger.a:null;}},
- {k:'dcdc',label:'DC-DC',color:'#a78bfa',get:function(p){return p.dcdc.valid?p.dcdc.out_a:null;}},
- {k:'load',label:'Load',color:'#f87171',get:function(p){return p.load.valid?p.load.a:null;}}
+ {k:'battery',label:'Battery',color:'#22d3ee'},
+ {k:'solar',label:'Solar',color:'#facc15'},
+ {k:'charger',label:'Charger',color:'#60a5fa'},
+ {k:'dcdc',label:'DC-DC',color:'#a78bfa'},
+ {k:'load',label:'Load',color:'#f87171'}
 ];
-var MAXN=180,hist={};SERIES.forEach(function(s){hist[s.k]=[];});
-function pushHist(p){SERIES.forEach(function(s){var v=s.get(p);hist[s.k].push(v);
- if(hist[s.k].length>MAXN)hist[s.k].shift();});}
+var chartWin=10,chartData=null;
+function setWin(m){chartWin=m;
+ var bs=document.querySelectorAll('.winbtn');for(var i=0;i<bs.length;i++)
+  bs[i].classList.toggle('active',+bs[i].dataset.m===m);
+ loadChart();}
+async function loadChart(){
+ try{chartData=await(await fetch('/api/history?mins='+chartWin)).json();}catch(e){return;}
+ drawChart();}
 function drawChart(){
- var c=document.getElementById('chart');if(!c||!c.getContext)return;
- var ctx=c.getContext('2d'),W=c.width,H=c.height,pad=6;ctx.clearRect(0,0,W,H);
- var mn=0,mx=0;SERIES.forEach(function(s){hist[s.k].forEach(function(v){
+ var c=document.getElementById('chart');if(!c||!c.getContext||!chartData)return;
+ var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=34,padR=8,padT=8,padB=18;
+ ctx.clearRect(0,0,W,H);
+ var s=chartData.series,N=0;
+ SERIES.forEach(function(se){if(s[se.k]&&s[se.k].length>N)N=s[se.k].length;});
+ var mn=0,mx=0;
+ SERIES.forEach(function(se){(s[se.k]||[]).forEach(function(v){
   if(v!=null){if(v<mn)mn=v;if(v>mx)mx=v;}});});
- if(mx-mn<1)mx=mn+1;
- function Y(v){return H-pad-(H-2*pad)*((v-mn)/(mx-mn));}
- function X(idx){return pad+(W-2*pad)*(idx/(MAXN-1));}
- ctx.strokeStyle='#2c3a4a';ctx.lineWidth=1;ctx.beginPath();
- ctx.moveTo(pad,Y(0));ctx.lineTo(W-pad,Y(0));ctx.stroke();
- SERIES.forEach(function(s){var a=hist[s.k],off=MAXN-a.length;
-  ctx.strokeStyle=s.color;ctx.lineWidth=2;ctx.beginPath();var started=false;
+ if(mx-mn<2){mx=mn+2;}
+ function Y(v){return padT+(H-padT-padB)*(1-(v-mn)/(mx-mn));}
+ function X(i){return padL+(W-padL-padR)*(N<=1?0:i/(N-1));}
+ // grid + Y labels (max, 0, min)
+ ctx.fillStyle='#7d8da1';ctx.font='10px system-ui';ctx.textAlign='right';
+ [mx,0,mn].forEach(function(v){var y=Y(v);
+  ctx.strokeStyle=v===0?'#3a4a5c':'#1f2c3a';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+  ctx.fillText(v.toFixed(0)+'A',padL-4,y+3);});
+ // X labels (oldest .. now)
+ ctx.textAlign='left';ctx.fillText('-'+chartWin+'m',padL,H-5);
+ ctx.textAlign='right';ctx.fillText('now',W-padR,H-5);
+ // series lines
+ SERIES.forEach(function(se){var a=s[se.k]||[];
+  ctx.strokeStyle=se.color;ctx.lineWidth=2;ctx.beginPath();var started=false;
   for(var i=0;i<a.length;i++){var v=a[i];if(v==null){started=false;continue;}
-   var x=X(off+i),y=Y(v);if(started)ctx.lineTo(x,y);else{ctx.moveTo(x,y);started=true;}}
+   var x=X(i),y=Y(v);if(started)ctx.lineTo(x,y);else{ctx.moveTo(x,y);started=true;}}
   ctx.stroke();});
 }
-document.getElementById('legend').innerHTML=SERIES.map(function(s){
- return '<span style="color:'+s.color+'">&#9632; '+s.label+'</span>';}).join('');
+document.getElementById('legend').innerHTML=SERIES.map(function(se){
+ return '<span style="color:'+se.color+'">&#9632; '+se.label+'</span>';}).join('');
+var wb=document.querySelectorAll('.winbtn');
+for(var i=0;i<wb.length;i++)wb[i].addEventListener('click',function(){setWin(+this.dataset.m);});
+setWin(10);
 setInterval(tick,1000);tick();
+setInterval(loadChart,5000);
 </script>
 )HTML";
 
@@ -359,7 +540,8 @@ static String pageHead(const char* active) {
     struct {
         const char* href;
         const char* name;
-    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Signals"}};
+    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Signals"},
+                 {"/wifi", "WiFi"}};
     for (auto& l : links) {
         h += "<a href='";
         h += l.href;
@@ -374,6 +556,50 @@ static String pageHead(const char* active) {
 }
 static String pageFoot() { return F("</main></body></html>"); }
 
+static String keyHex(const uint8_t* k) {
+    char b[33];
+    for (int i = 0; i < 16; ++i) snprintf(b + i * 2, 3, "%02x", k[i]);
+    return String(b);
+}
+static String typeOptions(victron::Record sel) {
+    struct { const char* v; victron::Record r; } t[] = {
+        {"battery", victron::Record::BatteryMonitor},
+        {"solar", victron::Record::SolarCharger},
+        {"dcdc", victron::Record::OrionXs},
+        {"charger", victron::Record::AcCharger}};
+    String o;
+    for (auto& x : t)
+        o += String("<option value=") + x.v + (x.r == sel ? " selected" : "") + ">" + x.v + "</option>";
+    return o;
+}
+static String deviceSummary(DeviceSlot& s, uint32_t now) {
+    if (s.stale(now)) return "<span class=muted>stale / not seen</span>";
+    auto sgn = [](float a) { return (a >= 0 ? String("+") : String("")) + String(a, 1); };
+    switch (s.type) {
+        case victron::Record::BatteryMonitor:
+            return String(s.battery.soc, 1) + "% &middot; " + String(s.battery.voltage, 2) +
+                   "V &middot; " + sgn(s.battery.current) + "A";
+        case victron::Record::OrionXs:
+            return "out " + String(s.dcdc.outputVoltage, 2) + "V &middot; " +
+                   String(s.dcdc.outputCurrent, 1) + "A &middot; " +
+                   (s.dcdc.deviceState ? "on" : "off");
+        case victron::Record::SolarCharger:
+            return "PV " + String(s.solar.pvPower, 0) + "W &middot; " +
+                   String(s.solar.batteryCurrent, 1) + "A &middot; " +
+                   String(s.solar.batteryVoltage, 2) + "V";
+        case victron::Record::AcCharger:
+            return String(s.charger.batteryVoltage, 2) + "V &middot; " +
+                   String(s.charger.batteryCurrent, 1) + "A";
+        default:
+            return "ok";
+    }
+}
+static String jsEsc(String s) {
+    s.replace("\\", "\\\\");
+    s.replace("'", "\\'");
+    return s;
+}
+
 static String devicesPage() {
     uint32_t now = millis();
     String h = pageHead("/devices");
@@ -382,55 +608,57 @@ static String devicesPage() {
     if (gConfig.count() == 0) h += "<p class=muted>None yet.</p>";
     for (size_t i = 0; i < gConfig.count(); ++i) {
         DeviceSlot& s = gConfig.slots()[i];
-        String state;
-        if (s.stale(now)) state = "stale";
-        else if (s.type == victron::Record::BatteryMonitor)
-            state = String(s.battery.soc, 1) + "% " + String(s.battery.voltage, 2) + "V";
-        else if (s.type == victron::Record::OrionXs)
-            state = "out " + String(s.dcdc.outputVoltage, 2) + "V";
-        else state = "ok";
-
-        h += "<form class=inline method=post action=/edit style='margin-bottom:.8em'>";
+        h += "<div style='padding:.6em 0;border-bottom:1px solid var(--line)'>";
+        h += "<div style='display:flex;justify-content:space-between;align-items:baseline'><b>" +
+             String(s.name) + "</b><span class=muted style='font-size:.8em'>" + typeName(s.type) +
+             "</span></div>";
+        h += "<div style='margin:.25em 0;font-size:1.05em'>" + deviceSummary(s, now) + "</div>";
+        h += "<details><summary class=muted style='cursor:pointer;font-size:.85em'>edit</summary>";
+        h += "<form class=inline method=post action=/edit style='margin:.5em 0'>";
         h += "<input type=hidden name=idx value=" + String(i) + ">";
         h += "<div><label>Name</label><input name=name value='" + String(s.name) + "' required></div>";
-        h += "<div><label>Type</label><select name=type>";
-        h += String("<option value=battery") + (s.type == victron::Record::BatteryMonitor ? " selected" : "") + ">battery</option>";
-        h += String("<option value=dcdc") + (s.type == victron::Record::OrionXs ? " selected" : "") + ">dcdc</option>";
-        h += "</select></div>";
-        h += "<div><label>Key (blank = keep)</label><input name=key pattern='[0-9a-fA-F]{32}' size=20></div>";
-        h += "<div class=muted style='align-self:center'>" + state + "</div>";
+        h += "<div><label>Type</label><select name=type>" + typeOptions(s.type) + "</select></div>";
+        h += "<div><label>Encryption key</label><input name=key pattern='[0-9a-fA-F]{32}' size=34 value='" +
+             keyHex(s.key) + "'></div>";
         h += "<button>save</button></form>";
-        h += "<form class=inline method=post action=/del>"
-             "<input type=hidden name=name value='" + String(s.name) + "'>"
-             "<button class=danger>delete</button></form><hr style='border-color:#243140'>";
+        h += "<form class=inline method=post action=/del><input type=hidden name=name value='" +
+             String(s.name) + "'><button class=danger>delete</button></form></details></div>";
     }
     h += "</div>";
 
-    // Add
     h += "<div class=card id=add><h3>Add device</h3>"
          "<form class=inline method=post action=/add>"
-         "<div><label>Name</label><input name=name required></div>"
-         "<div><label>Type</label><select name=type>"
-         "<option value=battery>battery</option><option value=dcdc>dcdc</option></select></div>"
-         "<div><label>Key (32 hex)</label><input name=key pattern='[0-9a-fA-F]{32}' size=34 required></div>"
+         "<div><label>Name</label><input id=addName name=name required></div>"
+         "<div><label>Type</label><select id=addType name=type>" +
+         typeOptions(victron::Record::BatteryMonitor) +
+         "</select></div>"
+         "<div><label>Key (32 hex)</label><input id=addKey name=key pattern='[0-9a-fA-F]{32}' size=34 required></div>"
          "<button>add</button></form></div>";
 
-    // Discovered (unadopted)
     h += "<div class=card><h3>Discovered nearby</h3>"
-         "<p class=muted>Victron devices broadcasting that aren't configured. "
-         "Add one above using its encryption key from VictronConnect.</p>"
-         "<table><tr><th>MAC</th><th>Model</th><th>RSSI</th></tr>";
+         "<p class=muted>Victron devices broadcasting that aren't configured yet. "
+         "Tap <b>use</b> to start adding one, then paste its encryption key from VictronConnect.</p>"
+         "<table><tr><th>Name</th><th>MAC</th><th>Model</th><th>Signal</th><th></th></tr>";
     size_t shown = 0;
     for (size_t i = 0; i < gDiscN; ++i) {
         if (now - gDisc[i].lastSeenMs > 30000) continue;  // only recently seen
         char model[8];
         snprintf(model, sizeof(model), "0x%04X", gDisc[i].model);
-        h += "<tr><td>" + String(gDisc[i].mac) + "</td><td>" + model + "</td><td>" +
-             String(gDisc[i].rssi) + " dBm</td></tr>";
+        String nm = gDisc[i].name[0] ? String(gDisc[i].name) : String("(unnamed)");
+        h += "<tr><td>" + nm + "</td><td>" + String(gDisc[i].mac) + "</td><td>" + model +
+             "</td><td>" + String(gDisc[i].rssi) + " dBm</td><td>"
+             "<button type=button class=ghost onclick=\"adopt('" +
+             jsEsc(String(gDisc[i].name)) + "')\">use</button></td></tr>";
         ++shown;
     }
-    if (shown == 0) h += "<tr><td colspan=3 class=muted>none right now</td></tr>";
+    if (shown == 0) h += "<tr><td colspan=5 class=muted>none right now</td></tr>";
     h += "</table></div>";
+
+    h += R"JS(<script>function adopt(n){var l=(n||'').toLowerCase(),t='battery';
+if(l.indexOf('solar')>=0)t='solar';else if(l.indexOf('orion')>=0)t='dcdc';
+else if(l.indexOf('charg')>=0||l.indexOf('blue')>=0)t='charger';
+document.getElementById('addName').value=n||'';document.getElementById('addType').value=t;
+location.hash='#add';document.getElementById('addKey').focus();}</script>)JS";
 
     h += pageFoot();
     return h;
@@ -450,10 +678,21 @@ static String bindingsPage() {
         h += "<div style='margin-bottom:.7em'><label>" + String(sig::roleLabel(role)) +
              "</label><select name=" + sig::roleKey(role) + " style='min-width:240px'>";
         h += "<option value=''>&mdash; none &mdash;</option>";
+        bool currentRole = (role == sig::Role::SolarA || role == sig::Role::ChargerA ||
+                            role == sig::Role::DcDcInA || role == sig::Role::DcDcOutA ||
+                            role == sig::Role::LoadA);
         if (role == sig::Role::LoadA) {
             bool sel = strcmp(cur.device, sig::kDerived) == 0;
             h += String("<option value='(derived)|0'") + (sel ? " selected" : "") +
-                 ">Derived (computed)</option>";
+                 ">Derived: full load (sources &minus; battery)</option>";
+        }
+        if (currentRole) {
+            bool selC = strcmp(cur.device, sig::kChargeOnly) == 0;
+            bool selL = strcmp(cur.device, sig::kLoadOnly) == 0;
+            h += String("<option value='(charge_only)|0'") + (selC ? " selected" : "") +
+                 ">Derived: charge only (0 when load)</option>";
+            h += String("<option value='(load_only)|0'") + (selL ? " selected" : "") +
+                 ">Derived: load only (0 when charging)</option>";
         }
         for (size_t i = 0; i < gConfig.count(); ++i) {
             DeviceSlot& s = gConfig.slots()[i];
@@ -527,6 +766,48 @@ static void handleBind(AsyncWebServerRequest* req) {
     req->redirect("/bindings");
 }
 
+static String wifiPage() {
+    String h = pageHead("/wifi");
+    String status;
+    if (gStaSsid.length()) {
+        status = (WiFi.status() == WL_CONNECTED)
+                     ? "Connected to <b>" + gStaSsid + "</b> &middot; IP " + WiFi.localIP().toString()
+                     : "Configured for <b>" + gStaSsid + "</b> &middot; <span class=muted>connecting / not connected</span>";
+    } else {
+        status = "<span class=muted>Not configured (AP only)</span>";
+    }
+    h += "<div class=card><h3>Join a WiFi network</h3>"
+         "<p class=muted>The master always keeps its own <b>" + String(kApSsid) +
+         "</b> access point, and can additionally join an existing network (e.g. a "
+         "van router) so you can reach it there too.</p>"
+         "<p>Status: " + status + "</p>"
+         "<form class=inline method=post action=/wifi>"
+         "<div><label>SSID</label><input name=ssid value='" + gStaSsid + "' required></div>"
+         "<div><label>Password (blank = keep)</label><input name=pass type=password></div>"
+         "<button>save &amp; connect</button></form>"
+         "<form method=post action=/wifi style='margin-top:.6em'>"
+         "<input type=hidden name=ssid value=''><button class=ghost>forget</button></form></div>";
+    h += pageFoot();
+    return h;
+}
+
+static void handleWifi(AsyncWebServerRequest* req) {
+    String ssid = param(req, "ssid"), pass = param(req, "pass");
+    if (ssid.length() == 0) {  // forget
+        saveWifiCreds("", "");
+        gStaSsid = ""; gStaPass = "";
+        WiFi.disconnect();
+        req->redirect("/wifi");
+        return;
+    }
+    if (pass.length() == 0) pass = gStaPass;  // keep existing when blank
+    saveWifiCreds(ssid, pass);
+    gStaSsid = ssid; gStaPass = pass;
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(gStaSsid.c_str(), gStaPass.c_str());
+    req->redirect("/wifi");
+}
+
 static void setupServer() {
     gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/css", kStyle);
@@ -546,6 +827,14 @@ static void setupServer() {
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildDataJson());
     });
+    gServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
+        int mins = req->hasParam("mins") ? req->getParam("mins")->value().toInt() : 10;
+        req->send(200, "application/json", buildHistoryJson(mins));
+    });
+    gServer.on("/wifi", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wifiPage());
+    });
+    gServer.on("/wifi", HTTP_POST, handleWifi);
     gServer.on("/add", HTTP_POST, handleAdd);
     gServer.on("/edit", HTTP_POST, handleEdit);
     gServer.on("/del", HTTP_POST, handleDel);
@@ -567,11 +856,16 @@ void setup() {
     gSignals.begin(gConfig.slots(), gConfig.count());
     Serial.printf("Loaded %u device(s) from NVS\n", (unsigned)gConfig.count());
 
-    WiFi.mode(WIFI_AP);
+    loadWifi();
+    WiFi.mode(gStaSsid.length() ? WIFI_AP_STA : WIFI_AP);
     WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
     IPAddress ip = WiFi.softAPIP();
     Serial.printf("AP '%s' up at http://%s/  (pass: %s)\n", kApSsid,
                   ip.toString().c_str(), kApPass);
+    if (gStaSsid.length()) {
+        WiFi.begin(gStaSsid.c_str(), gStaPass.c_str());
+        Serial.printf("Joining WiFi '%s'...\n", gStaSsid.c_str());
+    }
 
     gDns.start(53, "*", ip);
     setupServer();
@@ -586,6 +880,7 @@ void setup() {
 void loop() {
     gDns.processNextRequest();
     pollBle();  // blocks ~2s per scan
+    sampleHistory();  // continuous logging, regardless of any connected client
 
     uint32_t now = millis();
     Serial.print("[state]");

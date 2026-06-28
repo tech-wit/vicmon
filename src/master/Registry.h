@@ -15,6 +15,8 @@ struct DeviceSlot {
     uint32_t lastSeenMs = 0;
     victron::BatteryData battery;  // valid when type == BatteryMonitor
     victron::DcDcData dcdc;         // valid when type == OrionXs
+    victron::SolarData solar;       // valid when type == SolarCharger
+    victron::AcChargerData charger; // valid when type == AcCharger
 
     // Data is considered stale (device out of range / powered off) if we have
     // not seen a fresh advertisement within this window.

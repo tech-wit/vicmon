@@ -55,6 +55,15 @@ const char* fieldKey(Field f) {
         case Field::DcDcInA: return "dcdc_in_a";
         case Field::DcDcOutA: return "dcdc_out_a";
         case Field::DcDcState: return "dcdc_state";
+        case Field::SolarBattV: return "solar_batt_v";
+        case Field::SolarBattA: return "solar_batt_a";
+        case Field::SolarPvW: return "solar_pv_w";
+        case Field::SolarYield: return "solar_yield";
+        case Field::SolarLoadA: return "solar_load_a";
+        case Field::SolarState: return "solar_state";
+        case Field::ChgBattV: return "chg_batt_v";
+        case Field::ChgBattA: return "chg_batt_a";
+        case Field::ChgState: return "chg_state";
         default: return "none";
     }
 }
@@ -72,6 +81,15 @@ const char* fieldLabel(Field f) {
         case Field::DcDcInA: return "Input current (A)";
         case Field::DcDcOutA: return "Output current (A)";
         case Field::DcDcState: return "State";
+        case Field::SolarBattV: return "Battery voltage (V)";
+        case Field::SolarBattA: return "Battery current (A)";
+        case Field::SolarPvW: return "PV power (W)";
+        case Field::SolarYield: return "Yield today (kWh)";
+        case Field::SolarLoadA: return "Load current (A)";
+        case Field::SolarState: return "State";
+        case Field::ChgBattV: return "Battery voltage (V)";
+        case Field::ChgBattA: return "Battery current (A)";
+        case Field::ChgState: return "State";
         default: return "none";
     }
 }
@@ -82,10 +100,15 @@ size_t fieldsForType(victron::Record type, Field* out, size_t max) {
                                     Field::BattTTG};
     static const Field dcdc[] = {Field::DcDcInV, Field::DcDcOutV, Field::DcDcInA,
                                  Field::DcDcOutA, Field::DcDcState};
+    static const Field solar[] = {Field::SolarBattV, Field::SolarBattA, Field::SolarPvW,
+                                  Field::SolarYield, Field::SolarLoadA, Field::SolarState};
+    static const Field charger[] = {Field::ChgBattV, Field::ChgBattA, Field::ChgState};
     const Field* src = nullptr;
     size_t n = 0;
     if (type == victron::Record::BatteryMonitor) { src = battery; n = sizeof(battery) / sizeof(Field); }
     else if (type == victron::Record::OrionXs) { src = dcdc; n = sizeof(dcdc) / sizeof(Field); }
+    else if (type == victron::Record::SolarCharger) { src = solar; n = sizeof(solar) / sizeof(Field); }
+    else if (type == victron::Record::AcCharger) { src = charger; n = sizeof(charger) / sizeof(Field); }
     if (n > max) n = max;
     for (size_t i = 0; i < n; ++i) out[i] = src[i];
     return n;
@@ -115,6 +138,15 @@ Resolved resolveField(DeviceSlot* slots, size_t n, const char* device, Field f,
         case Field::DcDcInA: r = {d.inputCurrent, d.inputIValid}; break;
         case Field::DcDcOutA: r = {d.outputCurrent, d.outputIValid}; break;
         case Field::DcDcState: r = {static_cast<float>(d.deviceState), true}; break;
+        case Field::SolarBattV: r = {s->solar.batteryVoltage, s->solar.battVValid}; break;
+        case Field::SolarBattA: r = {s->solar.batteryCurrent, s->solar.battIValid}; break;
+        case Field::SolarPvW: r = {s->solar.pvPower, s->solar.pvValid}; break;
+        case Field::SolarYield: r = {s->solar.yieldToday, s->solar.yieldValid}; break;
+        case Field::SolarLoadA: r = {s->solar.loadCurrent, s->solar.loadValid}; break;
+        case Field::SolarState: r = {static_cast<float>(s->solar.deviceState), true}; break;
+        case Field::ChgBattV: r = {s->charger.batteryVoltage, s->charger.battVValid}; break;
+        case Field::ChgBattA: r = {s->charger.batteryCurrent, s->charger.battIValid}; break;
+        case Field::ChgState: r = {static_cast<float>(s->charger.deviceState), true}; break;
         default: break;
     }
     return r;
@@ -174,9 +206,13 @@ void SignalMap::seedDefaults(DeviceSlot* slots, size_t n) {
     // Auto-bind from the first device of each relevant type.
     const char* bmv = nullptr;
     const char* orion = nullptr;
+    const char* solar = nullptr;
+    const char* charger = nullptr;
     for (size_t i = 0; i < n; ++i) {
         if (!bmv && slots[i].type == victron::Record::BatteryMonitor) bmv = slots[i].name;
         if (!orion && slots[i].type == victron::Record::OrionXs) orion = slots[i].name;
+        if (!solar && slots[i].type == victron::Record::SolarCharger) solar = slots[i].name;
+        if (!charger && slots[i].type == victron::Record::AcCharger) charger = slots[i].name;
     }
     if (bmv) {
         set(Role::BatterySOC, bmv, Field::BattSOC);
@@ -189,6 +225,13 @@ void SignalMap::seedDefaults(DeviceSlot* slots, size_t n) {
     if (orion) {
         set(Role::DcDcInA, orion, Field::DcDcInA);
         set(Role::DcDcOutA, orion, Field::DcDcOutA);
+    }
+    if (solar) {
+        set(Role::SolarA, solar, Field::SolarBattA);
+        set(Role::SolarW, solar, Field::SolarPvW);
+    }
+    if (charger) {
+        set(Role::ChargerA, charger, Field::ChgBattA);
     }
     // Load is computed from sources - net battery current by default.
     set(Role::LoadA, kDerived, Field::None);

@@ -31,4 +31,15 @@ bool parseBatteryMonitor(const uint8_t* decrypted, size_t len, BatteryData& out)
 //   off_reason     u32
 bool parseOrionXs(const uint8_t* decrypted, size_t len, DcDcData& out);
 
+// Parses a SmartSolar MPPT (record type 0x01) payload. UNVERIFIED layout
+// (LSB-first): device_state u8, charger_error u8, battery_voltage s16 0.01V,
+// battery_current s16 0.1A, yield_today u16 0.01kWh, pv_power u16 W,
+// load_current u9 0.1A.
+bool parseSolarCharger(const uint8_t* decrypted, size_t len, SolarData& out);
+
+// Parses an AC charger (record type 0x08) payload, primary output only.
+// UNVERIFIED: device_state u8, charger_error u8, battery_voltage_1 u13 0.01V,
+// battery_current_1 u11 0.1A.
+bool parseAcCharger(const uint8_t* decrypted, size_t len, AcChargerData& out);
+
 }  // namespace victron

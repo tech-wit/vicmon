@@ -90,4 +90,50 @@ bool parseOrionXs(const uint8_t* decrypted, size_t len, DcDcData& out) {
     return true;
 }
 
+bool parseSolarCharger(const uint8_t* decrypted, size_t len, SolarData& out) {
+    // 8+8+16+16+16+16+9 = 89 bits -> 12 bytes.
+    if (decrypted == nullptr || len < 12) return false;
+
+    BitReader r(decrypted, len);
+    out.deviceState = static_cast<uint8_t>(r.readUnsigned(8));
+    out.chargerError = static_cast<uint8_t>(r.readUnsigned(8));
+    int32_t bv = r.readSigned(16);
+    int32_t bi = r.readSigned(16);
+    uint16_t yld = static_cast<uint16_t>(r.readUnsigned(16));
+    uint16_t pv = static_cast<uint16_t>(r.readUnsigned(16));
+    uint16_t load = static_cast<uint16_t>(r.readUnsigned(9));
+
+    out.battVValid = (static_cast<uint16_t>(bv & 0xFFFF) != 0x7FFF);
+    out.batteryVoltage = bv * 0.01f;
+    out.battIValid = (static_cast<uint16_t>(bi & 0xFFFF) != 0x7FFF);
+    out.batteryCurrent = bi * 0.1f;
+    out.yieldValid = (yld != 0xFFFF);
+    out.yieldToday = yld * 0.01f;
+    out.pvValid = (pv != 0xFFFF);
+    out.pvPower = pv;
+    out.loadValid = (load != 0x1FF);
+    out.loadCurrent = load * 0.1f;
+    out.valid = true;
+    return true;
+}
+
+bool parseAcCharger(const uint8_t* decrypted, size_t len, AcChargerData& out) {
+    // device_state u8, charger_error u8, battery_voltage_1 u13, battery_current_1 u11
+    // = 40 bits -> 5 bytes minimum.
+    if (decrypted == nullptr || len < 5) return false;
+
+    BitReader r(decrypted, len);
+    out.deviceState = static_cast<uint8_t>(r.readUnsigned(8));
+    out.chargerError = static_cast<uint8_t>(r.readUnsigned(8));
+    uint16_t bv = static_cast<uint16_t>(r.readUnsigned(13));
+    uint16_t bi = static_cast<uint16_t>(r.readUnsigned(11));
+
+    out.battVValid = (bv != 0x1FFF);
+    out.batteryVoltage = bv * 0.01f;
+    out.battIValid = (bi != 0x7FF);
+    out.batteryCurrent = bi * 0.1f;
+    out.valid = true;
+    return true;
+}
+
 }  // namespace victron
