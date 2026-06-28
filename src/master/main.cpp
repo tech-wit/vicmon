@@ -131,7 +131,7 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
 }
 
 static void pollBle() {
-    NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
+    NimBLEScanResults results = gScan->start(1 /*second*/, false);
     for (int i = 0; i < results.getCount(); ++i) {
         NimBLEAdvertisedDevice d = results.getDevice(i);
         ingest(&d);
@@ -581,7 +581,7 @@ document.getElementById('legend').innerHTML=SERIES.map(function(se){
 var wb=document.querySelectorAll('.winbtn');
 for(var i=0;i<wb.length;i++)wb[i].addEventListener('click',function(){setWin(+this.dataset.m);});
 setWin(10);
-setInterval(tick,1000);tick();
+setInterval(tick,750);tick();
 setInterval(loadChart,5000);
 </script>
 )HTML";
@@ -1019,8 +1019,10 @@ void setup() {
     NimBLEDevice::init("");
     gScan = NimBLEDevice::getScan();
     gScan->setActiveScan(false);
-    gScan->setInterval(160);
-    gScan->setWindow(48);
+    // Listen ~60% of the time so each 1s scan reliably catches the BMV's ~1Hz
+    // broadcast (responsive updates) while leaving the WiFi AP enough airtime.
+    gScan->setInterval(100);
+    gScan->setWindow(60);
 }
 
 void loop() {
