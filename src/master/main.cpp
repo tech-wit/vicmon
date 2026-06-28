@@ -275,19 +275,23 @@ static String buildHistoryJson(int mins) {
 
 // ---- WiFi STA (join an existing network) -----------------------------------
 
-static float gBattCapacity = 0;  // Ah, 0 = unknown
+static float gBattCapacity = 0;     // Ah, 0 = unknown
+static float gDeadband = 0.2f;      // A; |current| below this reads as idle
 static void loadSettings() {
     Preferences p;
     p.begin("vicset", true);
     gBattCapacity = p.getFloat("battcap", 0);
+    gDeadband = p.getFloat("deadband", 0.2f);
     p.end();
 }
-static void saveCapacity(float c) {
+static void saveSettings(float capacity, float deadband) {
     Preferences p;
     p.begin("vicset", false);
-    p.putFloat("battcap", c);
+    p.putFloat("battcap", capacity);
+    p.putFloat("deadband", deadband);
     p.end();
-    gBattCapacity = c;
+    gBattCapacity = capacity;
+    gDeadband = deadband;
 }
 
 static String gStaSsid, gStaPass;
@@ -321,7 +325,7 @@ static String buildPanelJson() {
     sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
 
     const char* mode = "unknown";
-    if (ba.valid) mode = ba.value > 0.1f ? "charging" : (ba.value < -0.1f ? "discharging" : "idle");
+    if (ba.valid) mode = ba.value > gDeadband ? "charging" : (ba.value < -gDeadband ? "discharging" : "idle");
 
     // Load honours derived sentinels ((derived)/(charge_only)/(load_only)).
     sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
@@ -363,7 +367,7 @@ static String buildDataJson() {
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved ba = R(sig::Role::BatteryA, now);
     const char* mode = "unknown";
-    if (ba.valid) mode = ba.value > 0.1f ? "charging" : (ba.value < -0.1f ? "discharging" : "idle");
+    if (ba.valid) mode = ba.value > gDeadband ? "charging" : (ba.value < -gDeadband ? "discharging" : "idle");
     String j = "{";
     j += "\"system_status\":\"" + String(mode) + "\",";
     j += "\"battery_soc\":" + String(soc.value, 1) + ",";
@@ -469,8 +473,10 @@ async function tick(){
  set('soc',b.valid?Math.round(soc)+'%':'--');
  set('dV',b.valid?b.v.toFixed(2)+' V':'--');
  set('dA',b.valid?(b.a>=0?'+':'')+b.a.toFixed(1)+' A':'--');
- var used=b.consumed_valid?Math.abs(b.consumed):0;
- set('dAh',b.consumed_valid?(b.capacity>0?used.toFixed(0)+' / '+b.capacity.toFixed(0)+' Ah':used.toFixed(1)+' Ah used'):'-- Ah');
+ if(b.capacity>0&&b.valid){var rem=b.capacity*(b.soc/100);
+  set('dAh',rem.toFixed(0)+' / '+b.capacity.toFixed(0)+' Ah');}
+ else if(b.consumed_valid){set('dAh',Math.abs(b.consumed).toFixed(1)+' Ah used');}
+ else set('dAh','-- Ah');
  set('dStarter',b.starter_valid?'Starter '+b.starter_v.toFixed(2)+' V':'Starter --');
  set('dTTG',b.ttg_valid?'TTG '+ttgStr(b.ttg):'TTG ∞');
  var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');
@@ -557,7 +563,7 @@ static String pageHead(const char* active) {
     struct {
         const char* href;
         const char* name;
-    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Signals"},
+    } links[] = {{"/", "Mimic"}, {"/devices", "Devices"}, {"/bindings", "Settings"},
                  {"/wifi", "WiFi"}};
     for (auto& l : links) {
         h += "<a href='";
@@ -635,7 +641,7 @@ static String devicesPage() {
         h += "<input type=hidden name=idx value=" + String(i) + ">";
         h += "<div><label>Name</label><input name=name value='" + String(s.name) + "' required></div>";
         h += "<div><label>Type</label><select name=type>" + typeOptions(s.type) + "</select></div>";
-        h += "<div><label>Encryption key</label><input name=key pattern='[0-9a-fA-F]{32}' size=34 value='" +
+        h += "<div><label>Encryption key</label><input name=key size=34 value='" +
              keyHex(s.key) + "'></div>";
         h += "<button>save</button></form>";
         h += "<form class=inline method=post action=/del><input type=hidden name=name value='" +
@@ -649,7 +655,7 @@ static String devicesPage() {
          "<div><label>Type</label><select id=addType name=type>" +
          typeOptions(victron::Record::BatteryMonitor) +
          "</select></div>"
-         "<div><label>Key (32 hex)</label><input id=addKey name=key pattern='[0-9a-fA-F]{32}' size=34 required></div>"
+         "<div><label>Key (32 hex)</label><input id=addKey name=key size=34 required></div>"
          "<button>add</button></form></div>";
 
     h += "<div class=card><h3>Discovered nearby</h3>"
@@ -726,12 +732,15 @@ static String bindingsPage() {
     }
     h += "<button>save bindings</button></form></div>";
 
-    h += "<div class=card><h3>Battery capacity</h3>"
+    h += "<div class=card><h3>System settings</h3>"
          "<form class=inline method=post action=/capacity>"
-         "<div><label>Capacity (Ah, 0 = unknown)</label>"
+         "<div><label>Battery capacity (Ah, 0 = unknown)</label>"
          "<input name=cap type=number min=0 step=1 value='" + String(gBattCapacity, 0) + "'></div>"
+         "<div><label>Idle deadband (A)</label>"
+         "<input name=deadband type=number min=0 step=0.1 value='" + String(gDeadband, 1) + "'></div>"
          "<button>save</button></form>"
-         "<p class=muted>Shown on the mimic as <i>used / capacity Ah</i>.</p></div>";
+         "<p class=muted>Capacity shows remaining Ah on the mimic. Currents within "
+         "&plusmn;deadband read as <i>idle</i>.</p></div>";
 
     h += pageFoot();
     return h;
@@ -743,8 +752,14 @@ static String param(AsyncWebServerRequest* req, const char* k) {
     return req->hasParam(k, true) ? req->getParam(k, true)->value() : String("");
 }
 
+static String cleanKey(String key) {
+    key.trim();
+    key.replace(" ", "");
+    return key;
+}
+
 static void handleAdd(AsyncWebServerRequest* req) {
-    String name = param(req, "name"), type = param(req, "type"), key = param(req, "key");
+    String name = param(req, "name"), type = param(req, "type"), key = cleanKey(param(req, "key"));
     uint8_t k[16];
     if (name.length() && DeviceConfig::parseHexKey(key, k)) {
         gConfig.add(name.c_str(), parseType(type), k);
@@ -755,7 +770,7 @@ static void handleAdd(AsyncWebServerRequest* req) {
 
 static void handleEdit(AsyncWebServerRequest* req) {
     int idx = param(req, "idx").toInt();
-    String name = param(req, "name"), type = param(req, "type"), key = param(req, "key");
+    String name = param(req, "name"), type = param(req, "type"), key = cleanKey(param(req, "key"));
     uint8_t k[16];
     bool haveKey = DeviceConfig::parseHexKey(key, k);
     if (name.length()) {
@@ -777,7 +792,9 @@ static void handleDel(AsyncWebServerRequest* req) {
 static void handleCapacity(AsyncWebServerRequest* req) {
     float c = param(req, "cap").toFloat();
     if (c < 0) c = 0;
-    saveCapacity(c);
+    float db = param(req, "deadband").toFloat();
+    if (db < 0) db = 0;
+    saveSettings(c, db);
     req->redirect("/bindings");
 }
 
