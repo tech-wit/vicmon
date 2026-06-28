@@ -1,92 +1,91 @@
-# vicmon
+# Vicmon — Victron BLE Vehicle Monitor
 
+A standalone ESP32 system that monitors Victron Smart Bluetooth devices (battery
+monitors, DC-DC chargers, solar chargers) in a vehicle and presents them on a
+live web dashboard — no Home Assistant, no internet, no Bluetooth pairing.
 
+It reads Victron's encrypted **"Instant Readout"** BLE advertisements, decrypts
+them locally with each device's key, aggregates everything, and serves a dark
+**energy-flow "mimic"** UI plus a configurable signal/profile system over its own
+WiFi access point.
 
-## Getting started
+> **Status:** the full master logic + web app run **headless on an M5Stack
+> AtomS3 Lite** today (Phases 1–2). The physical LVGL display and ESP-NOW slaves
+> (Phases 3–4) are pending their boards. See `PROJECT_PLAN.md` for the roadmap
+> and architecture, and `PROJECT_SPEC.md` for the original brief.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## What works now
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+- Decrypts & parses Victron advertisements (BMV/SmartShunt verified vs VictronConnect; Orion XS DC-DC, MPPT, AC charger parsers present but scaling unverified).
+- **Mimic dashboard** — battery centre with SoC fill, solar/charger/DC-DC source nodes and a load, animated flow lines coloured by charge/discharge, battery detail (V, A, remaining Ah, starter V, time-to-go) and a mode banner.
+- **Trend chart** — server-logged history (continuous, survives client disconnects) with 1/10/30/60-minute windows.
+- **Devices** — add / edit / delete by AES key; live per-device summary; "Discovered nearby" list (with Bluetooth name, MAC, RSSI) to adopt new devices.
+- **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance.
+- **Profiles** — multiple independent setups (e.g. Home vs 4WD), switched instantly.
+- **WiFi** — always runs its AP; can also join an existing network.
+- Config persists in NVS (survives reboot **and** reflash).
 
-## Add your files
+## Hardware
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+- **Now:** M5Stack AtomS3 Lite (ESP32-S3, native USB) as the headless master.
+- **Coming:** Guition JC3248W535 (3.5" touch master display), LilyGo T-Display-S3 (slave).
+- Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect.
 
+## Quick start
+
+PlatformIO is used via a project virtualenv (`.piovenv/`, git-ignored):
+
+```bash
+python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
+
+# host unit tests (decrypt/parse) — no hardware needed
+.piovenv/bin/pio test -e native
+
+# build + flash the headless master to the AtomS3 (native USB → /dev/ttyACM0)
+.piovenv/bin/pio run -e atoms3 -t upload --upload-port /dev/ttyACM0
+
+# read the serial log (pio's own monitor needs an interactive TTY)
+.piovenv/bin/python tools/monitor.py --seconds 20
 ```
-cd existing_repo
-git remote add origin <your-remote-url>
-git branch -M main
-git push -uf origin main
-```
 
-## Integrate with your tools
+Build envs: `atoms3` (headless master, current dev target), `master` (Guition,
+Phase 3), `slave` (Phase 4 stub), `wroom` (Phase-1 reference scanner), `native`
+(host tests).
 
+## Using it
 
-## Collaborate with your team
+1. Power the master. It starts a WiFi AP **`Vicmon-Master`** (password `vicmon1234`).
+2. Join that network and open **`http://192.168.4.1/`** (a captive-portal prompt usually pops up).
+3. Go to **Settings → Profiles**, create/name a profile (e.g. "4WD").
+4. Go to **Devices → Add device**: enter a name, type, and the 32-hex **encryption key**.
+   - Get the key from **VictronConnect → the device → ⚙ → Product info →
+     Encryption data**. A key only ever decrypts its own device, so there's no
+     ambiguity about which device it belongs to.
+   - Or use **Discovered nearby** to see Victron devices in range (name/MAC/RSSI)
+     and pre-fill the form.
+5. The **Mimic** comes alive as devices are heard. Tune **Settings → System
+   settings** (battery capacity for remaining-Ah and time-to-full; idle deadband).
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## How it works (short version)
 
-## Test and Deploy
+Victron broadcasts AES-128-CTR-encrypted advertisements (company id `0x02E1`).
+The master listens (active scan), decrypts each with the matching device key,
+parses the bit-packed record, and stores the latest values per device. A
+**signal-binding** layer maps those device fields onto logical panel signals the
+UI consumes via `GET /api/panel`; a ring buffer feeds `GET /api/history`. The
+container/decryption details and the full module architecture are documented in
+`PROJECT_PLAN.md`.
 
-Use the built-in continuous integration in GitLab.
+## Notes
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- **No data without a key.** Only the advertisement *header* (model id, name,
+  MAC, signal strength) is cleartext; all readings are AES-encrypted.
+- **Config survives reflash** — only a deliberate `pio run -t erase` clears NVS.
+- **Matching is by key, not MAC** — robust against Victron's rotating addresses.
 
-***
+## Credits / references
 
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- Victron "Extra Manufacturer Data" specification (advertisement format)
+- [`keshavdv/victron-ble`](https://github.com/keshavdv/victron-ble) — Python reference
+- [`wytr/VictronSolarDisplayEsp`](https://github.com/wytr/VictronSolarDisplayEsp) — ESP reference
+- AES from the public-domain [`kokke/tiny-AES-c`](https://github.com/kokke/tiny-AES-c)
