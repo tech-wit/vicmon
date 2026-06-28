@@ -131,7 +131,7 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
 }
 
 static void pollBle() {
-    NimBLEScanResults results = gScan->start(1 /*second*/, false);
+    NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
     for (int i = 0; i < results.getCount(); ++i) {
         NimBLEAdvertisedDevice d = results.getDevice(i);
         ingest(&d);
@@ -506,8 +506,11 @@ async function tick(){
  else if(b.consumed_valid){set('dAh',Math.abs(b.consumed).toFixed(1)+' Ah used');}
  else set('dAh','-- Ah');
  set('dStarter',b.starter_valid?'Starter '+b.starter_v.toFixed(2)+' V':'Starter --');
- if(p.mode=='charging'&&b.capacity>0&&b.valid&&b.a>0.05){
-  var mins=(b.capacity*(1-b.soc/100))/b.a*60;set('dTTG','Full '+ttgStr(mins));}
+ // Estimate from instantaneous current so it settles in seconds, instead of the
+ // BMV's heavily-filtered (multi-minute) time-to-go. Needs a known capacity.
+ if(b.capacity>0&&b.valid&&Math.abs(b.a)>0.05){
+  if(b.a>0){var mf=(b.capacity*(1-b.soc/100))/b.a*60;set('dTTG','Full '+ttgStr(mf));}
+  else{var me=(b.capacity*(b.soc/100))/Math.abs(b.a)*60;set('dTTG','TTG '+ttgStr(me));}}
  else if(b.ttg_valid)set('dTTG','TTG '+ttgStr(b.ttg));
  else set('dTTG','TTG ∞');
  var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');
@@ -581,7 +584,7 @@ document.getElementById('legend').innerHTML=SERIES.map(function(se){
 var wb=document.querySelectorAll('.winbtn');
 for(var i=0;i<wb.length;i++)wb[i].addEventListener('click',function(){setWin(+this.dataset.m);});
 setWin(10);
-setInterval(tick,750);tick();
+setInterval(tick,1000);tick();
 setInterval(loadChart,5000);
 </script>
 )HTML";
@@ -1019,10 +1022,10 @@ void setup() {
     NimBLEDevice::init("");
     gScan = NimBLEDevice::getScan();
     gScan->setActiveScan(false);
-    // Listen ~60% of the time so each 1s scan reliably catches the BMV's ~1Hz
-    // broadcast (responsive updates) while leaving the WiFi AP enough airtime.
-    gScan->setInterval(100);
-    gScan->setWindow(60);
+    // Keep BLE duty cycle low so the WiFi AP gets enough radio airtime to stay
+    // joinable (window/interval ~= 30%). Victron advertises ~1/s.
+    gScan->setInterval(160);
+    gScan->setWindow(48);
 }
 
 void loop() {
