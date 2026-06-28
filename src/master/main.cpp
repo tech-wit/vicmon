@@ -170,13 +170,11 @@ static sig::Resolved resolveSignal(sig::Role role, uint32_t now) {
         sig::Resolved r;
         if (ba.valid) {
             float src = measuredSources(now);
+            // Complementary halves of the energy balance: charge = bat - src,
+            // load = src - bat (battery flow offset by solar + DC-DC output).
+            float v = chargeOnly ? (ba.value - src) : (src - ba.value);
             r.valid = true;
-            if (chargeOnly) {
-                float v = ba.value - src;
-                r.value = v > 0 ? v : 0;
-            } else {
-                r.value = ba.value < 0 ? (src - ba.value) : 0;
-            }
+            r.value = v > 0 ? v : 0;
         }
         return r;
     }
@@ -732,7 +730,8 @@ static String bindingsPage() {
          "<p class=muted>Tag which device field feeds each signal the mimic / "
          "display uses. Derived options compute from the battery current vs the "
          "measured sources: <b>charge unexplained</b> = battery charge beyond "
-         "solar/charger/DC-DC; <b>load</b> = consumption, 0 while net charging.</p>"
+         "solar/charger/DC-DC; <b>load</b> = consumption (sources offset by net "
+         "battery flow).</p>"
          "<form method=post action=/bind>";
 
     for (size_t r = 0; r < sig::kRoleCount; ++r) {
@@ -751,7 +750,7 @@ static String bindingsPage() {
             h += String("<option value='(charge_only)|0'") + (selC ? " selected" : "") +
                  ">Derived: charge unexplained by sources</option>";
             h += String("<option value='(load_only)|0'") + (selL ? " selected" : "") +
-                 ">Derived: load (0 when charging)</option>";
+                 ">Derived: load (sources &minus; battery)</option>";
         }
         for (size_t i = 0; i < gConfig.count(); ++i) {
             DeviceSlot& s = gConfig.slots()[i];
