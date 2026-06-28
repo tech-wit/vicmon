@@ -275,6 +275,21 @@ static String buildHistoryJson(int mins) {
 
 // ---- WiFi STA (join an existing network) -----------------------------------
 
+static float gBattCapacity = 0;  // Ah, 0 = unknown
+static void loadSettings() {
+    Preferences p;
+    p.begin("vicset", true);
+    gBattCapacity = p.getFloat("battcap", 0);
+    p.end();
+}
+static void saveCapacity(float c) {
+    Preferences p;
+    p.begin("vicset", false);
+    p.putFloat("battcap", c);
+    p.end();
+    gBattCapacity = c;
+}
+
 static String gStaSsid, gStaPass;
 static void loadWifi() {
     Preferences p;
@@ -306,7 +321,7 @@ static String buildPanelJson() {
     sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
 
     const char* mode = "unknown";
-    if (ba.valid) mode = ba.value > 0.5f ? "charging" : (ba.value < -0.5f ? "discharging" : "idle");
+    if (ba.valid) mode = ba.value > 0.1f ? "charging" : (ba.value < -0.1f ? "discharging" : "idle");
 
     // Load honours derived sentinels ((derived)/(charge_only)/(load_only)).
     sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
@@ -325,7 +340,8 @@ static String buildPanelJson() {
          ",\"a\":" + String(ba.value, 2) +
          ",\"consumed\":" + String(con.value, 1) + ",\"consumed_valid\":" + jbool(con.valid) +
          ",\"starter_v\":" + String(stv.value, 2) + ",\"starter_valid\":" + jbool(stv.valid) +
-         ",\"ttg\":" + String(ttg.value, 0) + ",\"ttg_valid\":" + jbool(ttg.valid) + "},";
+         ",\"ttg\":" + String(ttg.value, 0) + ",\"ttg_valid\":" + jbool(ttg.valid) +
+         ",\"capacity\":" + String(gBattCapacity, 0) + "},";
     j += "\"solar\":{\"valid\":" + jbool(sa.valid) +
          ",\"a\":" + String(sa.value, 1) +
          ",\"w\":" + String(sw.value, 0) + "},";
@@ -347,7 +363,7 @@ static String buildDataJson() {
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved ba = R(sig::Role::BatteryA, now);
     const char* mode = "unknown";
-    if (ba.valid) mode = ba.value > 0.5f ? "charging" : (ba.value < -0.5f ? "discharging" : "idle");
+    if (ba.valid) mode = ba.value > 0.1f ? "charging" : (ba.value < -0.1f ? "discharging" : "idle");
     String j = "{";
     j += "\"system_status\":\"" + String(mode) + "\",";
     j += "\"battery_soc\":" + String(soc.value, 1) + ",";
@@ -443,14 +459,18 @@ function setNode(id,valid,a){set(id,valid?a.toFixed(1)+'A':'--');}
 function setLine(id,mode,col){var e=document.getElementById(id);e.classList.remove('flow','flowrev');
  if(!mode){e.setAttribute('stroke','#2c3a4a');return;}e.setAttribute('stroke',col);
  e.classList.add(mode==1?'flow':'flowrev');}
-function ttgStr(m){return m>=6000?Math.round(m/60)+'h':Math.round(m)+'m';}
+function ttgStr(m){
+ if(m>=1440){var d=Math.floor(m/1440),h=Math.round((m%1440)/60);return d+'d'+(h?' '+h+'h':'');}
+ if(m>=60){var hh=Math.floor(m/60),mm=Math.round(m%60);return hh+'h'+(mm?' '+mm+'m':'');}
+ return Math.round(m)+'m';}
 async function tick(){
  let p; try{p=await(await fetch('/api/panel')).json();}catch(e){return;}
  var b=p.battery,soc=b.valid?b.soc:0;
  set('soc',b.valid?Math.round(soc)+'%':'--');
  set('dV',b.valid?b.v.toFixed(2)+' V':'--');
  set('dA',b.valid?(b.a>=0?'+':'')+b.a.toFixed(1)+' A':'--');
- set('dAh',b.consumed_valid?b.consumed.toFixed(1)+' Ah used':'-- Ah');
+ var used=b.consumed_valid?Math.abs(b.consumed):0;
+ set('dAh',b.consumed_valid?(b.capacity>0?used.toFixed(0)+' / '+b.capacity.toFixed(0)+' Ah':used.toFixed(1)+' Ah used'):'-- Ah');
  set('dStarter',b.starter_valid?'Starter '+b.starter_v.toFixed(2)+' V':'Starter --');
  set('dTTG',b.ttg_valid?'TTG '+ttgStr(b.ttg):'TTG ∞');
  var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');
@@ -465,19 +485,11 @@ async function tick(){
  setNode('chargerTxt',p.charger.valid,p.charger.a);
  setLine('lineDcdc',(p.dcdc.valid&&p.dcdc.out_a>0.05)?1:0,'#34d399');
  setNode('dcdcTxt',p.dcdc.valid,p.dcdc.out_a);
- // battery<->load line follows charge/discharge: charging pulls UP into the
- // battery (green), discharging pushes DOWN to the load (amber).
- var ba=b.valid?b.a:0,lm=0,lc='#fbbf24',lbl='Load',val='--';
- if(b.valid&&ba>0.5){           // charging
-   lm=2;lc='#34d399';
-   if(p.load.valid&&p.load.a>0.05){val=p.load.a.toFixed(1)+'A';}  // real load known
-   else{lbl='Charge';val=ba.toFixed(1)+'A';}                      // show charge rate
- }else if(b.valid&&ba<-0.5){    // discharging
-   lm=1;lc='#fbbf24';
-   val=(p.load.valid?p.load.a:Math.abs(ba)).toFixed(1)+'A';
- }else if(p.load.valid){val=p.load.a.toFixed(1)+'A';}
- setLine('lineLoad',lm,lc);
- set('loadTxt',lbl+' '+val);
+ // Load line is driven by the load signal itself: it flows DOWN to the load
+ // (amber) whenever there is load, independent of battery charge/discharge.
+ var ld=p.load.valid?p.load.a:0;
+ setLine('lineLoad',(p.load.valid&&ld>0.05)?1:0,'#fbbf24');
+ set('loadTxt','Load '+(p.load.valid?ld.toFixed(1)+'A':'--'));
 }
 var SERIES=[
  {k:'battery',label:'Battery',color:'#22d3ee'},
@@ -504,8 +516,13 @@ function drawChart(){
  SERIES.forEach(function(se){(s[se.k]||[]).forEach(function(v){
   if(v!=null){if(v<mn)mn=v;if(v>mx)mx=v;}});});
  if(mx-mn<2){mx=mn+2;}
+ // Right-align by real time over the full window, so 30/60m zoom out even
+ // before the buffer has that much history (data sits at the right edge).
+ var interval=chartData.interval||5;
+ var totalSlots=Math.max(2,Math.round(chartData.mins*60/interval));
  function Y(v){return padT+(H-padT-padB)*(1-(v-mn)/(mx-mn));}
- function X(i){return padL+(W-padL-padR)*(N<=1?0:i/(N-1));}
+ function X(i){var frac=1-((N-1-i)/(totalSlots-1));if(frac<0)frac=0;
+  return padL+(W-padL-padR)*frac;}
  // grid + Y labels (max, 0, min)
  ctx.fillStyle='#7d8da1';ctx.font='10px system-ui';ctx.textAlign='right';
  [mx,0,mn].forEach(function(v){var y=Y(v);
@@ -708,6 +725,14 @@ static String bindingsPage() {
         h += "</select></div>";
     }
     h += "<button>save bindings</button></form></div>";
+
+    h += "<div class=card><h3>Battery capacity</h3>"
+         "<form class=inline method=post action=/capacity>"
+         "<div><label>Capacity (Ah, 0 = unknown)</label>"
+         "<input name=cap type=number min=0 step=1 value='" + String(gBattCapacity, 0) + "'></div>"
+         "<button>save</button></form>"
+         "<p class=muted>Shown on the mimic as <i>used / capacity Ah</i>.</p></div>";
+
     h += pageFoot();
     return h;
 }
@@ -747,6 +772,13 @@ static void handleDel(AsyncWebServerRequest* req) {
         gConfig.save();
     }
     req->redirect("/devices");
+}
+
+static void handleCapacity(AsyncWebServerRequest* req) {
+    float c = param(req, "cap").toFloat();
+    if (c < 0) c = 0;
+    saveCapacity(c);
+    req->redirect("/bindings");
 }
 
 static void handleBind(AsyncWebServerRequest* req) {
@@ -839,6 +871,7 @@ static void setupServer() {
     gServer.on("/edit", HTTP_POST, handleEdit);
     gServer.on("/del", HTTP_POST, handleDel);
     gServer.on("/bind", HTTP_POST, handleBind);
+    gServer.on("/capacity", HTTP_POST, handleCapacity);
     gServer.onNotFound([](AsyncWebServerRequest* req) {
         req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());
     });
@@ -854,6 +887,7 @@ void setup() {
 
     gConfig.begin();
     gSignals.begin(gConfig.slots(), gConfig.count());
+    loadSettings();
     Serial.printf("Loaded %u device(s) from NVS\n", (unsigned)gConfig.count());
 
     loadWifi();
