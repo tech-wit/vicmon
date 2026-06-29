@@ -52,9 +52,8 @@ struct BatteryData {
 };
 
 // Decoded Orion XS DC-DC charger advertisement (record type 0x0F).
-// NOTE: field order/scaling below is the best reconstruction from the
-// `victron-ble` reference and is UNVERIFIED against real hardware — confirm
-// against a live hex dump + VictronConnect readings during Phase 1 bring-up.
+// Field order/scaling verified against real hardware (the "4wd" profile's Orion
+// XS) — input/output V & A cross-check with VictronConnect (2026-06-28).
 struct DcDcData {
     bool valid = false;
     uint8_t deviceState = 0;   // 0=off, 3=bulk, 4=absorption, 5=float, ...
@@ -70,7 +69,8 @@ struct DcDcData {
     uint32_t offReason = 0;
 };
 
-// Decoded SmartSolar MPPT advertisement (record type 0x01). UNVERIFIED scaling.
+// Decoded SmartSolar MPPT advertisement (record type 0x01). Scaling verified
+// against real hardware (the "4wd" profile's solar charger, 2026-06-28).
 struct SolarData {
     bool valid = false;
     uint8_t deviceState = 0;

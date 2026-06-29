@@ -21,6 +21,7 @@ public:
     size_t count() const { return count_; }
     DeviceSlot* slots() { return slots_; }
 
+    void clear() { count_ = 0; }  // drop all in-memory devices (for import)
     bool add(const char* name, victron::Record type, const uint8_t key[16]);
     // Update device at index. Pass key=nullptr to keep the existing key.
     bool update(size_t idx, const char* name, victron::Record type, const uint8_t* key);

@@ -77,6 +77,14 @@ void ProfileManager::rename(int id, const char* name) {
     }
 }
 
+void ProfileManager::setName(int id, const char* name) {
+    if (id >= 0 && id < kMax && name && name[0]) {
+        strncpy(names_[id], name, sizeof(names_[id]) - 1);
+        names_[id][sizeof(names_[id]) - 1] = '\0';
+        save();
+    }
+}
+
 void ProfileManager::remove(int id) {
     if (id >= 0 && id < kMax && id != active_ && usedCount() > 1) {
         names_[id][0] = '\0';

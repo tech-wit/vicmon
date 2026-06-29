@@ -16,6 +16,12 @@ struct DeviceSlot {
 
     bool everSeen = false;
     uint32_t lastSeenMs = 0;
+
+    // Last decrypted payload + model id, kept for the diagnostics page.
+    uint8_t raw[24] = {0};
+    uint8_t rawLen = 0;
+    uint16_t modelId = 0;
+
     victron::BatteryData battery;  // valid when type == BatteryMonitor
     victron::DcDcData dcdc;         // valid when type == OrionXs
     victron::SolarData solar;       // valid when type == SolarCharger

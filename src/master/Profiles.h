@@ -18,6 +18,7 @@ public:
     void setActive(int id);
     int create(const char* name);  // -> new id, or -1 if full
     void rename(int id, const char* name);
+    void setName(int id, const char* name);  // create-or-rename at a specific id (import)
     void remove(int id);  // clears the name slot (caller wipes NVS data)
 
 private:

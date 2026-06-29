@@ -16,13 +16,19 @@ WiFi access point.
 
 ## What works now
 
-- Decrypts & parses Victron advertisements (BMV/SmartShunt verified vs VictronConnect; Orion XS DC-DC, MPPT, AC charger parsers present but scaling unverified).
+- Decrypts & parses Victron advertisements (BMV/SmartShunt, Orion XS DC-DC and SmartSolar MPPT all verified vs VictronConnect; AC charger parser present but unverified).
 - **Mimic dashboard** — battery centre with SoC fill, solar/charger/DC-DC source nodes and a load, animated flow lines coloured by charge/discharge, battery detail (V, A, remaining Ah, starter V, time-to-go) and a mode banner.
-- **Trend chart** — server-logged history (continuous, survives client disconnects) with 1/10/30/60-minute windows.
+- **Trend chart** — server-logged history (continuous, survives client disconnects **and reboots** via LittleFS) with 1m/10m/1h/12h/24h windows and per-window scale marks (fine 5 s/1 h + coarse 60 s/24 h buffers). SoC is overlaid on a right-hand 0–100 % axis; click legend entries to show/hide each series.
+- **Alerts** — configurable low/critical SoC and low/high voltage thresholds plus device-offline detection; shown as a mimic banner and on the onboard RGB LED (red/amber/green).
+- **Config backup/restore** — download all profiles (devices, keys, bindings, settings) as JSON and restore from one; protects keys against erase/reflash and clones a second unit.
+- **Simulator build** (`atoms3-sim`) — synthetic battery/solar/DC-DC so the whole UI can be developed without any Victron device.
+- **Energy counters & trip stats** — Today / Trip / Total amp-hours & watt-hours per source (solar, DC-DC, charger) plus load and net battery, with min/max SoC & voltage, peak power and time charging/discharging. Today auto-resets at local midnight (NTP); Trip and Total reset on demand. Persisted in NVS, with a **last-7-days** energy bar chart.
 - **Devices** — add / edit / delete by AES key; live per-device summary; "Discovered nearby" list (with Bluetooth name, MAC, RSSI) to adopt new devices.
 - **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance.
 - **Profiles** — multiple independent setups (e.g. Home vs 4WD), switched instantly.
-- **WiFi** — always runs its AP; can also join an existing network.
+- **Diagnostics** — `/diag` page shows each device's live decoded fields plus the raw decrypted advertisement bytes, for verifying parsers against VictronConnect.
+- **OTA updates** — flash a new `firmware.bin` over WiFi from the Settings page.
+- **WiFi** — always runs its AP; can also join an existing network, reachable at `vicmon.local` (mDNS).
 - Config persists in NVS (survives reboot **and** reflash).
 
 ## Hardware
