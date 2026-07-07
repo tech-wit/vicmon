@@ -43,10 +43,19 @@ struct DashData {
   int      histCount = 0;          // valid points (<= HIST_POINTS)
   uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
 
-  // Settings page: read-only status + one control (brightness).
-  char     profileName[20] = "";
-  int      profileId = 0;
+  // Week page: last-7-days energy (Wh) + today's running totals.
+  static const int DAYS_N = 7;
+  uint32_t dayStamp[DAYS_N];       // yyyymmdd
+  float    daySolarWh[DAYS_N], dayDcdcWh[DAYS_N], dayChargerWh[DAYS_N], dayLoadWh[DAYS_N];
+  int      dayCount = 0;
+  bool     clockOk = false;        // NTP synced (needed for daily rollover)
+  float    todaySolarWh = 0, todayDcdcWh = 0, todayChargerWh = 0, todayLoadWh = 0;
+
+  // Settings page: status.
+  int      profileId = 0;          // active profile
   int      profileCount = 0;       // profiles in use
+  char     profNames[4][20];       // ProfileManager::kMax
+  bool     profUsed[4];
   char     apSsid[24] = "";
   char     ipStr[20] = "";
   int      devPaired = 0;          // configured signal-source devices
@@ -54,14 +63,30 @@ struct DashData {
   uint32_t uptimeSec = 0;
   uint32_t freeHeapKb = 0;
   char     version[16] = "";
-  uint8_t  brightness = 100;       // 0..100 %, owned by the display task
+
+  // Settings page: tunables (mirrored from firmware globals). Brightness and the
+  // selected row are display-owned (set by the display task before render).
+  uint8_t  brightness = 100;       // 0..100 %
+  float    battCapAh = 0;          // 0 = unknown/auto
+  float    deadbandA = 0;
+  int      tzMin = 0;              // timezone offset, minutes
+  float    socWarn = 0, socCrit = 0, vLow = 0, vHigh = 0;
+  uint8_t  setSel = 0;             // selected tunable row (0..TUNABLE_N-1)
 };
 
 // Pages selectable via the bottom tab bar.
-enum Page : uint8_t { PAGE_DASH = 0, PAGE_FLOW, PAGE_GRAPH, PAGE_SETTINGS, PAGE_COUNT };
+enum Page : uint8_t { PAGE_DASH = 0, PAGE_FLOW, PAGE_GRAPH, PAGE_DAYS, PAGE_SETTINGS, PAGE_COUNT };
 
-// Touchable controls on the Settings page.
-enum SettingsHit : uint8_t { SET_NONE = 0, SET_BRIGHT_DN, SET_BRIGHT_UP, SET_PROFILE_NEXT };
+// Adjustable tunables on the Settings page (indices shared with the firmware's
+// apply logic). Index 0 (brightness) is handled locally by the display task.
+enum Tunable : uint8_t {
+  TUN_BRIGHT = 0, TUN_BATTCAP, TUN_DEADBAND, TUN_TZ,
+  TUN_SOCWARN, TUN_SOCCRIT, TUN_VLOW, TUN_VHIGH, TUNABLE_N
+};
+
+// Result of a tap on the Settings page.
+enum SettingsAction : uint8_t { SA_NONE = 0, SA_PROFILE, SA_SELECT_ROW, SA_ADJ_DN, SA_ADJ_UP };
+struct SettingsHitResult { SettingsAction action; int index; };  // index: profile id or row
 
 // Draw the given page (content + tab bar) into the landscape 480x320 canvas.
 // Does not flush.
@@ -72,7 +97,7 @@ void renderPage(Arduino_GFX* c, Page page, const DashData& d);
 int tabHitTest(int tx, int ty);
 
 // Hit-test the Settings-page controls (call only when the Settings page is up).
-SettingsHit settingsHitTest(int tx, int ty);
+SettingsHitResult settingsHit(int tx, int ty);
 
 // True if (tx,ty) hit the Graph-page window pill (cycle the zoom window). Call
 // only when the Graph page is up.

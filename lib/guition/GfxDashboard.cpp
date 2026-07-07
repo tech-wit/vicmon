@@ -59,7 +59,7 @@ static uint16_t modeColor(const DashData& d) {
 
 // ---------------------------------------------------------------- tab bar ----
 static void renderTabs(Arduino_GFX* c, Page page) {
-  static const char* names[PAGE_COUNT] = {"Dash", "Flow", "Graph", "Set"};
+  static const char* names[PAGE_COUNT] = {"Dash", "Flow", "Graph", "Week", "Set"};
   c->fillRect(0, TAB_Y, W, TAB_H, kBg);
   c->drawFastHLine(0, TAB_Y, W, kGrey);
   for (int i = 0; i < PAGE_COUNT; ++i) {
@@ -320,18 +320,112 @@ static void renderGraph(Arduino_GFX* c, const DashData& d) {
   gtext(c, &FreeSans9pt7b, amp.x + 6, amp.y + 16, "Battery A (+charge)", kMuted);
 }
 
-// --------------------------------------------------------- settings page ----
-// Control geometry shared by renderSettings() and settingsHitTest().
-static constexpr int SET_CARD_X = 262, SET_CARD_W = (W - 8) - 262;
-static constexpr int SET_BR_Y = 108, SET_BR_H = 54, SET_BR_W = 62;
-static constexpr int SET_BR_DN_X = SET_CARD_X + 14;
-static constexpr int SET_BR_UP_X = SET_CARD_X + SET_CARD_W - 14 - SET_BR_W;
-static constexpr int SET_PROF_X = SET_CARD_X + 14, SET_PROF_Y = 208;
-static constexpr int SET_PROF_W = SET_CARD_W - 28, SET_PROF_H = 54;
+// ------------------------------------------------------------- week page ----
+// Last-7-days energy: stacked Wh in (solar+dcdc+charger) vs Wh out (load), one
+// pair of bars per day. Mirrors the web app's "Last 7 days" chart.
+static void renderDays(Arduino_GFX* c, const DashData& d) {
+  char buf[40];
+  gtext(c, &FreeSansBold18pt7b, 12, 28, "Last 7 days", kText);
+  snprintf(buf, sizeof(buf), "today  in %.0f  out %.0f Wh",
+           d.todaySolarWh + d.todayDcdcWh + d.todayChargerWh, d.todayLoadWh);
+  gtext(c, &FreeSans9pt7b, W - 12, 26, buf, kMuted, R);
 
-static void setRow(Arduino_GFX* c, int y, const char* label, const char* value) {
-  gtext(c, &FreeSans9pt7b, 20, y, label, kMuted);
-  gtext(c, &FreeSansBold12pt7b, 246, y, value, kText, R);
+  const int px = 40, py = 54, pw = (W - 12) - 40, ph = 170;  // plot rect
+  c->fillRoundRect(8, 44, W - 16, 210, 10, kCard);           // card 44..254
+
+  if (d.dayCount < 1) {
+    gtext(c, &FreeSansBold18pt7b, W / 2, 140, "No completed days yet", kMuted, C);
+    gtext(c, &FreeSans9pt7b, W / 2, 168,
+          d.clockOk ? "check back after midnight" : "needs WiFi/NTP clock", kMuted, C);
+  } else {
+    // Scale to the tallest of (stacked-in, out) across the shown days.
+    float mx = 1;
+    for (int i = 0; i < d.dayCount; ++i) {
+      float in = d.daySolarWh[i] + d.dayDcdcWh[i] + d.dayChargerWh[i];
+      if (in > mx) mx = in;
+      if (d.dayLoadWh[i] > mx) mx = d.dayLoadWh[i];
+    }
+    auto yOf = [&](float v) { return py + (int)(ph * (1.0f - v / mx)); };
+    for (int g = 0; g <= 2; ++g) {                       // gridlines mx, mx/2, 0
+      float gv = mx * (2 - g) / 2;
+      int gy = yOf(gv);
+      c->drawFastHLine(px, gy, pw, kGrey);
+      snprintf(buf, sizeof(buf), "%.0f", gv);
+      gtext(c, &FreeSans9pt7b, px - 4, gy + 4, buf, kMuted, R);
+    }
+    int n = d.dayCount;
+    float slot = (float)pw / n;
+    int bw = (int)(slot * 0.30f); if (bw < 4) bw = 4;
+    int base = yOf(0);
+    for (int i = 0; i < n; ++i) {
+      int cx = px + (int)(slot * (i + 0.5f));
+      int xi = cx - bw - 1, xo = cx + 1;
+      // stacked IN
+      float acc = 0;
+      const float vals[3] = {d.daySolarWh[i], d.dayDcdcWh[i], d.dayChargerWh[i]};
+      const uint16_t cols[3] = {kGold, kBlue, kGreen};
+      for (int s = 0; s < 3; ++s) {
+        float v = vals[s]; if (v <= 0) continue;
+        int y0 = yOf(acc), y1 = yOf(acc + v);
+        c->fillRect(xi, y1, bw, y0 - y1, cols[s]);
+        acc += v;
+      }
+      // OUT (load)
+      if (d.dayLoadWh[i] > 0) {
+        int yo = yOf(d.dayLoadWh[i]);
+        c->fillRect(xo, yo, bw, base - yo, kRed);
+      }
+      // date label MM/DD
+      uint32_t ymd = d.dayStamp[i];
+      snprintf(buf, sizeof(buf), "%02u/%02u", (ymd / 100) % 100, ymd % 100);
+      gtext(c, &FreeSans9pt7b, cx, py + ph + 14, buf, kMuted, C);
+    }
+  }
+  // Legend (below the card, above the tab bar).
+  int lx = 14, ly = 270;
+  gtext(c, &FreeSans9pt7b, lx, ly, "In: Solar", kGold);      lx += 82;
+  gtext(c, &FreeSans9pt7b, lx, ly, "DC-DC", kBlue);          lx += 60;
+  gtext(c, &FreeSans9pt7b, lx, ly, "Charger", kGreen);       lx += 76;
+  gtext(c, &FreeSans9pt7b, lx, ly, "Out: Load", kRed);
+}
+
+// --------------------------------------------------------- settings page ----
+// Layout constants shared by renderSettings() and settingsHit().
+static constexpr int PROF_X = 8,   PROF_Y = 66, PROF_W = 200, PROF_RH = 24;  // profile rows
+static constexpr int TUN_X = 216,  TUN_Y = 68, TUN_W = W - 8 - 216, TUN_RH = 20;  // tunable rows
+static constexpr int ADJ_Y = 232, ADJ_H = 40;                               // -/+ buttons
+static constexpr int ADJ_W = (TUN_W - 8) / 2;
+
+struct TunInfo { const char* label; const char* unit; };
+static const TunInfo kTun[TUNABLE_N] = {
+  {"Brightness", "%"}, {"Battery cap", "Ah"}, {"Deadband", "A"}, {"Timezone", "h"},
+  {"SoC warn", "%"},   {"SoC crit", "%"},     {"Volt low", "V"}, {"Volt high", "V"},
+};
+
+static float tunValue(const DashData& d, int i) {
+  switch (i) {
+    case TUN_BRIGHT:   return d.brightness;
+    case TUN_BATTCAP:  return d.battCapAh;
+    case TUN_DEADBAND: return d.deadbandA;
+    case TUN_TZ:       return d.tzMin / 60.0f;
+    case TUN_SOCWARN:  return d.socWarn;
+    case TUN_SOCCRIT:  return d.socCrit;
+    case TUN_VLOW:     return d.vLow;
+    case TUN_VHIGH:    return d.vHigh;
+  }
+  return 0;
+}
+
+static void tunText(char* buf, size_t n, int i, float v) {
+  switch (i) {
+    case TUN_BRIGHT:  snprintf(buf, n, "%.0f%%", v); break;
+    case TUN_BATTCAP: (v <= 0) ? snprintf(buf, n, "auto") : snprintf(buf, n, "%.0f Ah", v); break;
+    case TUN_DEADBAND:snprintf(buf, n, "%.2f A", v); break;
+    case TUN_TZ:      snprintf(buf, n, "%+.1f h", v); break;
+    case TUN_SOCWARN:
+    case TUN_SOCCRIT: snprintf(buf, n, "%.0f%%", v); break;
+    default:          snprintf(buf, n, "%.1f V", v); break;
+  }
 }
 
 static void button(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
@@ -342,56 +436,76 @@ static void button(Arduino_GFX* c, int x, int y, int w, int h, const char* label
 }
 
 static void renderSettings(Arduino_GFX* c, const DashData& d) {
-  char buf[40];
+  char buf[48];
   gtext(c, &FreeSansBold18pt7b, 12, 28, "Settings", kText);
 
-  // Left: read-only status.
-  c->fillRoundRect(8, 44, 246, TAB_Y - 52, 10, kCard);
-  int y = 74;
-  const int dy = 30;
-  snprintf(buf, sizeof(buf), "%s (%d)", d.profileName, d.profileCount);
-  setRow(c, y, "Profile", buf); y += dy;
-  setRow(c, y, "AP", d.apSsid); y += dy;
-  setRow(c, y, "IP", d.ipStr); y += dy;
+  // --- Left column: profiles (tap to switch) + status ---
+  c->fillRoundRect(8, 44, 200, TAB_Y - 52, 10, kCard);
+  gtext(c, &FreeSans9pt7b, 18, 60, "PROFILES (tap)", kMuted);
+  for (int i = 0; i < 4; ++i) {
+    int ry = PROF_Y + i * PROF_RH;
+    if (!d.profUsed[i]) continue;
+    bool active = (i == d.profileId);
+    if (active) c->fillRoundRect(PROF_X + 6, ry, PROF_W - 12, PROF_RH - 2, 5, kGrey);
+    uint16_t dot = active ? kGreen : kMuted;
+    c->fillCircle(PROF_X + 16, ry + (PROF_RH - 2) / 2, 4, dot);
+    gtext(c, &FreeSans9pt7b, PROF_X + 28, ry + 15, d.profNames[i], active ? kText : kMuted);
+  }
+  // Status lines below the profile list.
+  int sy = PROF_Y + 4 * PROF_RH + 12;
+  const int dy = 17;
+  auto stat = [&](const char* label, const char* val) {
+    gtext(c, &FreeSans9pt7b, 18, sy, label, kMuted);
+    gtext(c, &FreeSans9pt7b, 200, sy, val, kText, R);
+    sy += dy;
+  };
+  stat("AP", d.apSsid);
+  stat("IP", d.ipStr);
   snprintf(buf, sizeof(buf), "%d / %d", d.devPaired, d.devSeen);
-  setRow(c, y, "Devices (set/seen)", buf); y += dy;
+  stat("Dev set/seen", buf);
   uint32_t up = d.uptimeSec;
   if (up >= 86400) snprintf(buf, sizeof(buf), "%ud %uh", up / 86400, (up % 86400) / 3600);
   else if (up >= 3600) snprintf(buf, sizeof(buf), "%uh %um", up / 3600, (up % 3600) / 60);
   else snprintf(buf, sizeof(buf), "%um", up / 60);
-  setRow(c, y, "Uptime", buf); y += dy;
-  snprintf(buf, sizeof(buf), "%u KB", d.freeHeapKb);
-  setRow(c, y, "Free heap", buf); y += dy;
-  setRow(c, y, "Firmware", d.version[0] ? d.version : "--");
+  stat("Uptime", buf);
+  snprintf(buf, sizeof(buf), "%uKB", d.freeHeapKb);
+  stat("Free heap", buf);
+  stat("Firmware", d.version[0] ? d.version : "--");
 
-  // Right: controls.
-  c->fillRoundRect(SET_CARD_X, 44, SET_CARD_W, TAB_Y - 52, 10, kCard);
-  gtext(c, &FreeSans9pt7b, SET_CARD_X + 14, 74, "Brightness", kMuted);
-  snprintf(buf, sizeof(buf), "%d%%", d.brightness);
-  gtext(c, &FreeSansBold18pt7b, SET_CARD_X + SET_CARD_W / 2, 96, buf, kText, C);
-  button(c, SET_BR_DN_X, SET_BR_Y, SET_BR_W, SET_BR_H, "-", kBlue);
-  button(c, SET_BR_UP_X, SET_BR_Y, SET_BR_W, SET_BR_H, "+", kBlue);
-  // brightness bar between the buttons
-  int barx = SET_BR_DN_X + SET_BR_W + 8;
-  int barw = SET_BR_UP_X - 8 - barx;
-  int bary = SET_BR_Y + SET_BR_H / 2 - 6;
-  if (barw > 10) {
-    c->fillRoundRect(barx, bary, barw, 12, 4, kGrey);
-    int fw = (barw - 4) * d.brightness / 100;
-    if (fw > 0) c->fillRoundRect(barx + 2, bary + 2, fw, 8, 3, kBlue);
+  // --- Right column: tunables (tap a row, adjust with -/+) ---
+  c->fillRoundRect(TUN_X, 44, TUN_W, TAB_Y - 52, 10, kCard);
+  gtext(c, &FreeSans9pt7b, TUN_X + 12, 60, "ADJUST (tap a row)", kMuted);
+  for (int i = 0; i < TUNABLE_N; ++i) {
+    int ry = TUN_Y + i * TUN_RH;
+    bool sel = (i == d.setSel);
+    if (sel) c->fillRoundRect(TUN_X + 6, ry, TUN_W - 12, TUN_RH - 2, 4, kGrey);
+    gtext(c, &FreeSans9pt7b, TUN_X + 14, ry + 15, kTun[i].label, sel ? kText : kMuted);
+    tunText(buf, sizeof(buf), i, tunValue(d, i));
+    gtext(c, &FreeSansBold12pt7b, TUN_X + TUN_W - 14, ry + 16, buf, sel ? kBlue : kText, R);
   }
-  button(c, SET_PROF_X, SET_PROF_Y, SET_PROF_W, SET_PROF_H,
-         d.profileCount > 1 ? "Next profile" : "1 profile", kGold);
+  // Adjust buttons act on the highlighted row.
+  button(c, TUN_X, ADJ_Y, ADJ_W, ADJ_H, "-", kBlue);
+  button(c, TUN_X + ADJ_W + 8, ADJ_Y, ADJ_W, ADJ_H, "+", kBlue);
 }
 
-SettingsHit settingsHitTest(int x, int y) {
+SettingsHitResult settingsHit(int x, int y) {
   auto in = [&](int rx, int ry, int rw, int rh) {
     return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
   };
-  if (in(SET_BR_DN_X, SET_BR_Y, SET_BR_W, SET_BR_H)) return SET_BRIGHT_DN;
-  if (in(SET_BR_UP_X, SET_BR_Y, SET_BR_W, SET_BR_H)) return SET_BRIGHT_UP;
-  if (in(SET_PROF_X, SET_PROF_Y, SET_PROF_W, SET_PROF_H)) return SET_PROFILE_NEXT;
-  return SET_NONE;
+  // Adjust buttons.
+  if (in(TUN_X, ADJ_Y, ADJ_W, ADJ_H)) return {SA_ADJ_DN, 0};
+  if (in(TUN_X + ADJ_W + 8, ADJ_Y, ADJ_W, ADJ_H)) return {SA_ADJ_UP, 0};
+  // Tunable rows.
+  if (in(TUN_X, TUN_Y, TUN_W, TUNABLE_N * TUN_RH)) {
+    int row = (y - TUN_Y) / TUN_RH;
+    if (row >= 0 && row < TUNABLE_N) return {SA_SELECT_ROW, row};
+  }
+  // Profile rows.
+  if (in(PROF_X, PROF_Y, PROF_W, 4 * PROF_RH)) {
+    int row = (y - PROF_Y) / PROF_RH;
+    if (row >= 0 && row < 4) return {SA_PROFILE, row};
+  }
+  return {SA_NONE, 0};
 }
 
 // -------------------------------------------------------------- dispatch ----
@@ -400,6 +514,7 @@ void renderPage(Arduino_GFX* c, Page page, const DashData& d) {
   switch (page) {
     case PAGE_FLOW:     renderFlow(c, d); break;
     case PAGE_GRAPH:    renderGraph(c, d); break;
+    case PAGE_DAYS:     renderDays(c, d); break;
     case PAGE_SETTINGS: renderSettings(c, d); break;
     case PAGE_DASH:
     default:            renderDash(c, d); break;

@@ -64,9 +64,12 @@ static guition::Touch    gTouch;
 static bool              gDisplayOk = false;
 static guition::DashData gDash;
 static SemaphoreHandle_t gDashMux = nullptr;
-// Set by the display task (Settings page) when the user taps "Next profile";
-// consumed on the loop task, which owns the registry / profile switch.
-static volatile bool gProfileNextReq = false;
+// Requests from the display task (Settings page) that must run on the loop task
+// (registry / NVS owner). -1 / 0 = idle.
+static volatile int gProfileReq = -1;    // profile id to switch to
+static volatile int gSetAdjWhich = -1;   // guition::Tunable index being adjusted
+static volatile int gSetAdjSteps = 0;    // accumulated signed steps to apply
+static int gSetSel = 0;                  // display-local: selected tunable row
 // Graph-page zoom window (minutes), set by the display task, read by collectDash
 // on the loop task. Matches the web chart's windows.
 static const int kGraphWins[] = {1, 10, 60, 720, 1440};  // 1m 10m 1h 12h 24h
@@ -793,11 +796,34 @@ static void collectDash(guition::DashData& d) {
     // Graph page.
     collectHistory(d);
 
-    // Settings page: read-only status (brightness is filled by the display task).
-    strncpy(d.profileName, gProfiles.name(gProfiles.active()), sizeof(d.profileName) - 1);
-    d.profileName[sizeof(d.profileName) - 1] = '\0';
+    // Week page: last-7-days energy + today's running totals.
+    d.clockOk = (currentLocalEpoch() != 0);
+    int dc = (int)gStats.dayCount();
+    int start = dc > guition::DashData::DAYS_N ? dc - guition::DashData::DAYS_N : 0;
+    int out = 0;
+    for (int i = start; i < dc; ++i) {
+        const stats::DayRecord& r = gStats.day(i);
+        d.dayStamp[out]     = r.dayStamp;
+        d.daySolarWh[out]   = r.solarWh;
+        d.dayDcdcWh[out]    = r.dcdcWh;
+        d.dayChargerWh[out] = r.chargerWh;
+        d.dayLoadWh[out]    = r.loadWh;
+        ++out;
+    }
+    d.dayCount = out;
+    const stats::Bucket& tb = gStats.bucket(stats::TODAY);
+    d.todaySolarWh = tb.solarWh; d.todayDcdcWh = tb.dcdcWh;
+    d.todayChargerWh = tb.chargerWh; d.todayLoadWh = tb.loadWh;
+
+    // Settings page: profiles, status, tunables (brightness + selected row are
+    // filled by the display task).
     d.profileId = gProfiles.active();
     d.profileCount = gProfiles.usedCount();
+    for (int i = 0; i < ProfileManager::kMax && i < 4; ++i) {
+        d.profUsed[i] = gProfiles.used(i);
+        strncpy(d.profNames[i], gProfiles.name(i), sizeof(d.profNames[i]) - 1);
+        d.profNames[i][sizeof(d.profNames[i]) - 1] = '\0';
+    }
     strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1);
     d.apSsid[sizeof(d.apSsid) - 1] = '\0';
     WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
@@ -807,6 +833,11 @@ static void collectDash(guition::DashData& d) {
     d.freeHeapKb = ESP.getFreeHeap() / 1024;
     strncpy(d.version, kFwVersion, sizeof(d.version) - 1);
     d.version[sizeof(d.version) - 1] = '\0';
+    d.battCapAh = gBattCapacity;
+    d.deadbandA = gDeadband;
+    d.tzMin = gTzOffsetMin;
+    d.socWarn = gSocWarn; d.socCrit = gSocCrit;
+    d.vLow = gVlow; d.vHigh = gVhigh;
 }
 
 // Redraw the dashboard from the latest signals a few times/sec. Called from
@@ -825,21 +856,59 @@ static void publishDash() {
     }
 }
 
-// Handle deferred requests from the display task that must run on the loop task
-// (registry owner). Currently: "Next profile" from the Settings page.
-static void serviceDashRequests() {
-    if (!gProfileNextReq) return;
-    gProfileNextReq = false;
-    int cur = gProfiles.active();
-    for (int i = 1; i <= ProfileManager::kMax; ++i) {
-        int cand = (cur + i) % ProfileManager::kMax;
-        if (cand != cur && gProfiles.used(cand)) {
-            saveHistFile(cur);           // flush the outgoing profile's history
-            gProfiles.setActive(cand);
-            applyProfile(cand);
-            Serial.printf("[display] switched to profile '%s'\n", gProfiles.name(cand));
+// Apply a Settings-page tunable adjustment (loop task: writes globals + NVS).
+// `which` is a guition::Tunable; brightness (index 0) is handled by the display
+// task and never reaches here. Each save*() call persists the whole group.
+static void applyTunableAdjust(int which, int steps) {
+    auto clampf = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    switch (which) {
+        case guition::TUN_BATTCAP:
+            saveSettings(clampf(gBattCapacity + steps * 5.0f, 0, 2000), gDeadband, gTzOffsetMin);
+            break;
+        case guition::TUN_DEADBAND:
+            saveSettings(gBattCapacity, clampf(gDeadband + steps * 0.05f, 0, 2), gTzOffsetMin);
+            break;
+        case guition::TUN_TZ: {
+            int tz = gTzOffsetMin + steps * 30;
+            if (tz < -720) tz = -720;
+            if (tz > 840) tz = 840;
+            saveSettings(gBattCapacity, gDeadband, tz);
             break;
         }
+        case guition::TUN_SOCWARN:
+            saveAlertSettings(clampf(gSocWarn + steps * 5, 0, 100), gSocCrit, gVlow, gVhigh);
+            break;
+        case guition::TUN_SOCCRIT:
+            saveAlertSettings(gSocWarn, clampf(gSocCrit + steps * 5, 0, 100), gVlow, gVhigh);
+            break;
+        case guition::TUN_VLOW:
+            saveAlertSettings(gSocWarn, gSocCrit, clampf(gVlow + steps * 0.1f, 5, 20), gVhigh);
+            break;
+        case guition::TUN_VHIGH:
+            saveAlertSettings(gSocWarn, gSocCrit, gVlow, clampf(gVhigh + steps * 0.1f, 5, 20));
+            break;
+        default: break;
+    }
+}
+
+// Handle deferred requests from the display task (Settings page) — profile
+// switch and tunable adjust — on the loop task, which owns the registry / NVS.
+static void serviceDashRequests() {
+    if (gProfileReq >= 0) {
+        int target = gProfileReq;
+        gProfileReq = -1;
+        if (target < ProfileManager::kMax && gProfiles.used(target) &&
+            target != gProfiles.active()) {
+            saveHistFile(gProfiles.active());   // flush the outgoing profile's history
+            gProfiles.setActive(target);
+            applyProfile(target);
+            Serial.printf("[display] switched to profile '%s'\n", gProfiles.name(target));
+        }
+    }
+    if (gSetAdjWhich >= 0 && gSetAdjSteps != 0) {
+        int which = gSetAdjWhich, steps = gSetAdjSteps;
+        gSetAdjSteps = 0;
+        applyTunableAdjust(which, steps);
     }
 }
 
@@ -868,19 +937,28 @@ static void displayTask(void*) {
                     redraw = true;
                 }
             } else if (gPage == guition::PAGE_SETTINGS) {
-                // Settings controls. Brightness is display-owned (handle here);
-                // profile switching is deferred to the loop task.
-                switch (guition::settingsHitTest(tp.x, tp.y)) {
-                    case guition::SET_BRIGHT_DN: {
-                        int b = gDisplay.brightness() - 10; if (b < 10) b = 10;
-                        gDisplay.setBrightness((uint8_t)b); redraw = true; break;
+                // Tap a profile row to switch, a tunable row to select it, and
+                // -/+ to adjust the selected tunable. Brightness is display-owned
+                // (applied here); the rest is deferred to the loop task.
+                guition::SettingsHitResult h = guition::settingsHit(tp.x, tp.y);
+                switch (h.action) {
+                    case guition::SA_PROFILE:
+                        gProfileReq = h.index; break;
+                    case guition::SA_SELECT_ROW:
+                        gSetSel = h.index; redraw = true; break;
+                    case guition::SA_ADJ_DN:
+                    case guition::SA_ADJ_UP: {
+                        int dir = (h.action == guition::SA_ADJ_UP) ? 1 : -1;
+                        if (gSetSel == guition::TUN_BRIGHT) {
+                            int b = gDisplay.brightness() + dir * 10;
+                            if (b < 10) b = 10; if (b > 100) b = 100;
+                            gDisplay.setBrightness((uint8_t)b);
+                        } else {
+                            gSetAdjWhich = gSetSel;
+                            gSetAdjSteps += dir;
+                        }
+                        redraw = true; break;
                     }
-                    case guition::SET_BRIGHT_UP: {
-                        int b = gDisplay.brightness() + 10; if (b > 100) b = 100;
-                        gDisplay.setBrightness((uint8_t)b); redraw = true; break;
-                    }
-                    case guition::SET_PROFILE_NEXT:
-                        gProfileNextReq = true; break;
                     default: break;
                 }
             }
@@ -897,6 +975,7 @@ static void displayTask(void*) {
             }
             d.brightness = gDisplay.brightness();  // display-owned, not in the snapshot
             d.histWinMin = (uint16_t)gGraphWinMin;  // reflect the pill instantly; data follows
+            d.setSel = (uint8_t)gSetSel;            // selected tunable row (display-owned)
             guition::renderPage(gDisplay.canvas(), gPage, d);
             gDisplay.flush();
         }
