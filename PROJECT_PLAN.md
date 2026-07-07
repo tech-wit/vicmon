@@ -11,7 +11,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 0 | Scaffold (PlatformIO envs, shared lib, tests) | ✅ done |
 | 1 | BLE advertisement decryption core | ✅ done, verified on hardware |
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
-| 3 | Master LVGL display (Guition board) | ⛔ not started — awaiting board |
+| 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
 | 4 | Slaves + ESP-NOW transport (LilyGo board) | 🟡 protocol + master broadcaster + slave receive core done; display awaits board |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
@@ -24,7 +24,8 @@ already-solid data + config layer.
 
 | Area | Decision | Why |
 |---|---|---|
-| Framework | **PlatformIO + Arduino-ESP32** | Best library ecosystem (LVGL, NimBLE), fast to start. |
+| Framework | **PlatformIO + Arduino-ESP32** | Best library ecosystem (NimBLE, GFX), fast to start. |
+| Master display UI | **Arduino_GFX direct-draw** (LVGL dropped) | LVGL works on the AXS15231B panel but its anti-aliased fonts fringe on 16-bit colour (grainy) with no gain over crisp 1-bit GFX fonts, plus an unexplained WiFi-SoftAP heap crash. Direct-draw is simpler, smaller, stable. LVGL kept as the `lvglref` reference env. |
 | BLE method | **Advertisement decryption only** ("Instant Readout") | No pairing/bonding, scales past the ~4-connection limit, lower power, degrades gracefully out of range. GATT deferred. |
 | Device matching | **By AES key**, not MAC | The key uniquely identifies a device (key-check byte + decrypt). Immune to Victron's resolvable/rotating MACs. MAC is learned for display only. |
 | Slave transport | **Both** — WiFi AP + HTTP, and ESP-NOW (Phase 4) | AP gives the config UI + `GET /api/panel`; ESP-NOW will give low-latency slave updates. |
@@ -46,7 +47,7 @@ already-solid data + config layer.
 
 ```
 vicmon/
-├── platformio.ini          # envs: wroom, atoms3, atoms3-sim, master, slave, native
+├── platformio.ini          # envs: wroom, atoms3(-sim), master, guition, gfxref, lvglref, slave, native
 ├── README.md               # usage / quick start
 ├── PROJECT_SPEC.md         # original brief
 ├── PROJECT_PLAN.md         # this file
@@ -67,7 +68,11 @@ vicmon/
 │   │   ├── Signals.*       # signal roles, fields, resolver, NVS bindings
 │   │   ├── Stats.*         # energy counters / trip stats (Today/Trip/Total)
 │   │   └── Profiles.*      # ProfileManager (NVS, up to 4 profiles)
-│   └── slave/main.cpp      # ESP-NOW receiver + channel acquisition (serial render; display TBD)
+│   ├── slave/main.cpp      # ESP-NOW receiver + channel acquisition (serial render; display TBD)
+│   ├── guition/main.cpp    # standalone GFX dashboard demo (synthetic data, no WiFi/BLE)
+│   ├── gfxref/main.cpp     # known-good AXS15231B reference baseline
+│   └── lvglref/main.cpp    # LVGL 9 reference/fallback on the real panel (not shipped)
+├── lib/guition/            # master display driver: GuitionDisplay/Touch + GfxDashboard (5 pages)
 ├── test/test_victron/      # native unit tests (pio test -e native)
 ├── test/test_slavelink/    # native wire-format round-trip tests
 └── tools/monitor.py        # TTY-less serial reader (pio monitor needs a TTY)
@@ -258,15 +263,33 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   (adds ~2 polls of lag to a genuine change; single-sample glitches are
   outvoted). Inherent residual skew remains but is no longer visible as flicker.
 - Slave firmware is a stub; ESP-NOW not implemented.
-- Master LVGL display not started.
+- Master display: firmware complete + soak-tested, but the touch controls
+  (Settings profile-switch / tunable -/+, Graph zoom pill) are validated by
+  construction, **not yet physically tap-tested** on the panel.
+- Display brightness is not persisted across reboots (resets to 100%).
 
 ## Phases (remaining)
 
-### Phase 3 — Master display *(Guition JC3248W535)*
-- LVGL bring-up on the QSPI display + capacitive touch.
-- Dark dashboard mirroring the mimic (big SoC, signed current, sources, mode).
-- Reuse `Signals`/`DeviceConfig`/`Profiles` — they're display-independent.
-- Touch + button navigation. **Risk:** QSPI/LVGL driver config (budget time).
+### Phase 3 — Master display *(Guition JC3248W535)* — ✅ DONE (2026-07-08)
+Shipped on hardware. See the `vicmon-guition-display` memory for the full driver
+notes, pins, and gotchas. Summary:
+- **Arduino_GFX direct-draw dashboard, NOT LVGL.** LVGL was brought up and works
+  on this AXS15231B QSPI panel (partial-blit + RGB565 swap), but its anti-aliased
+  fonts fringe on the 16-bit panel (grainy) with no upside over crisp 1-bit GFX
+  fonts, and it hit a WiFi-SoftAP heap-corruption we never root-caused. Kept only
+  as a reference env (`lvglref`). The direct-draw path is simpler, smaller, stable.
+- **Driver** in `lib/guition/` (`GuitionDisplay` canvas+PWM backlight, `GuitionTouch`,
+  `GfxDashboard`). Full-frame PSRAM canvas; whole-frame `flush()` (QSPI has no
+  partial DMA). GPIO 35 = OPI PSRAM pin — must not drive it (status LED disabled).
+- **5 pages**, bottom tab bar, touch nav: Dash (mimic), Flow (energy diagram),
+  Graph (SoC + battery-A trend, 1m/10m/1h/12h/24h windows matching the web chart's
+  fine/coarse ring selection), Week (7-day stacked energy, mirrors the web day
+  chart), Settings (profile switch + brightness/battery-cap/deadband/timezone/
+  alert-threshold tunables via touch; WiFi + profile CRUD stay web-only).
+- **Threading:** display + touch on a dedicated FreeRTOS task reading a
+  mutex-protected `DashData` snapshot the loop publishes, so the ~2s blocking BLE
+  scan can't stall touch. Registry/NVS writes are deferred to the loop task.
+- Reuses `Signals`/`DeviceConfig`/`Profiles`/`Stats` — display-independent.
 
 ### Phase 4 — Slaves & ESP-NOW
 
