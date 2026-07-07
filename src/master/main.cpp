@@ -20,6 +20,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 #include <cmath>
 #include <cstring>
@@ -35,6 +36,12 @@
 #include "VictronParser.h"
 #include "VictronTypes.h"
 
+#ifdef VICMON_DISPLAY
+#include <GuitionDisplay.h>
+#include <GuitionTouch.h>
+#include <GfxDashboard.h>
+#endif
+
 static const char* kApSsid = "Vicmon-Master";
 static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
 
@@ -45,6 +52,18 @@ static stats::Stats gStats;
 static NimBLEScan* gScan = nullptr;
 static AsyncWebServer gServer(80);
 static DNSServer gDns;
+
+#ifdef VICMON_DISPLAY
+// The Guition JC3248W535 panel. The dashboard is drawn directly with Arduino_GFX
+// primitives into the canvas each refresh (LVGL's flush folds on this panel).
+// Display + touch run on their own task so the loop's blocking BLE scan can't
+// stall touch; the loop (registry owner) publishes gDash under gDashMux.
+static guition::Display  gDisplay;
+static guition::Touch    gTouch;
+static bool              gDisplayOk = false;
+static guition::DashData gDash;
+static SemaphoreHandle_t gDashMux = nullptr;
+#endif
 
 // Victron devices seen but not configured (no matching key).
 struct Discovered {
@@ -705,6 +724,89 @@ static String buildPanelJson() {
     j += "}";
     return j;
 }
+
+#ifdef VICMON_DISPLAY
+// Fill a DashData from the resolved signals — the struct mirror of
+// buildPanelJson(). Runs on the loop task (registry owner).
+static void collectDash(guition::DashData& d) {
+    uint32_t now = millis();
+    sig::Resolved soc = R(sig::Role::BatterySOC, now);
+    sig::Resolved bv  = R(sig::Role::BatteryV, now);
+    sig::Resolved ba  = R(sig::Role::BatteryA, now);
+    sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
+    sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
+    sig::Resolved sa  = resolveSignal(sig::Role::SolarA, now);
+    sig::Resolved sw  = R(sig::Role::SolarW, now);
+    sig::Resolved chg = resolveSignal(sig::Role::ChargerA, now);
+    sig::Resolved dia = resolveSignal(sig::Role::DcDcInA, now);
+    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
+    sig::Resolved la  = resolveSignal(sig::Role::LoadA, now);
+    sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
+
+    d.mode  = chargeModeName(chargeMode(ba));
+    d.worst = buildAlerts(now);
+
+    d.battValid = soc.valid || bv.valid || ba.valid;
+    d.soc = soc.value; d.v = bv.value; d.a = ba.value;
+    d.ttgValid = ttg.valid; d.ttg = ttg.value;
+    d.starterValid = stv.valid; d.starterV = stv.value;
+
+    d.solarValid = sa.valid; d.solarW = sw.value; d.solarA = sa.value;
+    d.chargerValid = chg.valid; d.chargerA = chg.value;
+    d.dcdcValid = doa.valid || dia.valid; d.dcdcOutA = doa.value;
+    d.dcdcInVValid = div.valid; d.dcdcInV = div.value;
+    d.loadValid = la.valid; d.loadA = la.value;
+    d.loadDerived = roleIsDerived(sig::Role::LoadA);
+}
+
+// Redraw the dashboard from the latest signals a few times/sec. Called from
+// loop(). Arduino_GFX direct draw into the canvas + push.
+static guition::Page gPage = guition::PAGE_DASH;
+
+// Publish the latest resolved signals for the display task. Runs on the loop
+// task (registry owner) so registry access stays single-threaded.
+static void publishDash() {
+    if (!gDashMux) return;
+    guition::DashData tmp;
+    collectDash(tmp);
+    if (xSemaphoreTake(gDashMux, 0) == pdTRUE) {
+        gDash = tmp;
+        xSemaphoreGive(gDashMux);
+    }
+}
+
+// Display + touch task: polls touch at ~30ms (responsive tab switching) and
+// redraws the current page a couple of times/sec or on page change, from the
+// mutex-protected snapshot. Never touches the registry, so it's independent of
+// the loop's blocking BLE scan.
+static void displayTask(void*) {
+    bool wasDown = false;
+    uint32_t lastUi = 0;
+    for (;;) {
+        bool redraw = false;
+        guition::TouchPoint tp;
+        bool down = gTouch.read(tp);
+        if (down && !wasDown) {
+            int t = guition::tabHitTest(tp.x, tp.y);
+            if (t >= 0 && (guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
+        }
+        wasDown = down;
+
+        uint32_t now = millis();
+        if (redraw || now - lastUi >= 500) {
+            lastUi = now;
+            guition::DashData d;
+            if (xSemaphoreTake(gDashMux, pdMS_TO_TICKS(50)) == pdTRUE) {
+                d = gDash;
+                xSemaphoreGive(gDashMux);
+            }
+            guition::renderPage(gDisplay.canvas(), gPage, d);
+            gDisplay.flush();
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+#endif  // VICMON_DISPLAY
 
 // Legacy snapshot used by slaves (Phase 4 HTTP fallback).
 static String buildDataJson() {
@@ -2120,7 +2222,18 @@ static void simTick() {
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.println("\nVicmon Master (headless): BLE + WiFi AP");
+
+    // Safe-boot window: hold here briefly BEFORE any risky init (LittleFS, WiFi,
+    // BLE, display). If a later stage crash-loops, the board still comes up alive
+    // for this window every reset, so it can always be caught for reflashing
+    // instead of the native-USB CDC re-enumerating too fast to grab. Cheap
+    // insurance; kBootHoldMs can be trimmed for production.
+    const uint32_t kBootHoldMs = 3000;
+    for (int32_t left = kBootHoldMs; left > 0; left -= 1000) {
+        Serial.printf("[boot] safe-boot hold, flash window %ld ms...\n", (long)left);
+        delay(left < 1000 ? left : 1000);
+    }
+    Serial.println("\nVicmon Master: BLE + WiFi AP + display");
 
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
     gCoarse.init(gCoarseBuf, HIST2_CAP, HIST2_INTERVAL);
@@ -2133,19 +2246,43 @@ void setup() {
     Serial.printf("Profile '%s': %u device(s)\n", gProfiles.name(gProfiles.active()),
                   (unsigned)gConfig.count());
 
+#ifdef GUITION_NO_WIFI
+    IPAddress ip;
+    Serial.println("WiFi DISABLED (diag)");
+#else
     loadWifi();
+#ifdef GUITION_STA_ONLY
+    // DIAG: STA mode, no SoftAP beacon — mimics an ESP-NOW display slave's light
+    // WiFi footprint, to see if the LVGL+WiFi crash is SoftAP-specific.
+    WiFi.mode(WIFI_STA);
+    IPAddress ip = WiFi.softAPIP();
+    Serial.println("WiFi STA mode (no AP)");
+#else
     WiFi.mode(gStaSsid.length() ? WIFI_AP_STA : WIFI_AP);
     WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
     IPAddress ip = WiFi.softAPIP();
     Serial.printf("AP '%s' up at http://%s/  (pass: %s)\n", kApSsid,
                   ip.toString().c_str(), kApPass);
+#ifdef GUITION_SLOW_BEACON
+    {  // DIAG: slow the AP beacon to reduce TX-vs-LVGL collisions.
+        wifi_config_t c;
+        if (esp_wifi_get_config(WIFI_IF_AP, &c) == ESP_OK) {
+            c.ap.beacon_interval = 1000;  // TU (~1.024ms); default 100
+            esp_wifi_set_config(WIFI_IF_AP, &c);
+            Serial.println("AP beacon_interval -> 1000");
+        }
+    }
+#endif
+#endif
     if (gStaSsid.length()) {
         WiFi.begin(gStaSsid.c_str(), gStaPass.c_str());
         Serial.printf("Joining WiFi '%s'...\n", gStaSsid.c_str());
         // NTP for the daily-stats rollover; offset is applied in currentLocalEpoch().
         configTime(0, 0, "pool.ntp.org");
     }
+#endif  // GUITION_NO_WIFI
 
+#ifndef GUITION_MINSYS
     gDns.start(53, "*", ip);
     setupServer();
 
@@ -2156,6 +2293,7 @@ void setup() {
     }
 
     setupEspNow();  // live data broadcast to slaves
+#endif
 
 #ifdef VICMON_SIM
     simSetup();
@@ -2171,10 +2309,26 @@ void setup() {
     gScan->setInterval(160);
     gScan->setWindow(80);
 #endif
+
+#ifdef VICMON_DISPLAY
+    if (!gDisplay.begin(1 /*landscape 480x320*/)) {
+        Serial.println("Display init FAILED (PSRAM/panel)");
+    } else {
+        Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
+        gTouch.begin(1);
+        gDashMux = xSemaphoreCreateMutex();
+        publishDash();  // seed the snapshot before the task starts
+        // Display + touch on core 1 (runs during the loop's blocking BLE scan).
+        xTaskCreatePinnedToCore(displayTask, "display", 8192, nullptr, 1, nullptr, 1);
+        gDisplayOk = true;
+    }
+#endif
 }
 
 void loop() {
+#ifndef GUITION_MINSYS
     gDns.processNextRequest();
+#endif
 #ifdef VICMON_SIM
     simTick();
     delay(500);  // pace the sim loop (no blocking BLE scan to do it for us)
@@ -2186,9 +2340,17 @@ void loop() {
     sampleStats();    // integrate energy counters / trip stats
 
     uint32_t now = millis();
-    // Status LED: worst alert, else charge mode.
     int worst = buildAlerts(now);
+#ifndef VICMON_DISPLAY
+    // Status LED on GPIO 35 — but on the Guition (OPI PSRAM) GPIO 35 is a PSRAM
+    // data pin, and driving it corrupts the framebuffer. The Guition has no user
+    // RGB LED anyway, so skip it there.
     updateLed(worst, chargeMode(R(sig::Role::BatteryA, now)));
+#endif
+
+#ifdef VICMON_DISPLAY
+    if (gDisplayOk) publishDash();
+#endif
 
 #ifndef VICMON_SIM
     static uint32_t lastHistSave = 0;
@@ -2198,11 +2360,13 @@ void loop() {
     }
 #endif
 
+#ifndef GUITION_MINSYS
     static uint32_t lastBroadcast = 0;  // push live data to slaves ~1/s
     if (now - lastBroadcast >= 1000) {
         lastBroadcast = now;
         sendSlaveBroadcast();
     }
+#endif
 
     Serial.printf("[state] victron_adverts=%d decoded=%d |", gScanVictron, gScanDecoded);
     for (size_t i = 0; i < gConfig.count(); ++i) {
