@@ -47,13 +47,18 @@ class Display {
   int16_t height() const { return canvas_ ? canvas_->height() : PANEL_H; }
   uint8_t rotation() const { return rotation_; }
 
-  void backlight(bool on) { digitalWrite(LCD_BL, on ? HIGH : LOW); }
+  void backlight(bool on) { setBrightness(on ? 100 : 0); }
+
+  // Backlight brightness 0..100 % via LEDC PWM on LCD_BL. Clamped.
+  void setBrightness(uint8_t pct);
+  uint8_t brightness() const { return brightness_; }
 
  private:
   Arduino_DataBus* bus_    = nullptr;
   Arduino_GFX*     panel_  = nullptr;
   Arduino_Canvas*  canvas_ = nullptr;
   uint8_t          rotation_ = 1;
+  uint8_t          brightness_ = 100;
 };
 
 }  // namespace guition

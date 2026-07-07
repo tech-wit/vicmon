@@ -2,6 +2,17 @@
 
 namespace guition {
 
+// LEDC (PWM) backlight on LCD_BL.
+static constexpr uint8_t  kBlChannel = 7;
+static constexpr uint32_t kBlFreq    = 5000;  // Hz
+static constexpr uint8_t  kBlResBits = 8;     // 0..255 duty
+
+void Display::setBrightness(uint8_t pct) {
+  if (pct > 100) pct = 100;
+  brightness_ = pct;
+  ledcWrite(kBlChannel, (uint32_t)pct * 255 / 100);
+}
+
 bool Display::begin(uint8_t rotation) {
   rotation_ = rotation;
 
@@ -10,8 +21,10 @@ bool Display::begin(uint8_t rotation) {
     return false;
   }
 
-  pinMode(LCD_BL, OUTPUT);
-  digitalWrite(LCD_BL, HIGH);
+  // Backlight via LEDC PWM so brightness is adjustable (Settings page).
+  ledcSetup(kBlChannel, kBlFreq, kBlResBits);
+  ledcAttachPin(LCD_BL, kBlChannel);
+  setBrightness(brightness_);
 
   bus_ = new Arduino_ESP32QSPI(LCD_CS, LCD_SCK, LCD_D0, LCD_D1, LCD_D2, LCD_D3);
   // Panel constructed portrait-native; the canvas applies the rotation (software)

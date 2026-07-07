@@ -209,13 +209,178 @@ static void renderFlow(Arduino_GFX* c, const DashData& d) {
   node(c, lx, ly, lw, lh, kRed, d.loadDerived ? "Load*" : "Load", v, loadOn);
 }
 
-// ------------------------------------------------ graph / settings pages ----
-static void placeholder(Arduino_GFX* c, const char* title, const char* line1,
-                        const char* line2) {
-  gtext(c, &FreeSansBold18pt7b, 12, 30, title, kText);
-  c->fillRoundRect(8, 44, W - 16, TAB_Y - 52, 10, kCard);
-  gtext(c, &FreeSansBold18pt7b, W / 2, 150, line1, kMuted, C);
-  if (line2) gtext(c, &FreeSans9pt7b, W / 2, 180, line2, kMuted, C);
+// ------------------------------------------------------------ graph page ----
+// Dim fill variants for the area charts.
+static constexpr uint16_t kFillGreen = RGB565(0x14, 0x3a, 0x22);
+static constexpr uint16_t kFillRed   = RGB565(0x45, 0x1a, 0x1c);
+
+struct Plot { int x, y, w, h; };
+
+// Filled area plot of `vals` (deci-units, -32768 = n/a) into a rect. Values map
+// linearly from [vmin,vmax] (real units) to the plot height; the fill runs to
+// `baseline`, green where above it and red below. Interpolates per screen column
+// so the fill is solid, and gaps appear across missing samples.
+static void areaPlot(Arduino_GFX* c, const Plot& p, const int16_t* vals, int n,
+                     float vmin, float vmax, float baseline,
+                     uint16_t lineCol, uint16_t fillPos, uint16_t fillNeg) {
+  if (n < 2 || vmax <= vmin) return;
+  auto yOf = [&](float v) -> int {
+    if (v < vmin) v = vmin;
+    if (v > vmax) v = vmax;
+    float f = (v - vmin) / (vmax - vmin);
+    return p.y + p.h - 1 - (int)lroundf(f * (p.h - 1));
+  };
+  int ybase = yOf(baseline);
+  int prevTop = -1;
+  for (int px = 0; px < p.w; ++px) {
+    float fi = (float)px * (n - 1) / (p.w - 1);
+    int i0 = (int)fi, i1 = i0 + 1;
+    if (i1 >= n) i1 = n - 1;
+    int16_t a = vals[i0], b = vals[i1];
+    if (a == -32768 || b == -32768) { prevTop = -1; continue; }
+    float frac = fi - i0;
+    float v = (a / 10.0f) * (1 - frac) + (b / 10.0f) * frac;
+    int top = yOf(v);
+    int x = p.x + px;
+    if (top <= ybase) c->drawFastVLine(x, top, ybase - top + 1, fillPos);
+    else              c->drawFastVLine(x, ybase, top - ybase + 1, fillNeg);
+    if (prevTop >= 0) c->drawLine(x - 1, prevTop, x, top, lineCol);
+    else              c->drawPixel(x, top, lineCol);
+    prevTop = top;
+  }
+}
+
+static void renderGraph(Arduino_GFX* c, const DashData& d) {
+  char buf[28];
+  gtext(c, &FreeSansBold18pt7b, 12, 28, "History", kText);
+  if (d.histSpanSec >= 60) {
+    int m = d.histSpanSec / 60;
+    if (m >= 60) snprintf(buf, sizeof(buf), "last %.1fh", m / 60.0f);
+    else         snprintf(buf, sizeof(buf), "last %dm", m);
+  } else snprintf(buf, sizeof(buf), "last %ds", d.histSpanSec);
+  gtext(c, &FreeSans9pt7b, W - 12, 26, buf, kMuted, R);
+
+  if (d.histCount < 2) {
+    c->fillRoundRect(8, 44, W - 16, TAB_Y - 52, 10, kCard);
+    gtext(c, &FreeSansBold18pt7b, W / 2, 150, "Collecting data...", kMuted, C);
+    gtext(c, &FreeSans9pt7b, W / 2, 178, "trend appears after a minute", kMuted, C);
+    return;
+  }
+
+  const int LX = 34;                       // left gutter for y labels
+  const int PW = (W - 8) - LX;             // plot width
+  Plot soc{LX, 46, PW, 108};
+  Plot amp{LX, 172, PW, 104};
+
+  // --- SoC chart (fixed 0..100 %) ---
+  c->fillRoundRect(soc.x, soc.y, soc.w, soc.h, 6, kCard);
+  for (int pct = 0; pct <= 100; pct += 50) {              // gridlines 0/50/100
+    int gy = soc.y + soc.h - 1 - (soc.h - 1) * pct / 100;
+    c->drawFastHLine(soc.x, gy, soc.w, kGrey);
+    snprintf(buf, sizeof(buf), "%d", pct);
+    gtext(c, &FreeSans9pt7b, LX - 4, gy + 5, buf, kMuted, R);
+  }
+  areaPlot(c, soc, d.histSoc, d.histCount, 0, 100, 0, kGreen, kFillGreen, kFillGreen);
+  gtext(c, &FreeSans9pt7b, soc.x + 6, soc.y + 16, "Battery SoC %", kMuted);
+
+  // --- Battery current chart (auto-scaled around zero) ---
+  float lo = 0, hi = 0;
+  bool any = false;
+  for (int i = 0; i < d.histCount; ++i) {
+    if (d.histBatt[i] == -32768) continue;
+    float v = d.histBatt[i] / 10.0f;
+    if (!any) { lo = hi = v; any = true; }
+    else { if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  if (!any) { lo = -1; hi = 1; }
+  if (lo > 0) lo = 0;                    // always include zero
+  if (hi < 0) hi = 0;
+  float pad = (hi - lo) * 0.12f + 0.5f;
+  lo -= pad; hi += pad;
+
+  c->fillRoundRect(amp.x, amp.y, amp.w, amp.h, 6, kCard);
+  int yzero = amp.y + amp.h - 1 - (int)lroundf((0 - lo) / (hi - lo) * (amp.h - 1));
+  c->drawFastHLine(amp.x, yzero, amp.w, kMuted);        // zero line
+  snprintf(buf, sizeof(buf), "%.0f", hi);
+  gtext(c, &FreeSans9pt7b, LX - 4, amp.y + 12, buf, kMuted, R);
+  snprintf(buf, sizeof(buf), "%.0f", lo);
+  gtext(c, &FreeSans9pt7b, LX - 4, amp.y + amp.h - 3, buf, kMuted, R);
+  areaPlot(c, amp, d.histBatt, d.histCount, lo, hi, 0, kCyan, kFillGreen, kFillRed);
+  gtext(c, &FreeSans9pt7b, amp.x + 6, amp.y + 16, "Battery A (+charge)", kMuted);
+}
+
+// --------------------------------------------------------- settings page ----
+// Control geometry shared by renderSettings() and settingsHitTest().
+static constexpr int SET_CARD_X = 262, SET_CARD_W = (W - 8) - 262;
+static constexpr int SET_BR_Y = 108, SET_BR_H = 54, SET_BR_W = 62;
+static constexpr int SET_BR_DN_X = SET_CARD_X + 14;
+static constexpr int SET_BR_UP_X = SET_CARD_X + SET_CARD_W - 14 - SET_BR_W;
+static constexpr int SET_PROF_X = SET_CARD_X + 14, SET_PROF_Y = 208;
+static constexpr int SET_PROF_W = SET_CARD_W - 28, SET_PROF_H = 54;
+
+static void setRow(Arduino_GFX* c, int y, const char* label, const char* value) {
+  gtext(c, &FreeSans9pt7b, 20, y, label, kMuted);
+  gtext(c, &FreeSansBold12pt7b, 246, y, value, kText, R);
+}
+
+static void button(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
+                   uint16_t accent) {
+  c->fillRoundRect(x, y, w, h, 8, kGrey);
+  c->drawRoundRect(x, y, w, h, 8, accent);
+  gtext(c, &FreeSansBold18pt7b, x + w / 2, y + h / 2 + 8, label, kText, C);
+}
+
+static void renderSettings(Arduino_GFX* c, const DashData& d) {
+  char buf[40];
+  gtext(c, &FreeSansBold18pt7b, 12, 28, "Settings", kText);
+
+  // Left: read-only status.
+  c->fillRoundRect(8, 44, 246, TAB_Y - 52, 10, kCard);
+  int y = 74;
+  const int dy = 30;
+  snprintf(buf, sizeof(buf), "%s (%d)", d.profileName, d.profileCount);
+  setRow(c, y, "Profile", buf); y += dy;
+  setRow(c, y, "AP", d.apSsid); y += dy;
+  setRow(c, y, "IP", d.ipStr); y += dy;
+  snprintf(buf, sizeof(buf), "%d / %d", d.devPaired, d.devSeen);
+  setRow(c, y, "Devices (set/seen)", buf); y += dy;
+  uint32_t up = d.uptimeSec;
+  if (up >= 86400) snprintf(buf, sizeof(buf), "%ud %uh", up / 86400, (up % 86400) / 3600);
+  else if (up >= 3600) snprintf(buf, sizeof(buf), "%uh %um", up / 3600, (up % 3600) / 60);
+  else snprintf(buf, sizeof(buf), "%um", up / 60);
+  setRow(c, y, "Uptime", buf); y += dy;
+  snprintf(buf, sizeof(buf), "%u KB", d.freeHeapKb);
+  setRow(c, y, "Free heap", buf); y += dy;
+  setRow(c, y, "Firmware", d.version[0] ? d.version : "--");
+
+  // Right: controls.
+  c->fillRoundRect(SET_CARD_X, 44, SET_CARD_W, TAB_Y - 52, 10, kCard);
+  gtext(c, &FreeSans9pt7b, SET_CARD_X + 14, 74, "Brightness", kMuted);
+  snprintf(buf, sizeof(buf), "%d%%", d.brightness);
+  gtext(c, &FreeSansBold18pt7b, SET_CARD_X + SET_CARD_W / 2, 96, buf, kText, C);
+  button(c, SET_BR_DN_X, SET_BR_Y, SET_BR_W, SET_BR_H, "-", kBlue);
+  button(c, SET_BR_UP_X, SET_BR_Y, SET_BR_W, SET_BR_H, "+", kBlue);
+  // brightness bar between the buttons
+  int barx = SET_BR_DN_X + SET_BR_W + 8;
+  int barw = SET_BR_UP_X - 8 - barx;
+  int bary = SET_BR_Y + SET_BR_H / 2 - 6;
+  if (barw > 10) {
+    c->fillRoundRect(barx, bary, barw, 12, 4, kGrey);
+    int fw = (barw - 4) * d.brightness / 100;
+    if (fw > 0) c->fillRoundRect(barx + 2, bary + 2, fw, 8, 3, kBlue);
+  }
+  button(c, SET_PROF_X, SET_PROF_Y, SET_PROF_W, SET_PROF_H,
+         d.profileCount > 1 ? "Next profile" : "1 profile", kGold);
+}
+
+SettingsHit settingsHitTest(int x, int y) {
+  auto in = [&](int rx, int ry, int rw, int rh) {
+    return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+  };
+  if (in(SET_BR_DN_X, SET_BR_Y, SET_BR_W, SET_BR_H)) return SET_BRIGHT_DN;
+  if (in(SET_BR_UP_X, SET_BR_Y, SET_BR_W, SET_BR_H)) return SET_BRIGHT_UP;
+  if (in(SET_PROF_X, SET_PROF_Y, SET_PROF_W, SET_PROF_H)) return SET_PROFILE_NEXT;
+  return SET_NONE;
 }
 
 // -------------------------------------------------------------- dispatch ----
@@ -223,8 +388,8 @@ void renderPage(Arduino_GFX* c, Page page, const DashData& d) {
   c->fillScreen(kBg);
   switch (page) {
     case PAGE_FLOW:     renderFlow(c, d); break;
-    case PAGE_GRAPH:    placeholder(c, "Graph", "Trend chart", "coming soon"); break;
-    case PAGE_SETTINGS: placeholder(c, "Settings", "Settings", "use the web app for now"); break;
+    case PAGE_GRAPH:    renderGraph(c, d); break;
+    case PAGE_SETTINGS: renderSettings(c, d); break;
     case PAGE_DASH:
     default:            renderDash(c, d); break;
   }

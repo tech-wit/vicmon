@@ -44,6 +44,7 @@
 
 static const char* kApSsid = "Vicmon-Master";
 static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
+static const char* kFwVersion = "0.3.0";    // shown on the display Settings page
 
 static DeviceConfig gConfig;
 static sig::SignalMap gSignals;
@@ -63,6 +64,9 @@ static guition::Touch    gTouch;
 static bool              gDisplayOk = false;
 static guition::DashData gDash;
 static SemaphoreHandle_t gDashMux = nullptr;
+// Set by the display task (Settings page) when the user taps "Next profile";
+// consumed on the loop task, which owns the registry / profile switch.
+static volatile bool gProfileNextReq = false;
 #endif
 
 // Victron devices seen but not configured (no matching key).
@@ -728,6 +732,24 @@ static String buildPanelJson() {
 #ifdef VICMON_DISPLAY
 // Fill a DashData from the resolved signals — the struct mirror of
 // buildPanelJson(). Runs on the loop task (registry owner).
+// Downsample the fine history ring into the Graph-page series (chronological,
+// oldest first). Runs on the loop task, so reading gFine is safe.
+static void collectHistory(guition::DashData& d) {
+    const HistRing& r = gFine;
+    int n = (int)r.count;
+    if (n <= 0) { d.histCount = 0; d.histSpanSec = 0; return; }
+    int out = n < guition::HIST_POINTS ? n : guition::HIST_POINTS;
+    for (int k = 0; k < out; ++k) {
+        int src = (out == 1) ? (n - 1) : (int)((long)k * (n - 1) / (out - 1));
+        size_t idx = (r.head + r.cap - r.count + (size_t)src) % r.cap;
+        const HistSample& s = r.buf[idx];
+        d.histSoc[k]  = s.soc;
+        d.histBatt[k] = s.battery;
+    }
+    d.histCount = out;
+    d.histSpanSec = (uint16_t)((uint32_t)n * r.intervalMs / 1000);
+}
+
 static void collectDash(guition::DashData& d) {
     uint32_t now = millis();
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
@@ -757,6 +779,24 @@ static void collectDash(guition::DashData& d) {
     d.dcdcInVValid = div.valid; d.dcdcInV = div.value;
     d.loadValid = la.valid; d.loadA = la.value;
     d.loadDerived = roleIsDerived(sig::Role::LoadA);
+
+    // Graph page.
+    collectHistory(d);
+
+    // Settings page: read-only status (brightness is filled by the display task).
+    strncpy(d.profileName, gProfiles.name(gProfiles.active()), sizeof(d.profileName) - 1);
+    d.profileName[sizeof(d.profileName) - 1] = '\0';
+    d.profileId = gProfiles.active();
+    d.profileCount = gProfiles.usedCount();
+    strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1);
+    d.apSsid[sizeof(d.apSsid) - 1] = '\0';
+    WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
+    d.devPaired = (int)gConfig.count();
+    d.devSeen = (int)gDiscN;
+    d.uptimeSec = now / 1000;
+    d.freeHeapKb = ESP.getFreeHeap() / 1024;
+    strncpy(d.version, kFwVersion, sizeof(d.version) - 1);
+    d.version[sizeof(d.version) - 1] = '\0';
 }
 
 // Redraw the dashboard from the latest signals a few times/sec. Called from
@@ -775,6 +815,24 @@ static void publishDash() {
     }
 }
 
+// Handle deferred requests from the display task that must run on the loop task
+// (registry owner). Currently: "Next profile" from the Settings page.
+static void serviceDashRequests() {
+    if (!gProfileNextReq) return;
+    gProfileNextReq = false;
+    int cur = gProfiles.active();
+    for (int i = 1; i <= ProfileManager::kMax; ++i) {
+        int cand = (cur + i) % ProfileManager::kMax;
+        if (cand != cur && gProfiles.used(cand)) {
+            saveHistFile(cur);           // flush the outgoing profile's history
+            gProfiles.setActive(cand);
+            applyProfile(cand);
+            Serial.printf("[display] switched to profile '%s'\n", gProfiles.name(cand));
+            break;
+        }
+    }
+}
+
 // Display + touch task: polls touch at ~30ms (responsive tab switching) and
 // redraws the current page a couple of times/sec or on page change, from the
 // mutex-protected snapshot. Never touches the registry, so it's independent of
@@ -788,7 +846,25 @@ static void displayTask(void*) {
         bool down = gTouch.read(tp);
         if (down && !wasDown) {
             int t = guition::tabHitTest(tp.x, tp.y);
-            if (t >= 0 && (guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
+            if (t >= 0) {
+                if ((guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
+            } else if (gPage == guition::PAGE_SETTINGS) {
+                // Settings controls. Brightness is display-owned (handle here);
+                // profile switching is deferred to the loop task.
+                switch (guition::settingsHitTest(tp.x, tp.y)) {
+                    case guition::SET_BRIGHT_DN: {
+                        int b = gDisplay.brightness() - 10; if (b < 10) b = 10;
+                        gDisplay.setBrightness((uint8_t)b); redraw = true; break;
+                    }
+                    case guition::SET_BRIGHT_UP: {
+                        int b = gDisplay.brightness() + 10; if (b > 100) b = 100;
+                        gDisplay.setBrightness((uint8_t)b); redraw = true; break;
+                    }
+                    case guition::SET_PROFILE_NEXT:
+                        gProfileNextReq = true; break;
+                    default: break;
+                }
+            }
         }
         wasDown = down;
 
@@ -800,6 +876,7 @@ static void displayTask(void*) {
                 d = gDash;
                 xSemaphoreGive(gDashMux);
             }
+            d.brightness = gDisplay.brightness();  // display-owned, not in the snapshot
             guition::renderPage(gDisplay.canvas(), gPage, d);
             gDisplay.flush();
         }
@@ -2349,7 +2426,7 @@ void loop() {
 #endif
 
 #ifdef VICMON_DISPLAY
-    if (gDisplayOk) publishDash();
+    if (gDisplayOk) { serviceDashRequests(); publishDash(); }
 #endif
 
 #ifndef VICMON_SIM
