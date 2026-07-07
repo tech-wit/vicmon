@@ -250,15 +250,26 @@ static void areaPlot(Arduino_GFX* c, const Plot& p, const int16_t* vals, int n,
   }
 }
 
+// Window pill (top-right) — tap to cycle the zoom window. Hit area is generous.
+static constexpr int GR_PILL_W = 62, GR_PILL_H = 28, GR_PILL_X = W - 8 - 62, GR_PILL_Y = 6;
+
+static void winLabel(char* buf, size_t n, int mins) {
+  if (mins >= 60) snprintf(buf, n, "%dh", mins / 60);
+  else            snprintf(buf, n, "%dm", mins);
+}
+
+bool graphHitTest(int x, int y) {
+  return x >= GR_PILL_X - 12 && y <= GR_PILL_Y + GR_PILL_H + 12;  // top-right corner
+}
+
 static void renderGraph(Arduino_GFX* c, const DashData& d) {
   char buf[28];
   gtext(c, &FreeSansBold18pt7b, 12, 28, "History", kText);
-  if (d.histSpanSec >= 60) {
-    int m = d.histSpanSec / 60;
-    if (m >= 60) snprintf(buf, sizeof(buf), "last %.1fh", m / 60.0f);
-    else         snprintf(buf, sizeof(buf), "last %dm", m);
-  } else snprintf(buf, sizeof(buf), "last %ds", d.histSpanSec);
-  gtext(c, &FreeSans9pt7b, W - 12, 26, buf, kMuted, R);
+  // Zoom-window pill (matches the web chart's windows).
+  c->fillRoundRect(GR_PILL_X, GR_PILL_Y, GR_PILL_W, GR_PILL_H, 7, kGrey);
+  c->drawRoundRect(GR_PILL_X, GR_PILL_Y, GR_PILL_W, GR_PILL_H, 7, kBlue);
+  winLabel(buf, sizeof(buf), d.histWinMin);
+  gtext(c, &FreeSansBold12pt7b, GR_PILL_X + GR_PILL_W / 2, GR_PILL_Y + 20, buf, kText, C);
 
   if (d.histCount < 2) {
     c->fillRoundRect(8, 44, W - 16, TAB_Y - 52, 10, kCard);

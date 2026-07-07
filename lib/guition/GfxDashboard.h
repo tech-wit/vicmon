@@ -41,7 +41,7 @@ struct DashData {
   int16_t  histSoc[HIST_POINTS];   // deci-percent 0..1000, -32768 = n/a
   int16_t  histBatt[HIST_POINTS];  // deci-amps (signed +charging), -32768 = n/a
   int      histCount = 0;          // valid points (<= HIST_POINTS)
-  uint16_t histSpanSec = 0;        // time span the points cover
+  uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
 
   // Settings page: read-only status + one control (brightness).
   char     profileName[20] = "";
@@ -73,6 +73,10 @@ int tabHitTest(int tx, int ty);
 
 // Hit-test the Settings-page controls (call only when the Settings page is up).
 SettingsHit settingsHitTest(int tx, int ty);
+
+// True if (tx,ty) hit the Graph-page window pill (cycle the zoom window). Call
+// only when the Graph page is up.
+bool graphHitTest(int tx, int ty);
 
 // Back-compat: renders PAGE_DASH.
 void renderDashboard(Arduino_GFX* c, const DashData& d);

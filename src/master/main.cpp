@@ -67,6 +67,10 @@ static SemaphoreHandle_t gDashMux = nullptr;
 // Set by the display task (Settings page) when the user taps "Next profile";
 // consumed on the loop task, which owns the registry / profile switch.
 static volatile bool gProfileNextReq = false;
+// Graph-page zoom window (minutes), set by the display task, read by collectDash
+// on the loop task. Matches the web chart's windows.
+static const int kGraphWins[] = {1, 10, 60, 720, 1440};  // 1m 10m 1h 12h 24h
+static volatile int gGraphWinMin = 60;
 #endif
 
 // Victron devices seen but not configured (no matching key).
@@ -732,22 +736,28 @@ static String buildPanelJson() {
 #ifdef VICMON_DISPLAY
 // Fill a DashData from the resolved signals — the struct mirror of
 // buildPanelJson(). Runs on the loop task (registry owner).
-// Downsample the fine history ring into the Graph-page series (chronological,
-// oldest first). Runs on the loop task, so reading gFine is safe.
+// Fill the Graph-page series for the selected zoom window, mirroring the web
+// chart's buildHistoryJson(): windows over 60 min read the coarse (60 s) ring,
+// shorter ones the fine (5 s) ring; take the most-recent time-based slice, then
+// downsample to the plot columns. Runs on the loop task (registry owner).
 static void collectHistory(guition::DashData& d) {
-    const HistRing& r = gFine;
-    int n = (int)r.count;
-    if (n <= 0) { d.histCount = 0; d.histSpanSec = 0; return; }
-    int out = n < guition::HIST_POINTS ? n : guition::HIST_POINTS;
+    int mins = gGraphWinMin;
+    d.histWinMin = (uint16_t)mins;
+    const HistRing& r = mins > 60 ? gCoarse : gFine;
+    int want = mins * 60 * 1000 / (int)r.intervalMs;
+    if (want > (int)r.count) want = r.count;
+    if (want < 0) want = 0;
+    if (want < 2) { d.histCount = 0; return; }
+    int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
+    size_t start = (r.head + r.cap - (size_t)want) % r.cap;
     for (int k = 0; k < out; ++k) {
-        int src = (out == 1) ? (n - 1) : (int)((long)k * (n - 1) / (out - 1));
-        size_t idx = (r.head + r.cap - r.count + (size_t)src) % r.cap;
+        int src = (out == 1) ? (want - 1) : (int)((long)k * (want - 1) / (out - 1));
+        size_t idx = (start + (size_t)src) % r.cap;
         const HistSample& s = r.buf[idx];
         d.histSoc[k]  = s.soc;
         d.histBatt[k] = s.battery;
     }
     d.histCount = out;
-    d.histSpanSec = (uint16_t)((uint32_t)n * r.intervalMs / 1000);
 }
 
 static void collectDash(guition::DashData& d) {
@@ -848,6 +858,15 @@ static void displayTask(void*) {
             int t = guition::tabHitTest(tp.x, tp.y);
             if (t >= 0) {
                 if ((guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
+            } else if (gPage == guition::PAGE_GRAPH) {
+                // Tap the window pill to cycle the zoom window (1m..24h).
+                if (guition::graphHitTest(tp.x, tp.y)) {
+                    int n = (int)(sizeof(kGraphWins) / sizeof(kGraphWins[0]));
+                    int cur = 0;
+                    for (int i = 0; i < n; ++i) if (kGraphWins[i] == gGraphWinMin) cur = i;
+                    gGraphWinMin = kGraphWins[(cur + 1) % n];
+                    redraw = true;
+                }
             } else if (gPage == guition::PAGE_SETTINGS) {
                 // Settings controls. Brightness is display-owned (handle here);
                 // profile switching is deferred to the loop task.
@@ -877,6 +896,7 @@ static void displayTask(void*) {
                 xSemaphoreGive(gDashMux);
             }
             d.brightness = gDisplay.brightness();  // display-owned, not in the snapshot
+            d.histWinMin = (uint16_t)gGraphWinMin;  // reflect the pill instantly; data follows
             guition::renderPage(gDisplay.canvas(), gPage, d);
             gDisplay.flush();
         }
