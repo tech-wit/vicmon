@@ -20,6 +20,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 
 #include <cmath>
@@ -31,18 +32,31 @@
 #include "Registry.h"
 #include "Signals.h"
 #include "SlaveLink.h"
+#include "SlaveReceiver.h"
 #include "Stats.h"
 #include "VictronDecrypt.h"
 #include "VictronParser.h"
 #include "VictronTypes.h"
 
-#ifdef VICMON_DISPLAY
-#include <GuitionDisplay.h>
-#include <GuitionTouch.h>
-#include <GfxDashboard.h>
+// Board selection: the display DRIVER is chosen at build time per board model,
+// while the master/slave ROLE is chosen at runtime (NVS flag). This one app runs
+// on every board — BOARD_GUITION selects the AXS15231B QSPI driver; BOARD_LILYGO
+// is reserved for the T-Display-S3 (ST7789 + buttons, driver TBD, builds headless
+// for now); no board flag = headless (no screen, e.g. the bare S3 / AtomS3). A
+// selected display board defines VICMON_DISPLAY, which guards all rendering below.
+#if defined(BOARD_GUITION)
+  #define VICMON_DISPLAY 1
+  #include <GuitionDisplay.h>
+  #include <GuitionTouch.h>
+  #include <GfxDashboard.h>
+#elif defined(BOARD_LILYGO)
+  #warning "BOARD_LILYGO: display driver not implemented yet — building headless on the LilyGo"
 #endif
 
-static const char* kApSsid = "Vicmon-Master";
+// AP SSID is made unique per device at boot (Vicmon-<last 3 MAC bytes>) so
+// several masters in the same area don't collide — filled in setup() once the
+// master id is known; the default is only a placeholder before then.
+static char kApSsid[24] = "Vicmon";
 static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
 static const char* kFwVersion = "0.3.0";    // shown on the display Settings page
 
@@ -69,11 +83,22 @@ static SemaphoreHandle_t gDashMux = nullptr;
 static volatile int gProfileReq = -1;    // profile id to switch to
 static volatile int gSetAdjWhich = -1;   // guition::Tunable index being adjusted
 static volatile int gSetAdjSteps = 0;    // accumulated signed steps to apply
+static volatile int gBindSetRole = -1;   // request: bind this role...
+static volatile int gBindSetIdx = -1;    // ...to this shared source index
+static volatile bool gPairReq = false;   // request: open the master pairing window
 static int gSetSel = 0;                  // display-local: selected tunable row
-// Graph-page zoom window (minutes), set by the display task, read by collectDash
-// on the loop task. Matches the web chart's windows.
-static const int kGraphWins[] = {1, 10, 60, 720, 1440};  // 1m 10m 1h 12h 24h
+static int gSetView = 0;                 // display-local: Settings sub-view (0 tune, 1 bind)
+static int gBindMenuRole = -1;           // display-local: open source-picker role (-1 = list)
+static int gBindPage = 0;                // display-local: bindings-list page
+static int gMenuPage = 0;                // display-local: source-picker page
+static int gDiagScreen = 0;              // display-local: Diag sub-screen (guition::DiagScreen)
+
+static_assert(guition::ROLE_N == static_cast<int>(sig::kRoleCount),
+              "display ROLE_N must match sig::kRoleCount");
+// Graph-page zoom window (minutes), set by the display task (graphHitTest owns
+// the pill list), read by collectHistory on the loop task.
 static volatile int gGraphWinMin = 60;
+static volatile uint8_t gGraphHidden = 0;  // Graph legend: series toggled off (display-owned)
 #endif
 
 // Victron devices seen but not configured (no matching key).
@@ -83,9 +108,114 @@ struct Discovered {
     uint16_t model = 0;
     int rssi = 0;
     uint32_t lastSeenMs = 0;
+    uint8_t raw[16] = {0};  // encrypted advert payload, captured in debug mode
+    uint8_t rawLen = 0;     // 0 = not captured
 };
 static Discovered gDisc[12];
 static size_t gDiscN = 0;
+
+// ESP-NOW master identity + pairing window (used by the broadcaster below and by
+// the diagnostics view). Declared here because ingest() and the debug-capture
+// path reference gDebugCapture before the ESP-NOW section.
+static uint32_t gMasterId = 0;              // stable per-chip id (low 32b of efuse MAC)
+static volatile uint32_t gPairUntilMs = 0;  // pairing window closes at this millis (0 = closed)
+static volatile bool gDebugCapture = false; // capture raw bytes of unknown adverts for troubleshooting
+static bool gEspNowOk = false;              // ESP-NOW radio up (broadcaster in master, receiver in slave)
+static uint16_t gSnapSeq = 0;               // broadcast sequence counter (master role)
+
+// Open a 60 s pairing window: while it's up the broadcast sets F_PAIRING so an
+// adopting slave will accept this master's id (see lib/slavelink/SlaveLink.h).
+static void startPairing() { gPairUntilMs = millis() + 60000; }
+static bool pairingActive() {
+    uint32_t u = gPairUntilMs;
+    return u != 0 && (int32_t)(u - millis()) > 0;  // wrap-safe: window is only 60 s
+}
+static int pairSecsLeft() {
+    return pairingActive() ? (int)((gPairUntilMs - millis()) / 1000) : 0;
+}
+
+// ---- device role (Master / Slave) ------------------------------------------
+// The same firmware runs either role, chosen at boot from an NVS flag and
+// toggled from the Diagnostics tab (reboots to re-lay-out the radio + tasks).
+// Slave role skips BLE/AP/web and instead receives another master's broadcast
+// via gRx and renders it on the same display.
+enum { ROLE_MASTER = 0, ROLE_SLAVE = 1 };
+static uint8_t gRole = ROLE_MASTER;
+static volatile bool gRoleReq = false;   // display/loop request: toggle role + reboot
+static slavelink::Receiver gRx;          // ESP-NOW receiver, used only in slave role
+
+static void loadRole() {
+    Preferences p;
+    p.begin("vicrole", true);
+    gRole = p.getUChar("role", ROLE_MASTER);
+    p.end();
+    if (gRole > ROLE_SLAVE) gRole = ROLE_MASTER;
+}
+static void applyRoleToggle() {
+    uint8_t nr = (gRole == ROLE_MASTER) ? ROLE_SLAVE : ROLE_MASTER;
+    Preferences p;
+    p.begin("vicrole", false);
+    p.putUChar("role", nr);
+    p.end();
+    Serial.printf("[role] switching to %s, rebooting...\n", nr == ROLE_SLAVE ? "SLAVE" : "MASTER");
+    delay(300);
+    ESP.restart();
+}
+// Consume a role-toggle request (raised by the Diag tab). Called from both loops.
+static void serviceRole() {
+    if (gRoleReq) { gRoleReq = false; applyRoleToggle(); }
+}
+
+// Serial console commands (handy on a headless board / for testing): `pair`
+// opens the master pairing window; `role` toggles Master<->Slave (reboots).
+static void serviceMasterSerial() {
+    static char line[16];
+    static uint8_t n = 0;
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            line[n] = '\0';
+            if (n) {
+                if (!strcmp(line, "pair")) {
+                    startPairing();
+                    Serial.printf("[master] pairing window open %ds\n", pairSecsLeft());
+                } else if (!strcmp(line, "role")) {
+                    gRoleReq = true;
+                }
+            }
+            n = 0;
+        } else if (n < sizeof(line) - 1) {
+            line[n++] = c;
+        }
+    }
+}
+
+// Format bytes as lowercase hex into a fixed buffer (for the Diag raw-capture
+// line; hexBytes() returns a String and is defined much later in the file).
+static void hexInto(char* out, size_t n, const uint8_t* p, size_t len) {
+    static const char* hx = "0123456789abcdef";
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 2 < n; ++i) {
+        out[o++] = hx[p[i] >> 4];
+        out[o++] = hx[p[i] & 0xF];
+    }
+    out[o < n ? o : n - 1] = '\0';
+}
+
+// One-line live summary of a monitored device for the Diagnostics list.
+static void summarizeDevice(const DeviceSlot& s, char* out, size_t n) {
+    switch (s.type) {
+        case victron::Record::BatteryMonitor:
+            snprintf(out, n, "%.2fV %.0f%%", s.battery.voltage, s.battery.soc); break;
+        case victron::Record::OrionXs:
+            snprintf(out, n, "%.1fA %.1fV", s.dcdc.outputCurrent, s.dcdc.outputVoltage); break;
+        case victron::Record::SolarCharger:
+            snprintf(out, n, "%.0fW %.1fA", s.solar.pvPower, s.solar.batteryCurrent); break;
+        case victron::Record::AcCharger:
+            snprintf(out, n, "%.1fA %.1fV", s.charger.batteryCurrent, s.charger.batteryVoltage); break;
+        default: snprintf(out, n, "--"); break;
+    }
+}
 
 // ---- type <-> string helpers ----------------------------------------------
 
@@ -107,7 +237,17 @@ static const char* typeName(victron::Record r) {
 
 // ---- BLE ingestion ---------------------------------------------------------
 
-static void noteDiscovered(const char* mac, const char* name, uint16_t model, int rssi) {
+// In debug-capture mode, stash up to 16 bytes of the (encrypted) advert payload
+// so the diagnostics view / serial can show raw bytes for an unknown device.
+static void captureRaw(Discovered& d, const uint8_t* raw, size_t rawLen) {
+    if (!gDebugCapture || !raw) return;
+    uint8_t n = rawLen > sizeof(d.raw) ? sizeof(d.raw) : (uint8_t)rawLen;
+    memcpy(d.raw, raw, n);
+    d.rawLen = n;
+}
+
+static void noteDiscovered(const char* mac, const char* name, uint16_t model, int rssi,
+                           const uint8_t* raw, size_t rawLen) {
     uint32_t now = millis();
     for (size_t i = 0; i < gDiscN; ++i) {
         if (strncmp(gDisc[i].mac, mac, sizeof(gDisc[i].mac)) == 0) {
@@ -115,6 +255,7 @@ static void noteDiscovered(const char* mac, const char* name, uint16_t model, in
             gDisc[i].model = model;
             gDisc[i].lastSeenMs = now;
             if (name && name[0]) strncpy(gDisc[i].name, name, sizeof(gDisc[i].name) - 1);
+            captureRaw(gDisc[i], raw, rawLen);
             return;
         }
     }
@@ -125,6 +266,7 @@ static void noteDiscovered(const char* mac, const char* name, uint16_t model, in
         d.model = model;
         d.rssi = rssi;
         d.lastSeenMs = now;
+        captureRaw(d, raw, rawLen);
     }
 }
 
@@ -173,9 +315,10 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
             strncpy(s.btname, dev->getName().c_str(), sizeof(s.btname) - 1);
         return;
     }
-    // No configured key matched -> a device we could adopt.
+    // No configured key matched -> a device we could adopt (and, in debug mode,
+    // capture the raw advert bytes of for troubleshooting).
     noteDiscovered(dev->getAddress().toString().c_str(), dev->getName().c_str(),
-                   victron::modelId(extra), dev->getRSSI());
+                   victron::modelId(extra), dev->getRSSI(), extra, extraLen);
 }
 
 static void pollBle() {
@@ -353,6 +496,29 @@ static void sampleHistory() {
     s.dcdc = encA(c.dV, c.dcdc);
     s.load = encA(c.lV, c.load);
     s.soc = encA(soc.valid, soc.value);  // deci-percent (same *10 encoding)
+    if (dueFine) gFine.push(s, now);
+    if (dueCoarse) gCoarse.push(s, now);
+}
+
+// Slave role: record the received ESP-NOW frames into the same history rings, so
+// the web Trend chart (and a display-slave's Graph) show the live data we've been
+// getting. The Snapshot fields are already deci-encoded with -32768 = n/a, so they
+// map straight onto HistSample.
+static void sampleSlaveHistory() {
+    uint32_t now = millis();
+    bool dueFine = gFine.due(now), dueCoarse = gCoarse.due(now);
+    if (!dueFine && !dueCoarse) return;
+    if (!gRx.live()) return;  // only log while actually receiving
+    using namespace slavelink;
+    const Snapshot& sn = gRx.snapshot();
+    auto f = [&](uint16_t bit, int16_t v) -> int16_t { return (sn.valid & bit) ? v : (int16_t)-32768; };
+    HistSample s;
+    s.battery = f(V_BATTA, sn.battA_da);
+    s.solar   = f(V_SOLAR, sn.solarA_da);
+    s.charger = f(V_CHARGER, sn.chargerA_da);
+    s.dcdc    = f(V_DCDC, sn.dcdcA_da);
+    s.load    = f(V_LOAD, sn.loadA_da);
+    s.soc     = f(V_SOC, sn.soc_d);
     if (dueFine) gFine.push(s, now);
     if (dueCoarse) gCoarse.push(s, now);
 }
@@ -602,6 +768,18 @@ static const char* chargeModeName(ChargeMode m) {
     }
 }
 
+// Capitalised variant for the display banner (the JSON APIs keep the lowercase
+// names above). The display's modeColor() matches these exact strings, so this
+// also drives the banner colour (Charging green / Discharging red / Idle grey).
+static const char* chargeModeDisplayName(ChargeMode m) {
+    switch (m) {
+        case ChargeMode::Charging: return "Charging";
+        case ChargeMode::Discharging: return "Discharging";
+        case ChargeMode::Idle: return "Idle";
+        default: return "--";
+    }
+}
+
 // ---- alerts + status LED ---------------------------------------------------
 
 // AtomS3 Lite onboard SK6812 RGB LED. Overridable per board.
@@ -673,6 +851,38 @@ static sig::Resolved fieldOfType(victron::Record type, sig::Field f, uint32_t no
 }
 
 static String buildPanelJson() {
+    // Slave role: the registry is empty (no BLE) — build the panel from the last
+    // ESP-NOW frame so the mimic/dashboard show the master's live data.
+    if (gRole == ROLE_SLAVE) {
+        using namespace slavelink;
+        const Snapshot& s = gRx.snapshot();
+        bool live = gRx.live();
+        auto has = [&](uint16_t f) { return live && (s.valid & f) != 0; };
+        const char* mode = !live ? "unknown"
+            : (s.mode == M_CHARGING ? "charging"
+             : s.mode == M_DISCHARGING ? "discharging"
+             : s.mode == M_IDLE ? "idle" : "unknown");
+        String j = "{";
+        j += "\"mode\":\"" + String(mode) + "\",";
+        j += "\"battery\":{\"valid\":" + jbool(has(V_SOC) || has(V_BATTV) || has(V_BATTA)) +
+             ",\"soc\":" + String(decDeci(s.soc_d), 1) +
+             ",\"v\":" + String(decCenti(s.battV_cv), 2) +
+             ",\"a\":" + String(decDeci(s.battA_da), 2) +
+             ",\"consumed\":0,\"consumed_valid\":false" +
+             ",\"starter_v\":" + String(decCenti(s.starterV_cv), 2) +
+             ",\"starter_valid\":" + jbool(has(V_STARTERV)) +
+             ",\"ttg\":" + String(s.ttg_min == 0xFFFF ? 0 : s.ttg_min) +
+             ",\"ttg_valid\":" + jbool(has(V_TTG)) + ",\"capacity\":0},";
+        j += "\"solar\":{\"valid\":" + jbool(has(V_SOLAR)) + ",\"a\":" + String(decDeci(s.solarA_da), 1) +
+             ",\"w\":0,\"v\":0,\"v_valid\":false},";
+        j += "\"charger\":{\"valid\":" + jbool(has(V_CHARGER)) + ",\"a\":" + String(decDeci(s.chargerA_da), 1) + "},";
+        j += "\"dcdc\":{\"valid\":" + jbool(has(V_DCDC)) + ",\"out_a\":" + String(decDeci(s.dcdcA_da), 1) +
+             ",\"in_a\":0,\"in_v\":0,\"in_v_valid\":false,\"out_v\":0,\"out_v_valid\":false},";
+        j += "\"load\":{\"valid\":" + jbool(has(V_LOAD)) + ",\"a\":" + String(decDeci(s.loadA_da), 1) +
+             ",\"derived\":false},";
+        j += "\"alerts\":[]}";
+        return j;
+    }
     uint32_t now = millis();
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved bv = R(sig::Role::BatteryV, now);
@@ -737,6 +947,85 @@ static String buildPanelJson() {
 }
 
 #ifdef VICMON_DISPLAY
+// ---- Settings > Bindings (display) -----------------------------------------
+// Compact field tag for the Bindings list, e.g. "SoC", "in A". Keeps the whole
+// "<device> <tag>" label inside the row width.
+static const char* shortField(sig::Field f) {
+    switch (f) {
+        case sig::Field::BattSOC:         return "SoC";
+        case sig::Field::BattV:           return "V";
+        case sig::Field::BattA:           return "A";
+        case sig::Field::BattConsumed:    return "Ah";
+        case sig::Field::BattAuxStarterV: return "start V";
+        case sig::Field::BattTTG:         return "TTG";
+        case sig::Field::DcDcInV:         return "in V";
+        case sig::Field::DcDcOutV:        return "out V";
+        case sig::Field::DcDcInA:         return "in A";
+        case sig::Field::DcDcOutA:        return "out A";
+        case sig::Field::DcDcState:       return "state";
+        case sig::Field::SolarBattV:      return "bat V";
+        case sig::Field::SolarBattA:      return "bat A";
+        case sig::Field::SolarPvW:        return "PV W";
+        case sig::Field::SolarYield:      return "yield";
+        case sig::Field::SolarLoadA:      return "load A";
+        case sig::Field::SolarState:      return "state";
+        case sig::Field::ChgBattV:        return "bat V";
+        case sig::Field::ChgBattA:        return "bat A";
+        case sig::Field::ChgState:        return "state";
+        default:                          return "";
+    }
+}
+
+// Human label for a binding source (device+field, a derived sentinel, or none).
+static void formatSource(const char* device, sig::Field f, char* buf, size_t n) {
+    if (device[0] == '\0') { snprintf(buf, n, "-- none --"); return; }
+    if (strcmp(device, sig::kChargeOnly) == 0) { snprintf(buf, n, "derived: charge"); return; }
+    if (strcmp(device, sig::kLoadOnly) == 0 ||
+        strcmp(device, sig::kDerived) == 0) { snprintf(buf, n, "derived: load"); return; }
+    snprintf(buf, n, "%s %s", device, shortField(f));
+}
+
+// One selectable binding source.
+struct BindOpt { const char* device; sig::Field field; };
+
+// Build the SHARED source list the whole Bindings UI selects from: index 0 =
+// none, 1 = derived charge, 2 = derived load, then every configured device x its
+// offered fields. Same for all roles; the display hides the two derived entries
+// for non-current-flow roles. Published every snapshot so the picker has no lag.
+static int buildSrcList(BindOpt* out, int max) {
+    int n = 0;
+    auto add = [&](const char* dev, sig::Field f) { if (n < max) out[n++] = {dev, f}; };
+    add("", sig::Field::None);
+    add(sig::kChargeOnly, sig::Field::None);
+    add(sig::kLoadOnly, sig::Field::None);
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        DeviceSlot& s = gConfig.slots()[i];
+        sig::Field fields[8];
+        size_t nf = sig::fieldsForType(s.type, fields, 8);
+        for (size_t k = 0; k < nf; ++k) add(s.name, fields[k]);
+    }
+    return n;
+}
+
+// Shared-list index a role is currently bound to (0 = none if not found).
+static int sharedIndexOf(const BindOpt* list, int n, const sig::Binding& b) {
+    const char* cd = b.device;
+    if (strcmp(cd, sig::kDerived) == 0) cd = sig::kLoadOnly;  // legacy alias
+    for (int i = 0; i < n; ++i)
+        if (strcmp(list[i].device, cd) == 0 && list[i].field == b.field) return i;
+    return 0;
+}
+
+// Bind a role to a shared-list source index and persist. Runs on the loop task.
+static void applyBindSet(int roleIdx, int sharedIdx) {
+    if (roleIdx < 0 || roleIdx >= (int)sig::kRoleCount) return;
+    BindOpt list[guition::BIND_MAXSRC];
+    int n = buildSrcList(list, guition::BIND_MAXSRC);
+    if (sharedIdx < 0 || sharedIdx >= n) return;
+    gSignals.set(static_cast<sig::Role>(roleIdx), list[sharedIdx].device, list[sharedIdx].field);
+    gSignals.save();
+}
+
 // Fill a DashData from the resolved signals — the struct mirror of
 // buildPanelJson(). Runs on the loop task (registry owner).
 // Fill the Graph-page series for the selected zoom window, mirroring the web
@@ -757,8 +1046,12 @@ static void collectHistory(guition::DashData& d) {
         int src = (out == 1) ? (want - 1) : (int)((long)k * (want - 1) / (out - 1));
         size_t idx = (start + (size_t)src) % r.cap;
         const HistSample& s = r.buf[idx];
-        d.histSoc[k]  = s.soc;
-        d.histBatt[k] = s.battery;
+        d.histSoc[k]     = s.soc;
+        d.histBatt[k]    = s.battery;
+        d.histSolar[k]   = s.solar;
+        d.histCharger[k] = s.charger;
+        d.histDcdc[k]    = s.dcdc;
+        d.histLoad[k]    = s.load;
     }
     d.histCount = out;
 }
@@ -778,7 +1071,7 @@ static void collectDash(guition::DashData& d) {
     sig::Resolved la  = resolveSignal(sig::Role::LoadA, now);
     sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
 
-    d.mode  = chargeModeName(chargeMode(ba));
+    d.mode  = chargeModeDisplayName(chargeMode(ba));
     d.worst = buildAlerts(now);
 
     d.battValid = soc.valid || bv.valid || ba.valid;
@@ -826,6 +1119,8 @@ static void collectDash(guition::DashData& d) {
     }
     strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1);
     d.apSsid[sizeof(d.apSsid) - 1] = '\0';
+    strncpy(d.apPass, kApPass, sizeof(d.apPass) - 1);
+    d.apPass[sizeof(d.apPass) - 1] = '\0';
     WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
     d.devPaired = (int)gConfig.count();
     d.devSeen = (int)gDiscN;
@@ -838,6 +1133,55 @@ static void collectDash(guition::DashData& d) {
     d.tzMin = gTzOffsetMin;
     d.socWarn = gSocWarn; d.socCrit = gSocCrit;
     d.vLow = gVlow; d.vHigh = gVhigh;
+
+    // Settings > Bindings: publish the shared source list + each role's current
+    // selection so the display can render the picker with no snapshot lag.
+    BindOpt list[guition::BIND_MAXSRC];
+    int nsrc = buildSrcList(list, guition::BIND_MAXSRC);
+    d.srcCount = nsrc;
+    for (int i = 0; i < nsrc; ++i)
+        formatSource(list[i].device, list[i].field, d.srcLabels[i], sizeof(d.srcLabels[i]));
+    for (size_t r = 0; r < sig::kRoleCount; ++r) {
+        int idx = sharedIndexOf(list, nsrc, gSignals.binding(static_cast<sig::Role>(r)));
+        d.bindIdx[r] = idx;
+        strncpy(d.bindLabel[r], d.srcLabels[idx], sizeof(d.bindLabel[r]) - 1);
+        d.bindLabel[r][sizeof(d.bindLabel[r]) - 1] = '\0';
+    }
+
+    // Settings > Diagnostics (master role): ESP-NOW/pairing state + device lists.
+    d.role = ROLE_MASTER;
+    d.espNowOk = gEspNowOk;
+    d.masterId = gMasterId;
+    d.snapSeq = gSnapSeq;
+    d.pairing = pairingActive();
+    d.pairSecLeft = pairSecsLeft();
+    d.debugCapture = gDebugCapture;
+    int mn = 0;
+    for (size_t i = 0; i < gConfig.count() && mn < guition::DashData::MON_N; ++i) {
+        const DeviceSlot& s = gConfig.slots()[i];
+        strncpy(d.monName[mn], s.name[0] ? s.name : "(device)", sizeof(d.monName[mn]) - 1);
+        d.monName[mn][sizeof(d.monName[mn]) - 1] = '\0';
+        strncpy(d.monType[mn], typeName(s.type), sizeof(d.monType[mn]) - 1);
+        d.monType[mn][sizeof(d.monType[mn]) - 1] = '\0';
+        d.monLive[mn] = !s.stale(now);
+        summarizeDevice(s, d.monVal[mn], sizeof(d.monVal[mn]));
+        ++mn;
+    }
+    d.monCount = mn;
+    int dn = 0;
+    for (size_t i = 0; i < gDiscN && dn < guition::DashData::DISC_N; ++i) {
+        if (now - gDisc[i].lastSeenMs > 30000) continue;  // only recently seen
+        strncpy(d.discName[dn], gDisc[i].name, sizeof(d.discName[dn]) - 1);
+        d.discName[dn][sizeof(d.discName[dn]) - 1] = '\0';
+        strncpy(d.discMac[dn], gDisc[i].mac, sizeof(d.discMac[dn]) - 1);
+        d.discMac[dn][sizeof(d.discMac[dn]) - 1] = '\0';
+        d.discModel[dn] = gDisc[i].model;
+        d.discRssi[dn] = gDisc[i].rssi;
+        if (gDisc[i].rawLen) hexInto(d.discRaw[dn], sizeof(d.discRaw[dn]), gDisc[i].raw, gDisc[i].rawLen);
+        else d.discRaw[dn][0] = '\0';
+        ++dn;
+    }
+    d.discCount = dn;
 }
 
 // Redraw the dashboard from the latest signals a few times/sec. Called from
@@ -850,6 +1194,65 @@ static void publishDash() {
     if (!gDashMux) return;
     guition::DashData tmp;
     collectDash(tmp);
+    if (xSemaphoreTake(gDashMux, 0) == pdTRUE) {
+        gDash = tmp;
+        xSemaphoreGive(gDashMux);
+    }
+}
+
+// Slave role: fill the DashData from the received ESP-NOW frame (a subset of the
+// master's data — enough for the Dash + Flow pages) plus the link/pairing status
+// for the Diagnostics view. Graph/Week/Tune/Bind have no data and are gated off
+// in the renderer. Runs on the loop task.
+static void collectSlaveDash(guition::DashData& d) {
+    using namespace slavelink;
+    d.role = ROLE_SLAVE;
+    d.espNowOk = gRx.ok();
+    d.masterId = gRx.pairedMaster();
+    d.pairing = gRx.isAdopting();
+    d.pairSecLeft = (int)gRx.adoptSecsLeft();
+    d.linkLive = gRx.live();
+    d.linkDrops = gRx.drops();
+    d.linkChannel = gRx.channel();
+    d.heardInvite = gRx.heardInvite();
+
+    if (!gRx.live()) { d.mode = "--"; d.battValid = false; return; }
+    const Snapshot& s = gRx.snapshot();
+    auto has = [&](uint16_t f) { return (s.valid & f) != 0; };
+    switch (s.mode) {
+        case M_CHARGING: d.mode = "Charging"; break;
+        case M_DISCHARGING: d.mode = "Discharging"; break;
+        case M_IDLE: d.mode = "Idle"; break;
+        default: d.mode = "--"; break;
+    }
+    d.worst = s.alertWorst;
+    d.battValid = has(V_SOC) || has(V_BATTV) || has(V_BATTA);
+    d.soc = decDeci(s.soc_d);
+    d.v = decCenti(s.battV_cv);
+    d.a = decDeci(s.battA_da);
+    d.ttgValid = has(V_TTG); d.ttg = (s.ttg_min == 0xFFFF) ? 0 : s.ttg_min;
+    d.starterValid = has(V_STARTERV); d.starterV = decCenti(s.starterV_cv);
+    d.solarValid = has(V_SOLAR); d.solarA = decDeci(s.solarA_da); d.solarW = 0;  // W not in frame
+    d.chargerValid = has(V_CHARGER); d.chargerA = decDeci(s.chargerA_da);
+    d.dcdcValid = has(V_DCDC); d.dcdcOutA = decDeci(s.dcdcA_da);
+    d.loadValid = has(V_LOAD); d.loadA = decDeci(s.loadA_da); d.loadDerived = false;
+    d.profileId = s.profile;
+    collectHistory(d);  // Graph page: fill from the history built off received frames
+
+    // Settings (Tune) fields relevant to a slave: its own config AP + display prefs.
+    strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1); d.apSsid[sizeof(d.apSsid) - 1] = '\0';
+    strncpy(d.apPass, kApPass, sizeof(d.apPass) - 1); d.apPass[sizeof(d.apPass) - 1] = '\0';
+    WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
+    d.uptimeSec = millis() / 1000;
+    d.freeHeapKb = ESP.getFreeHeap() / 1024;
+    d.tzMin = gTzOffsetMin;
+    strncpy(d.version, kFwVersion, sizeof(d.version) - 1); d.version[sizeof(d.version) - 1] = '\0';
+}
+
+static void publishSlaveDash() {
+    if (!gDashMux) return;
+    guition::DashData tmp;
+    collectSlaveDash(tmp);
     if (xSemaphoreTake(gDashMux, 0) == pdTRUE) {
         gDash = tmp;
         xSemaphoreGive(gDashMux);
@@ -910,77 +1313,231 @@ static void serviceDashRequests() {
         gSetAdjSteps = 0;
         applyTunableAdjust(which, steps);
     }
+    if (gBindSetRole >= 0) {
+        int role = gBindSetRole, idx = gBindSetIdx;
+        gBindSetRole = -1;
+        applyBindSet(role, idx);
+    }
+    if (gPairReq) {
+        gPairReq = false;
+        startPairing();
+        Serial.printf("[display] pairing window open %ds\n", pairSecsLeft());
+    }
+    serviceRole();  // role toggle (reboots) — no-op unless the Diag tab requested it
 }
 
 // Display + touch task: polls touch at ~30ms (responsive tab switching) and
 // redraws the current page a couple of times/sec or on page change, from the
 // mutex-protected snapshot. Never touches the registry, so it's independent of
 // the loop's blocking BLE scan.
+// Optimistic tunable display: the loop applies the real change + NVS on its ~2 s
+// BLE-blocked cadence, so without this the on-screen number lags ~1-2 s. These
+// step/clamp tables MIRROR applyTunableAdjust() (keep them in sync) so the display
+// can show the new value the instant you tap. Index = guition::Tunable.
+static const float kTunStep[guition::TUNABLE_N] = {10, 5, 0.05f, 30, 5, 5, 0.1f, 0.1f};
+static const float kTunMin[guition::TUNABLE_N]  = {10, 0, 0, -720, 0, 0, 5, 5};
+static const float kTunMax[guition::TUNABLE_N]  = {100, 2000, 2, 840, 100, 100, 20, 20};
+
+static float tunVal(const guition::DashData& d, int i) {
+    switch (i) {
+        case guition::TUN_BRIGHT:   return d.brightness;
+        case guition::TUN_BATTCAP:  return d.battCapAh;
+        case guition::TUN_DEADBAND: return d.deadbandA;
+        case guition::TUN_TZ:       return d.tzMin;
+        case guition::TUN_SOCWARN:  return d.socWarn;
+        case guition::TUN_SOCCRIT:  return d.socCrit;
+        case guition::TUN_VLOW:     return d.vLow;
+        case guition::TUN_VHIGH:    return d.vHigh;
+    }
+    return 0;
+}
+static void setTunVal(guition::DashData& d, int i, float v) {
+    switch (i) {
+        case guition::TUN_BATTCAP:  d.battCapAh = v; break;
+        case guition::TUN_DEADBAND: d.deadbandA = v; break;
+        case guition::TUN_TZ:       d.tzMin = (int)v; break;
+        case guition::TUN_SOCWARN:  d.socWarn = v; break;
+        case guition::TUN_SOCCRIT:  d.socCrit = v; break;
+        case guition::TUN_VLOW:     d.vLow = v; break;
+        case guition::TUN_VHIGH:    d.vHigh = v; break;
+        default: break;
+    }
+}
+
 static void displayTask(void*) {
     bool wasDown = false;
     uint32_t lastUi = 0;
+    int lastSrcCount = 0;  // shared-source count from the last render (for menu hit mapping)
+    int optWhich = -1;          // tunable being optimistically shown (-1 = none)
+    float optVal = 0;
+    float tunShown[guition::TUNABLE_N] = {0};  // last displayed tunable values (adjust base)
+    uint32_t lastTapMs = 0;     // debounce: ignore down-edges too close together
     for (;;) {
         bool redraw = false;
         guition::TouchPoint tp;
         bool down = gTouch.read(tp);
-        if (down && !wasDown) {
+        if (down && !wasDown && millis() - lastTapMs >= 150) {  // debounce: one action per tap
+            lastTapMs = millis();
             int t = guition::tabHitTest(tp.x, tp.y);
             if (t >= 0) {
                 if ((guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
+                gBindMenuRole = -1;  // leaving the page closes any open picker
+                gDiagScreen = 0;     // and returns Diag to its menu
             } else if (gPage == guition::PAGE_GRAPH) {
-                // Tap the window pill to cycle the zoom window (1m..24h).
-                if (guition::graphHitTest(tp.x, tp.y)) {
-                    int n = (int)(sizeof(kGraphWins) / sizeof(kGraphWins[0]));
-                    int cur = 0;
-                    for (int i = 0; i < n; ++i) if (kGraphWins[i] == gGraphWinMin) cur = i;
-                    gGraphWinMin = kGraphWins[(cur + 1) % n];
-                    redraw = true;
+                // Tap a zoom pill to jump straight to that window (1m..24h).
+                int win = guition::graphHitTest(tp.x, tp.y);
+                if (win > 0) {
+                    if (win != gGraphWinMin) { gGraphWinMin = win; redraw = true; }
+                } else {
+                    int s = guition::graphLegendHit(tp.x, tp.y);  // tap legend to toggle a series
+                    if (s >= 0) { gGraphHidden ^= (uint8_t)(1 << s); redraw = true; }
                 }
             } else if (gPage == guition::PAGE_SETTINGS) {
-                // Tap a profile row to switch, a tunable row to select it, and
-                // -/+ to adjust the selected tunable. Brightness is display-owned
-                // (applied here); the rest is deferred to the loop task.
-                guition::SettingsHitResult h = guition::settingsHit(tp.x, tp.y);
-                switch (h.action) {
-                    case guition::SA_PROFILE:
-                        gProfileReq = h.index; break;
-                    case guition::SA_SELECT_ROW:
-                        gSetSel = h.index; redraw = true; break;
-                    case guition::SA_ADJ_DN:
-                    case guition::SA_ADJ_UP: {
-                        int dir = (h.action == guition::SA_ADJ_UP) ? 1 : -1;
-                        if (gSetSel == guition::TUN_BRIGHT) {
-                            int b = gDisplay.brightness() + dir * 10;
-                            if (b < 10) b = 10; if (b > 100) b = 100;
-                            gDisplay.setBrightness((uint8_t)b);
-                        } else {
-                            gSetAdjWhich = gSetSel;
-                            gSetAdjSteps += dir;
+                if (gSetView == 1 && gBindMenuRole >= 0) {
+                    // Source picker open: tap an option to bind it, Back to cancel,
+                    // and the nav pills page through a long source list.
+                    int vis[guition::BIND_MAXSRC];
+                    int vc = guition::bindVisible(gBindMenuRole, lastSrcCount, vis,
+                                                  guition::BIND_MAXSRC);
+                    int pages = (vc + guition::BIND_PERPAGE - 1) / guition::BIND_PERPAGE;
+                    int k = guition::bindMenuHit(tp.x, tp.y);
+                    if (k == -2) { gBindMenuRole = -1; redraw = true; }              // Back
+                    else if (k == -3) { if (gMenuPage > 0) { gMenuPage--; redraw = true; } }
+                    else if (k == -4) { if (gMenuPage < pages - 1) { gMenuPage++; redraw = true; } }
+                    else if (k >= 0) {
+                        int idx = gMenuPage * guition::BIND_PERPAGE + k;
+                        if (idx < vc) {
+                            gBindSetRole = gBindMenuRole;
+                            gBindSetIdx = vis[idx];
+                            gBindMenuRole = -1;
+                            redraw = true;
                         }
-                        redraw = true; break;
                     }
-                    default: break;
+                } else {
+                    // Sub-view toggle (Tune/Bind/Diag) + per-view controls. Loop-task
+                    // work is deferred; brightness applied here. A slave uses Tune +
+                    // Diag (no Bind). Diag is a menu of screens (gDiagScreen).
+                    int effView = gSetView;
+                    if (gRole == ROLE_SLAVE && effView == 1) effView = 0;
+                    int v = guition::settingsViewHit(tp.x, tp.y);
+                    if (v >= 0 && !(gRole == ROLE_SLAVE && v == 1)) {
+                        if (v != gSetView) { gSetView = v; gBindMenuRole = -1; gDiagScreen = 0; redraw = true; }
+                    } else if (effView == 2) {
+                        switch (guition::diagHit(tp.x, tp.y, gRole, gDiagScreen)) {
+                            case guition::DIAG_OPEN_MON:   gDiagScreen = guition::DS_MON;   redraw = true; break;
+                            case guition::DIAG_OPEN_DISC:  gDiagScreen = guition::DS_DISC;  redraw = true; break;
+                            case guition::DIAG_OPEN_DEBUG: gDiagScreen = guition::DS_DEBUG; redraw = true; break;
+                            case guition::DIAG_OPEN_ROLE:  gDiagScreen = guition::DS_ROLE;  redraw = true; break;
+                            case guition::DIAG_OPEN_LINK:  gDiagScreen = guition::DS_LINK;  redraw = true; break;
+                            case guition::DIAG_BACK:       gDiagScreen = guition::DS_MENU;  redraw = true; break;
+                            case guition::DIAG_DEBUG_TOGGLE: gDebugCapture = !gDebugCapture; redraw = true; break;
+                            case guition::DIAG_ROLE_TOGGLE: gRoleReq = true; break;
+                            case guition::DIAG_UNPAIR: gRx.unpair(); redraw = true; break;
+                            default: break;
+                        }
+                    } else if (effView == 1) {
+                        int h = guition::bindingHit(tp.x, tp.y);
+                        if (h == -2) { if (gBindPage > 0) { gBindPage--; redraw = true; } }
+                        else if (h == -3) {
+                            if (gBindPage < guition::bindListPages() - 1) { gBindPage++; redraw = true; }
+                        } else if (h >= 0) {
+                            int role = gBindPage * guition::BIND_PERPAGE + h;
+                            if (role < (int)sig::kRoleCount) {
+                                gBindMenuRole = role;
+                                gMenuPage = 0;
+                                redraw = true;
+                            }
+                        }
+                    } else {
+                        guition::SettingsHitResult h = guition::settingsHit(tp.x, tp.y, gRole);
+                        switch (h.action) {
+                            case guition::SA_PAIR:
+                                if (gRole == ROLE_SLAVE) gRx.startAdopt(); else gPairReq = true;
+                                redraw = true; break;
+                            case guition::SA_PROFILE:
+                                gProfileReq = h.index; break;
+                            case guition::SA_SELECT_ROW:
+                                gSetSel = h.index; redraw = true; break;
+                            case guition::SA_ADJ_DN:
+                            case guition::SA_ADJ_UP: {
+                                int dir = (h.action == guition::SA_ADJ_UP) ? 1 : -1;
+                                if (gSetSel == guition::TUN_BRIGHT) {
+                                    int b = gDisplay.brightness() + dir * 10;
+                                    if (b < 10) b = 10; if (b > 100) b = 100;
+                                    gDisplay.setBrightness((uint8_t)b);
+                                } else {
+                                    // Show the new value instantly; the loop applies
+                                    // the real change + NVS on its next cycle.
+                                    float v = tunShown[gSetSel] + dir * kTunStep[gSetSel];
+                                    if (v < kTunMin[gSetSel]) v = kTunMin[gSetSel];
+                                    if (v > kTunMax[gSetSel]) v = kTunMax[gSetSel];
+                                    optWhich = gSetSel; optVal = v; tunShown[gSetSel] = v;
+                                    gSetAdjWhich = gSetSel;
+                                    gSetAdjSteps += dir;
+                                }
+                                redraw = true; break;
+                            }
+                            default: break;
+                        }
+                    }
                 }
             }
         }
         wasDown = down;
 
         uint32_t now = millis();
-        if (redraw || now - lastUi >= 500) {
+        // The Flow page animates its pulsing flow lines, so refresh it faster.
+        uint32_t uiInterval = (gPage == guition::PAGE_FLOW) ? 130 : 500;
+        if (redraw || now - lastUi >= uiInterval) {
             lastUi = now;
             guition::DashData d;
             if (xSemaphoreTake(gDashMux, pdMS_TO_TICKS(50)) == pdTRUE) {
                 d = gDash;
                 xSemaphoreGive(gDashMux);
             }
+            lastSrcCount = d.srcCount;               // for the next menu-hit mapping
             d.brightness = gDisplay.brightness();  // display-owned, not in the snapshot
             d.histWinMin = (uint16_t)gGraphWinMin;  // reflect the pill instantly; data follows
+            d.graphHidden = gGraphHidden;           // legend show/hide (display-owned)
             d.setSel = (uint8_t)gSetSel;            // selected tunable row (display-owned)
+            d.setView = (uint8_t)gSetView;          // Settings sub-view (display-owned)
+            d.menuRole = gBindMenuRole;             // open source-picker (display-owned)
+            d.bindPage = (uint8_t)gBindPage;        // bindings-list page (display-owned)
+            d.menuPage = (uint8_t)gMenuPage;        // source-picker page (display-owned)
+            d.diagScreen = (uint8_t)gDiagScreen;    // Diag sub-screen (display-owned)
+            d.debugCapture = gDebugCapture;         // reflect the toggle instantly (display-owned)
+            // Optimistic tunable: show the adjusted number now; clear once the loop
+            // has applied it and the snapshot caught up.
+            if (optWhich >= 0) {
+                if (fabsf(tunVal(d, optWhich) - optVal) < 0.001f) optWhich = -1;
+                else setTunVal(d, optWhich, optVal);
+            }
+            for (int i = 0; i < guition::TUNABLE_N; ++i) tunShown[i] = tunVal(d, i);
             guition::renderPage(gDisplay.canvas(), gPage, d);
             gDisplay.flush();
         }
-        vTaskDelay(pdMS_TO_TICKS(30));
+        // Poll touch ~60 Hz so a tap is caught quickly without over-sampling jitter
+        // (blocking, full-frame) redraws — the panel has no partial-update DMA, so
+        // each redraw briefly monopolises this task.
+        vTaskDelay(pdMS_TO_TICKS(16));
     }
+}
+
+// Bring up the panel + touch + display task (shared by both roles). Seeds the
+// first snapshot for the active role so the task has something to draw.
+static void bringUpDisplay() {
+    if (!gDisplay.begin(1 /*landscape 480x320*/)) {
+        Serial.println("Display init FAILED (PSRAM/panel)");
+        return;
+    }
+    Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
+    gTouch.begin(1);
+    gDashMux = xSemaphoreCreateMutex();
+    if (gRole == ROLE_SLAVE) publishSlaveDash(); else publishDash();  // seed
+    // Priority 2 (above the Arduino loop's 1) so touch polling preempts the loop's
+    // between-scan work; the task sleeps 8 ms between polls so it never starves it.
+    xTaskCreatePinnedToCore(displayTask, "display", 8192, nullptr, 2, nullptr, 1);
+    gDisplayOk = true;
 }
 #endif  // VICMON_DISPLAY
 
@@ -1054,8 +1611,12 @@ static String buildStatsJson() {
 // 1, and the broadcast peer uses channel 0 ("current channel") to follow it.
 
 static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-static bool gEspNowOk = false;
-static uint16_t gSnapSeq = 0;
+// gEspNowOk + gSnapSeq are declared with the master-identity globals near the top
+// (collectDash reads them before this section).
+static slavelink::Snapshot gCachedSnap;
+static volatile bool gSnapReady = false;
+static esp_timer_handle_t gBcastTimer = nullptr;
+static void broadcastTick(void*);  // defined after buildSnapshot
 
 static void setupEspNow() {
     if (esp_now_init() != ESP_OK) {
@@ -1066,12 +1627,22 @@ static void setupEspNow() {
     memcpy(peer.peer_addr, kBroadcastMac, 6);
     peer.channel = 0;      // 0 = current WiFi channel (AP pinned to 1)
     peer.encrypt = false;  // broadcast can't be encrypted; telemetry only
+    // The master always runs SoftAP (channel-pinned); transmit via the AP
+    // interface. The default (STA) interface doesn't exist in AP-only mode, so
+    // esp_now_send would fail silently and no slave would ever hear us.
+    peer.ifidx = WIFI_IF_AP;
     if (esp_now_add_peer(&peer) != ESP_OK) {
         Serial.println("ESP-NOW peer add failed");
         return;
     }
     gEspNowOk = true;
-    Serial.println("ESP-NOW broadcaster ready");
+    // Transmit the cached snapshot ~4/s from a timer, independent of the loop.
+    esp_timer_create_args_t ta = {};
+    ta.callback = &broadcastTick;
+    ta.name = "vbcast";
+    if (esp_timer_create(&ta, &gBcastTimer) == ESP_OK)
+        esp_timer_start_periodic(gBcastTimer, 250000);  // 250 ms
+    Serial.println("ESP-NOW broadcaster ready (250ms tick)");
 }
 
 static slavelink::Snapshot buildSnapshot() {
@@ -1079,6 +1650,8 @@ static slavelink::Snapshot buildSnapshot() {
     uint32_t now = millis();
     Snapshot s = {};
     fillHeader(s);
+    s.masterId = gMasterId;
+    s.flags = pairingActive() ? F_PAIRING : 0;
 
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved bv = R(sig::Role::BatteryV, now);
@@ -1121,15 +1694,35 @@ static slavelink::Snapshot buildSnapshot() {
 
     s.alertWorst = (uint8_t)buildAlerts(now);
     s.profile = (uint8_t)gProfiles.active();
-    s.seq = ++gSnapSeq;
+    s.seq = 0;  // stamped per actual transmit in broadcastTick()
     s.uptime_s = now / 1000;
     return s;
 }
 
+// The loop refreshes gCachedSnap (registry-owning thread), and a 250 ms esp_timer
+// transmits it — so the broadcast rate (~4/s) is independent of the loop's ~2 s
+// BLE-blocked cadence. Without this a channel-hopping slave rarely coincides with
+// a send and can take a very long time to acquire. seq is stamped per transmit so
+// the slave's drop detection stays correct.
+static void broadcastTick(void*) {
+    if (!gEspNowOk || !gSnapReady) return;
+    gCachedSnap.seq = ++gSnapSeq;
+    gCachedSnap.uptime_s = millis() / 1000;
+    gCachedSnap.flags = pairingActive() ? slavelink::F_PAIRING : 0;  // keep pairing fresh between builds
+    esp_err_t e = esp_now_send(kBroadcastMac, (const uint8_t*)&gCachedSnap, sizeof(gCachedSnap));
+    static uint32_t lastErrLog = 0;
+    if (e != ESP_OK && millis() - lastErrLog > 3000) {
+        lastErrLog = millis();
+        Serial.printf("[espnow] send err 0x%x\n", e);
+    }
+}
+
+// Called each loop: refresh the cached snapshot from live signals (the timer does
+// the actual transmitting).
 static void sendSlaveBroadcast() {
     if (!gEspNowOk) return;
-    slavelink::Snapshot s = buildSnapshot();
-    esp_now_send(kBroadcastMac, (const uint8_t*)&s, sizeof(s));
+    gCachedSnap = buildSnapshot();
+    gSnapReady = true;
 }
 
 // ---- web app ---------------------------------------------------------------
@@ -1159,7 +1752,7 @@ form.inline{display:flex;gap:.6em;flex-wrap:wrap;align-items:end;margin:0}
 .banner{text-align:center;font-weight:700;letter-spacing:.18em;padding:.5em;
 border:1px solid #2c3a4a;border-radius:10px;margin-top:.6em;color:var(--muted)}
 .legend{font-size:.8em;display:flex;gap:1em;flex-wrap:wrap;margin-top:.5em}
-line{stroke-width:4;stroke-linecap:round;fill:none}
+line,polyline{stroke-width:4;stroke-linecap:round;stroke-linejoin:round;fill:none}
 .flow{stroke-dasharray:7 7;animation:dash 1s linear infinite}
 .flowrev{stroke-dasharray:7 7;animation:dashrev 1s linear infinite}
 @keyframes dash{to{stroke-dashoffset:-14}}
@@ -1173,10 +1766,10 @@ static const char kMimicPage[] = R"HTML(
 <div id="alerts"></div>
 <div class=card>
 <svg viewBox="0 0 360 350" id="mimic" style="width:100%;max-width:460px;display:block;margin:auto">
-  <line id="lineSolar"   x1="62"  y1="86" x2="150" y2="152" stroke="#2c3a4a" />
-  <line id="lineCharger" x1="180" y1="78" x2="180" y2="150" stroke="#2c3a4a" />
-  <line id="lineDcdc"    x1="298" y1="86" x2="210" y2="152" stroke="#2c3a4a" />
-  <line id="lineLoad"    x1="180" y1="244" x2="180" y2="298" stroke="#2c3a4a" />
+  <polyline id="lineSolar"   points="62,86 62,152 150,152" stroke="#2c3a4a" />
+  <line     id="lineCharger" x1="180" y1="78" x2="180" y2="150" stroke="#2c3a4a" />
+  <polyline id="lineDcdc"    points="298,86 298,152 210,152" stroke="#2c3a4a" />
+  <line     id="lineLoad"    x1="180" y1="244" x2="180" y2="298" stroke="#2c3a4a" />
   <rect x="150" y="150" width="60" height="92" rx="9" fill="#0d1620" stroke="#2c3a4a" stroke-width="3" />
   <rect id="fill" x="153" y="242" width="54" height="0" fill="#34d399" opacity="0.85" />
   <rect id="batt" x="150" y="150" width="60" height="92" rx="9" fill="none" stroke="#7d8da1" stroke-width="3" />
@@ -1497,6 +2090,12 @@ static String pageHead(const char* active) {
     } links[] = {{"/", "Mimic"}, {"/stats", "Stats"}, {"/devices", "Devices"},
                  {"/bindings", "Settings"}, {"/diag", "Diag"}};
     for (auto& l : links) {
+        // A slave has no BLE devices / local history — hide those pages, leaving
+        // the live Mimic + Settings (System card: pair / role / unpair).
+        if (gRole == ROLE_SLAVE && (strcmp(l.href, "/devices") == 0 ||
+                                    strcmp(l.href, "/stats") == 0 ||
+                                    strcmp(l.href, "/diag") == 0))
+            continue;
         h += "<a href='";
         h += l.href;
         h += "'";
@@ -1636,6 +2235,7 @@ static String wifiCard();
 static String profilesCard();
 static String backupCard();
 static String otaCard();
+static String systemCard();
 
 static String bindingsPage() {
     String h = pageHead("/bindings");
@@ -1709,6 +2309,7 @@ static String bindingsPage() {
          "(red = critical, amber = warning, green = charging). 0 disables a check. "
          "A configured device that stops broadcasting also raises a warning.</p></div>";
 
+    h += systemCard();
     h += wifiCard();
     h += otaCard();
     h += backupCard();
@@ -2245,9 +2846,50 @@ static String otaCard() {
         "</script></div>");
 }
 
+// System / pairing card — the web equivalent of the on-screen Diag controls, so
+// anything doable on the display is doable from the AP (pair a slave, toggle debug
+// capture, switch role). Shown on the settings page for both roles.
+static String systemCard() {
+    char idbuf[12];
+    snprintf(idbuf, sizeof(idbuf), "%08X", gRole == ROLE_SLAVE ? gRx.pairedMaster() : gMasterId);
+    String h = "<div class=card><h3>System</h3>";
+    h += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
+         String(gRole == ROLE_SLAVE ? "paired master" : "id") + " " + String(idbuf) + "</p>";
+    if (gRole == ROLE_SLAVE) {
+        h += "<button onclick=\"fetch('/api/pair',{method:'POST'})\">Pair to a master</button> ";
+        h += "<button onclick=\"if(confirm('Forget the paired master?'))fetch('/api/unpair',{method:'POST'})\">Unpair</button> ";
+        h += "<button onclick=\"if(confirm('Switch to Master and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Master</button>";
+        h += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots.</p>";
+    } else {
+        h += "<button onclick=\"fetch('/api/pair',{method:'POST'}).then(()=>alert('Pairing window open 60s'))\">Pair a slave</button> ";
+        h += "<button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
+        h += "<button onclick=\"if(confirm('Switch to Slave and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Slave</button>";
+        h += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
+             "capture records raw bytes of unknown Victron devices. Switching role reboots.</p>";
+    }
+    return h + "</div>";
+}
+
 static void setupServer() {
     gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/css", kStyle);
+    });
+    // Pairing / role / debug — parity with the on-screen Diag controls.
+    gServer.on("/api/pair", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (gRole == ROLE_SLAVE) gRx.startAdopt(); else startPairing();
+        req->send(200, "text/plain", "ok");
+    });
+    gServer.on("/api/unpair", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (gRole == ROLE_SLAVE) gRx.unpair();
+        req->send(200, "text/plain", "ok");
+    });
+    gServer.on("/api/role", HTTP_POST, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/plain", "rebooting");
+        gRoleReq = true;  // serviceRole() reboots into the other role
+    });
+    gServer.on("/api/debug", HTTP_POST, [](AsyncWebServerRequest* req) {
+        gDebugCapture = !gDebugCapture;
+        req->send(200, "text/plain", gDebugCapture ? "on" : "off");
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());
@@ -2393,6 +3035,57 @@ static void simTick() {
 }
 #endif  // VICMON_SIM
 
+// ---- slave role (dual-purpose): receive another master's broadcast ---------
+// When the NVS role flag is SLAVE, setup() calls this instead of the full master
+// bring-up: no BLE scan, no broadcaster — just the ESP-NOW receiver (gRx) feeding
+// the same display, plus a lightweight config SoftAP so a headless slave is still
+// configurable (pair / unpair / switch role). A SoftAP pins the radio to one
+// channel, so the receiver runs non-hopping on channel 1 (the master's default).
+
+static void setupSlave() {
+    Serial.println("[boot] SLAVE role — ESP-NOW receiver + config AP (no BLE)");
+    // Config SoftAP on channel 1 (matches the master's default AP channel).
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
+    IPAddress ip = WiFi.softAPIP();
+    Serial.printf("[slave] config AP '%s' at http://%s/  (pass %s, ch1)\n", kApSsid,
+                  ip.toString().c_str(), kApPass);
+    gDns.start(53, "*", ip);
+    setupServer();  // the SAME full web app as the master (role-gated + snapshot-fed)
+    if (MDNS.begin("vicmon")) MDNS.addService("http", "tcp", 80);
+
+    gRx.begin("vicslave", /*manageWifi=*/false);  // AP owns ch1; don't hop
+    gEspNowOk = gRx.ok();
+    Serial.println(gRx.ok() ? "ESP-NOW receiver ready (ch1)" : "ESP-NOW receiver init FAILED");
+    if (gRx.isPaired()) Serial.printf("Paired to master %08X\n", gRx.pairedMaster());
+    else Serial.println("Unpaired — Pair from the AP page / Diag tab / button");
+#ifdef VICMON_DISPLAY
+    bringUpDisplay();
+#endif
+}
+
+static void slaveLoop() {
+    gDns.processNextRequest();
+    gRx.poll();
+    sampleSlaveHistory();  // build the Trend history from received frames
+    serviceRole();  // "Switch to Master" (reboots)
+#ifdef VICMON_DISPLAY
+    if (gDisplayOk) { serviceDashRequests(); publishSlaveDash(); }  // apply tunable/brightness taps
+#endif
+    static uint32_t last = 0;
+    uint32_t now = millis();
+    if (now - last >= 1000) {
+        last = now;
+        if (gRx.isPaired())
+            Serial.printf("[slave] %08X %s ch%u drops=%lu\n", gRx.pairedMaster(),
+                          gRx.live() ? "live" : "stale", gRx.channel(), (unsigned long)gRx.drops());
+        else
+            Serial.printf("[slave] unpaired ch%u %s\n", gRx.channel(),
+                          gRx.isAdopting() ? "adopting" : "idle");
+    }
+    delay(20);
+}
+
 // ---- Arduino entry points --------------------------------------------------
 
 void setup() {
@@ -2411,6 +3104,15 @@ void setup() {
     }
     Serial.println("\nVicmon Master: BLE + WiFi AP + display");
 
+    // Stable per-chip id (low 32 bits of the factory MAC): identifies this master
+    // in every ESP-NOW frame so slaves can filter/pair to it. Reads from efuse,
+    // needs no init, so it's available before WiFi/ESP-NOW come up.
+    gMasterId = (uint32_t)ESP.getEfuseMac();
+    snprintf(kApSsid, sizeof(kApSsid), "Vicmon-%06X", (unsigned)(gMasterId & 0xFFFFFF));
+    Serial.printf("[boot] master id %08X, AP '%s'\n", gMasterId, kApSsid);
+
+    // Shared init (history rings, LittleFS, profiles/config/signals) — needed by
+    // the web app in BOTH roles, so it runs before the role branch.
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
     gCoarse.init(gCoarseBuf, HIST2_CAP, HIST2_INTERVAL);
 
@@ -2421,6 +3123,12 @@ void setup() {
     applyProfile(gProfiles.active());
     Serial.printf("Profile '%s': %u device(s)\n", gProfiles.name(gProfiles.active()),
                   (unsigned)gConfig.count());
+
+    // Dual-purpose: a slave-role device skips the master-only bring-up (BLE scan,
+    // broadcaster) but still serves the SAME web app (sourced from received data).
+    loadRole();
+    Serial.printf("[boot] role: %s\n", gRole == ROLE_SLAVE ? "SLAVE" : "MASTER");
+    if (gRole == ROLE_SLAVE) { setupSlave(); return; }
 
 #ifdef GUITION_NO_WIFI
     IPAddress ip;
@@ -2437,8 +3145,9 @@ void setup() {
     WiFi.mode(gStaSsid.length() ? WIFI_AP_STA : WIFI_AP);
     WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
     IPAddress ip = WiFi.softAPIP();
-    Serial.printf("AP '%s' up at http://%s/  (pass: %s)\n", kApSsid,
-                  ip.toString().c_str(), kApPass);
+    { uint8_t pc = 0; wifi_second_chan_t sc; esp_wifi_get_channel(&pc, &sc);
+      Serial.printf("AP '%s' up at http://%s/  (pass: %s) channel %u\n", kApSsid,
+                    ip.toString().c_str(), kApPass, pc); }
 #ifdef GUITION_SLOW_BEACON
     {  // DIAG: slow the AP beacon to reduce TX-vs-LVGL collisions.
         wifi_config_t c;
@@ -2487,21 +3196,15 @@ void setup() {
 #endif
 
 #ifdef VICMON_DISPLAY
-    if (!gDisplay.begin(1 /*landscape 480x320*/)) {
-        Serial.println("Display init FAILED (PSRAM/panel)");
-    } else {
-        Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
-        gTouch.begin(1);
-        gDashMux = xSemaphoreCreateMutex();
-        publishDash();  // seed the snapshot before the task starts
-        // Display + touch on core 1 (runs during the loop's blocking BLE scan).
-        xTaskCreatePinnedToCore(displayTask, "display", 8192, nullptr, 1, nullptr, 1);
-        gDisplayOk = true;
-    }
+    bringUpDisplay();  // panel + touch + display task (core 1)
 #endif
 }
 
 void loop() {
+    if (gRole == ROLE_SLAVE) { slaveLoop(); return; }
+    serviceMasterSerial();  // `pair` / `role` console commands
+    serviceRole();          // consume a serial/web role-toggle on headless masters
+
 #ifndef GUITION_MINSYS
     gDns.processNextRequest();
 #endif

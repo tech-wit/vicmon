@@ -12,6 +12,15 @@ namespace guition {
 // history ring). Kept a bit under the plot width in px.
 static constexpr int HIST_POINTS = 116;
 
+// Logical panel signals shown on the Settings > Bindings sub-view. Must match
+// sig::kRoleCount in the firmware (static_assert'd there).
+static constexpr int ROLE_N = 12;
+
+// Max entries in the shared binding-source list (none + 2 derived + device
+// fields). The firmware publishes the whole list every snapshot so the picker
+// menu opens with no lag; extra device fields beyond this are dropped.
+static constexpr int BIND_MAXSRC = 32;
+
 // Flat snapshot of everything the dashboard shows (mirrors buildPanelJson()).
 // Must stay trivially copyable — it's snapshotted by value under a mutex.
 struct DashData {
@@ -38,10 +47,16 @@ struct DashData {
   bool  loadDerived = false;
 
   // Graph page: recent history, chronological (index [histCount-1] = newest).
-  int16_t  histSoc[HIST_POINTS];   // deci-percent 0..1000, -32768 = n/a
-  int16_t  histBatt[HIST_POINTS];  // deci-amps (signed +charging), -32768 = n/a
+  // Mirrors the web chart's series (all deci-units, -32768 = n/a).
+  int16_t  histSoc[HIST_POINTS];      // deci-percent 0..1000
+  int16_t  histBatt[HIST_POINTS];     // deci-amps (signed +charging)
+  int16_t  histSolar[HIST_POINTS];    // deci-amps
+  int16_t  histCharger[HIST_POINTS];  // deci-amps
+  int16_t  histDcdc[HIST_POINTS];     // deci-amps (DC-DC output)
+  int16_t  histLoad[HIST_POINTS];     // deci-amps
   int      histCount = 0;          // valid points (<= HIST_POINTS)
   uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
+  uint8_t  graphHidden = 0;        // bitfield: series hidden via the legend (bit 0=batt..5=soc)
 
   // Week page: last-7-days energy (Wh) + today's running totals.
   static const int DAYS_N = 7;
@@ -57,6 +72,7 @@ struct DashData {
   char     profNames[4][20];       // ProfileManager::kMax
   bool     profUsed[4];
   char     apSsid[24] = "";
+  char     apPass[24] = "";
   char     ipStr[20] = "";
   int      devPaired = 0;          // configured signal-source devices
   int      devSeen = 0;            // BLE devices currently discovered
@@ -72,6 +88,49 @@ struct DashData {
   int      tzMin = 0;              // timezone offset, minutes
   float    socWarn = 0, socCrit = 0, vLow = 0, vHigh = 0;
   uint8_t  setSel = 0;             // selected tunable row (0..TUNABLE_N-1)
+  uint8_t  setView = 0;            // Settings sub-view: 0 = tunables, 1 = bindings, 2 = diagnostics
+  int      menuRole = -1;          // open source-picker role (-1 = list), display-owned
+  uint8_t  bindPage = 0;           // bindings-list page (display-owned)
+  uint8_t  menuPage = 0;           // source-picker page (display-owned)
+  uint8_t  diagScreen = 0;         // Diag sub-screen: 0 menu / MON / DISC / DEBUG / ROLE / LINK
+
+  // Settings > Bindings. `srcLabels` is the shared list of selectable sources
+  // (index 0 = none, 1 = derived charge, 2 = derived load, then device+field);
+  // `bindIdx[r]` is the shared index each role is currently bound to; `bindLabel`
+  // is that label pre-resolved for the list view. All filled by the firmware.
+  int      srcCount = 0;
+  char     srcLabels[BIND_MAXSRC][24];
+  int      bindIdx[ROLE_N];
+  char     bindLabel[ROLE_N][24];
+
+  // Settings > Diagnostics sub-view + device role.
+  uint8_t  role = 0;               // 0 = master, 1 = slave (this device's role)
+  bool     debugCapture = false;   // master: capturing raw bytes of unknown adverts
+  bool     espNowOk = false;       // ESP-NOW radio up (broadcaster or receiver)
+  uint32_t masterId = 0;           // master: our id; slave: the paired master's id (0 = none)
+  uint16_t snapSeq = 0;            // master: last broadcast sequence number
+  bool     pairing = false;        // pairing window (master) / adopt window (slave) open
+  int      pairSecLeft = 0;        // seconds left in that window
+  bool     linkLive = false;       // slave: receiving frames from our master
+  uint32_t linkDrops = 0;          // slave: sequence gaps observed
+  uint8_t  linkChannel = 0;        // slave: current listen channel
+  bool     heardInvite = false;    // slave: a master is inviting pairing right now
+
+  // Diagnostics: monitored (configured) devices.
+  static const int MON_N = 6;
+  int      monCount = 0;
+  char     monName[MON_N][18];
+  char     monType[MON_N][8];
+  bool     monLive[MON_N];
+  char     monVal[MON_N][20];
+  // Diagnostics: discovered (unknown) devices; discRaw filled only in debug mode.
+  static const int DISC_N = 6;
+  int      discCount = 0;
+  char     discName[DISC_N][18];
+  char     discMac[DISC_N][20];
+  uint16_t discModel[DISC_N];
+  int      discRssi[DISC_N];
+  char     discRaw[DISC_N][36];
 };
 
 // Pages selectable via the bottom tab bar.
@@ -84,8 +143,9 @@ enum Tunable : uint8_t {
   TUN_SOCWARN, TUN_SOCCRIT, TUN_VLOW, TUN_VHIGH, TUNABLE_N
 };
 
-// Result of a tap on the Settings page.
-enum SettingsAction : uint8_t { SA_NONE = 0, SA_PROFILE, SA_SELECT_ROW, SA_ADJ_DN, SA_ADJ_UP };
+// Result of a tap on the Settings page (Tune sub-view). SA_PAIR = the Pair action
+// row (opens the pairing window on a master / adopts on a slave).
+enum SettingsAction : uint8_t { SA_NONE = 0, SA_PROFILE, SA_SELECT_ROW, SA_ADJ_DN, SA_ADJ_UP, SA_PAIR };
 struct SettingsHitResult { SettingsAction action; int index; };  // index: profile id or row
 
 // Draw the given page (content + tab bar) into the landscape 480x320 canvas.
@@ -96,12 +156,58 @@ void renderPage(Arduino_GFX* c, Page page, const DashData& d);
 // (>=0); otherwise return -1.
 int tabHitTest(int tx, int ty);
 
-// Hit-test the Settings-page controls (call only when the Settings page is up).
-SettingsHitResult settingsHit(int tx, int ty);
+// Hit-test the Settings-page (Tune view) controls. `role` (0 master / 1 slave)
+// selects the tunable list + whether the profile rows are active.
+SettingsHitResult settingsHit(int tx, int ty, int role);
 
-// True if (tx,ty) hit the Graph-page window pill (cycle the zoom window). Call
-// only when the Graph page is up.
-bool graphHitTest(int tx, int ty);
+// Settings sub-view toggle: returns 0 (Tunables), 1 (Bindings) or 2 (Diagnostics)
+// if a view pill was tapped, else -1. Call only when the Settings page is up.
+int settingsViewHit(int tx, int ty);
+
+// The Diagnostics sub-view is a small menu of screens. Screen ids (DashData.
+// diagScreen) and the actions a tap can produce.
+enum DiagScreen : uint8_t {
+  DS_MENU = 0, DS_MON, DS_DISC, DS_DEBUG, DS_ROLE, DS_LINK
+};
+enum DiagAction : uint8_t {
+  DIAG_NONE = 0, DIAG_BACK,
+  DIAG_OPEN_MON, DIAG_OPEN_DISC, DIAG_OPEN_DEBUG, DIAG_OPEN_ROLE, DIAG_OPEN_LINK,
+  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR
+};
+
+// Hit-test the Diagnostics sub-view given the current screen + role. Returns a
+// DiagAction (DIAG_NONE on a miss). On the menu it returns which screen to open;
+// on a sub-screen it returns Back or the screen's control action.
+int diagHit(int tx, int ty, int role, int screen);
+
+// Rows per page in the paginated Bindings list and source-picker.
+static constexpr int BIND_PERPAGE = 6;
+
+// Number of pages in the bindings list (ROLE_N signals, BIND_PERPAGE per page).
+int bindListPages();
+
+// Hit-test the Bindings list: returns the on-page row slot (0..BIND_PERPAGE-1),
+// or -2 (prev page) / -3 (next page), or -1 for a miss. Add bindPage*BIND_PERPAGE
+// to a slot to get the signal role.
+int bindingHit(int tx, int ty);
+
+// Fills `outShared` with the shared source indices visible in `role`'s picker
+// (all sources; the two derived entries only for the current-flow roles) and
+// returns the count. Lets the display map a menu cell back to a shared index.
+int bindVisible(int role, int srcCount, int* outShared, int max);
+
+// Hit-test the open source-picker: returns the on-page row slot
+// (0..BIND_PERPAGE-1), or -2 (Back) / -3 (prev page) / -4 (next page), or -1 for
+// a miss. Add menuPage*BIND_PERPAGE to a slot to index the visible list.
+int bindMenuHit(int tx, int ty);
+
+// If (tx,ty) hit a Graph-page zoom pill, return its window in minutes
+// (1/10/60/720/1440); otherwise return -1. Call only when the Graph page is up.
+int graphHitTest(int tx, int ty);
+
+// If (tx,ty) hit a Graph legend slot, return the series index 0..5 (batt/solar/
+// charger/dcdc/load/soc) to toggle on/off; otherwise -1.
+int graphLegendHit(int tx, int ty);
 
 // Back-compat: renders PAGE_DASH.
 void renderDashboard(Arduino_GFX* c, const DashData& d);

@@ -27,6 +27,8 @@ void test_roundtrip_bytes() {
     s.soc_d = 565;
     s.battV_cv = 1314;
     s.battA_da = -123;
+    s.masterId = 0xA1B2C3D4;
+    s.flags = F_PAIRING;
     s.seq = 42;
     s.uptime_s = 12345;
 
@@ -41,6 +43,8 @@ void test_roundtrip_bytes() {
     TEST_ASSERT_EQUAL_INT16(565, r.soc_d);
     TEST_ASSERT_EQUAL_INT16(1314, r.battV_cv);
     TEST_ASSERT_EQUAL_INT16(-123, r.battA_da);
+    TEST_ASSERT_EQUAL_UINT32(0xA1B2C3D4, r.masterId);
+    TEST_ASSERT_EQUAL_UINT8(F_PAIRING, r.flags);
     TEST_ASSERT_EQUAL_UINT16(42, r.seq);
     TEST_ASSERT_EQUAL_UINT32(12345, r.uptime_s);
 }

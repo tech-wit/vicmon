@@ -5,9 +5,16 @@
 // Wire format for the master -> slave live-data link (ESP-NOW broadcast).
 //
 // The master fills a Snapshot from the same resolved signals the web UI uses and
-// broadcasts it ~1/s to FF:FF:FF:FF:FF:FF; any number of slaves listen with no
-// pairing. The frame is small (< 250 B, the ESP-NOW limit) and self-healing: a
-// dropped frame just means one stale second, so there are no ACKs/retransmits.
+// broadcasts it ~1/s to FF:FF:FF:FF:FF:FF. The frame is small (< 250 B, the
+// ESP-NOW limit) and self-healing: a dropped frame just means one stale second,
+// so there are no ACKs/retransmits.
+//
+// Every frame carries the master's stable `masterId` (derived from its factory
+// MAC). A slave that has been *paired* to a master only accepts frames whose
+// masterId matches its stored one, so several masters can broadcast in the same
+// area without cross-talk. Pairing is opt-in on both ends: the master sets the
+// F_PAIRING flag while its pairing window is open, and the slave adopts that
+// masterId only when the user also presses its pair button (see src/slave).
 //
 // Shared by the master firmware, the slave firmware, and the native unit test.
 // Bump kVersion whenever the layout changes so a mismatched slave ignores frames
@@ -16,7 +23,12 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 1;
+static const uint8_t kVersion = 2;  // v2 added masterId + flags (pairing/filtering)
+
+// Frame flags (bitfield in Snapshot.flags).
+enum Flags : uint8_t {
+    F_PAIRING = 1 << 0,  // master's pairing window is open (invites adoption)
+};
 
 // Per-field validity (a device may be stale/missing). Mirrors the Snapshot
 // fields so a slave knows which numbers to trust vs. show as "--".
@@ -52,6 +64,9 @@ struct Snapshot {
     uint16_t valid;       // Valid bitfield
     uint8_t alertWorst;   // 0 none / 1 warning / 2 critical
     uint8_t profile;      // active profile id (0..3)
+
+    uint32_t masterId;    // stable per-master id (from factory MAC) — for filtering
+    uint8_t flags;        // Flags bitfield (F_PAIRING while the window is open)
 
     int16_t soc_d;        // SoC, deci-percent (0..1000)
     int16_t battV_cv;     // battery voltage, centivolts

@@ -12,13 +12,43 @@ development can resume cleanly when the display/slave hardware arrives.
 | 1 | BLE advertisement decryption core | ✅ done, verified on hardware |
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
-| 4 | Slaves + ESP-NOW transport (LilyGo board) | 🟡 protocol + master broadcaster + slave receive core done; display awaits board |
+| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP; LilyGo display driver still TBD |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
-The whole system currently runs **headless on an M5Stack AtomS3 Lite** acting as
-the "master minus display": it scans Victron BLE, aggregates, and serves a full
-web UI over its WiFi AP. Phases 3–4 add the physical screens on top of this
-already-solid data + config layer.
+**One app, one codebase (2026-07-08).** `src/master/` is *the* application: the
+**display driver** is chosen at build time per board (`BOARD_GUITION` = the
+AXS15231B panel; no flag = headless; `BOARD_LILYGO` reserved), and the
+**master/slave role** is chosen at runtime from an NVS flag. Any board can be a
+master (BLE scan + WiFi AP + web + ESP-NOW broadcast) or a slave (ESP-NOW receiver
++ its own config AP), switchable from the screen, the AP web page, or serial. The
+former standalone `src/slave` was folded in and deleted.
+
+### ESP-NOW master ↔ slave (Phase 4, verified)
+
+- **Filtering:** every frame carries a stable `masterId` (low 3 bytes of the
+  factory MAC). A paired slave accepts only its master, so several masters can
+  share the air. AP SSID is also per-device (`Vicmon-<mac3>`).
+- **Two-sided pairing:** the master opens a 60 s window (Diag/Tune *Pair* button,
+  web `/api/pair`, or serial `pair`); the slave adopts it only when the user also
+  acts on the slave (button / web / serial), then stores it in NVS.
+- **Transmit:** a 250 ms `esp_timer` broadcasts a cached snapshot (~4/s) so the
+  rate is independent of the loop's ~2 s BLE scan; the broadcast peer uses
+  `ifidx = WIFI_IF_AP` (the master is AP-only — the original STA default sent
+  nothing). Wire format `lib/slavelink/SlaveLink.h` (v2), shared receiver
+  `lib/slavelink/SlaveReceiver.h`.
+- **Channel:** the master AP is channel 1; a slave running a config AP is pinned
+  to ch1 (a SoftAP can't channel-hop), which matches the offline/no-router setup.
+- **Slave UI (display + web):** a slave shows the **same** dashboard/web app as a
+  master, sourced from the received frame — the mimic + a Graph it builds by
+  recording each received frame into its history ring (RAM-only, fills from now).
+  Master-only surfaces are hidden by role: on the LCD the Settings > Tune screen
+  shows link status + AP details + brightness/timezone + Pair (no profiles / alert
+  tunables), Bind is hidden, and Diag is Link + Switch-to-Master; the web nav drops
+  Devices/Stats/Diag. Parity: pair / switch-role / debug are reachable from the
+  screen **and** the AP (web `/api/pair|/api/role|/api/debug`, serial `pair`/`role`).
+
+The system also runs **headless** (no display) on a bare ESP32-S3 / AtomS3, in
+either role — it scans + serves the web UI, or receives + serves a config AP.
 
 ## Key decisions
 
@@ -57,18 +87,18 @@ vicmon/
 │   ├── VictronDecrypt.*    # container parse + AES-CTR (little-endian) decrypt
 │   ├── VictronParser.*     # record parsers (battery / dcdc / solar / ac-charger)
 │   └── VictronTypes.h      # decoded structs + Record/AuxMode enums
-├── lib/slavelink/          # SHARED master<->slave ESP-NOW wire format
-│   └── SlaveLink.h         # versioned packed Snapshot + enc/dec helpers
+├── lib/slavelink/          # SHARED master<->slave ESP-NOW code
+│   ├── SlaveLink.h         # versioned packed Snapshot (masterId + flags) + enc/dec
+│   └── SlaveReceiver.h     # ESP-NOW rx + channel acquisition + pairing state machine
 ├── src/
 │   ├── wroom/main.cpp      # Phase-1 reference scanner (Serial output)
-│   ├── master/             # headless master (builds for atoms3 + master envs)
-│   │   ├── main.cpp        # BLE ingest, signal resolver, history, web app
+│   ├── master/             # THE app — master OR slave at runtime; display per board flag
+│   │   ├── main.cpp        # role branch, BLE ingest, resolver, history, web app, ESP-NOW, display task
 │   │   ├── Registry.h      # DeviceSlot (key, type, latest values, mac, staleness)
 │   │   ├── DeviceConfig.*  # NVS-backed device list (per profile)
 │   │   ├── Signals.*       # signal roles, fields, resolver, NVS bindings
 │   │   ├── Stats.*         # energy counters / trip stats (Today/Trip/Total)
 │   │   └── Profiles.*      # ProfileManager (NVS, up to 4 profiles)
-│   ├── slave/main.cpp      # ESP-NOW receiver + channel acquisition (serial render; display TBD)
 │   ├── guition/main.cpp    # standalone GFX dashboard demo (synthetic data, no WiFi/BLE)
 │   ├── gfxref/main.cpp     # known-good AXS15231B reference baseline
 │   └── lvglref/main.cpp    # LVGL 9 reference/fallback on the real panel (not shipped)

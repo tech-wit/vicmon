@@ -54,9 +54,19 @@ python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
 .piovenv/bin/python tools/monitor.py --seconds 20
 ```
 
-Build envs: `atoms3` (headless master, current dev target), `master` (Guition,
-Phase 3), `slave` (Phase 4 stub), `wroom` (Phase-1 reference scanner), `native`
-(host tests).
+One app (`src/master/`) builds for every board; the display driver is picked per
+board at build time, the **master/slave role at runtime** (NVS flag — switch it
+from the screen, the AP web page, or serial `role`). Build envs:
+`master` (Guition, touch display), `headless` (bare ESP32-S3, no display),
+`atoms3` (M5Stack AtomS3 headless), `lilygo` (T-Display-S3, display driver TBD —
+builds headless), `guition` (bench dashboard demo), `wroom` (Phase-1 scanner),
+`native` (host tests).
+
+**Slaves (ESP-NOW):** a slave receives the master's ~4/s broadcast and shows it on
+its screen (or serial, if headless) plus its own config AP. Pairing is two-sided:
+open the master's 60 s window (Diag/Tune *Pair*, or web/serial `pair`), then adopt
+on the slave (button / web / serial). A paired slave filters to its master's id,
+so several masters can coexist.
 
 ## Using it
 
