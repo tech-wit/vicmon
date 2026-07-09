@@ -29,6 +29,9 @@ void test_roundtrip_bytes() {
     s.battA_da = -123;
     s.masterId = 0xA1B2C3D4;
     s.flags = F_PAIRING;
+    s.solarW_w = 240;
+    s.dcdcInV_cv = 1385;
+    s.consumedAh_da = -123;
     s.seq = 42;
     s.uptime_s = 12345;
 
@@ -45,6 +48,9 @@ void test_roundtrip_bytes() {
     TEST_ASSERT_EQUAL_INT16(-123, r.battA_da);
     TEST_ASSERT_EQUAL_UINT32(0xA1B2C3D4, r.masterId);
     TEST_ASSERT_EQUAL_UINT8(F_PAIRING, r.flags);
+    TEST_ASSERT_EQUAL_INT16(240, r.solarW_w);
+    TEST_ASSERT_EQUAL_INT16(1385, r.dcdcInV_cv);
+    TEST_ASSERT_EQUAL_INT16(-123, r.consumedAh_da);
     TEST_ASSERT_EQUAL_UINT16(42, r.seq);
     TEST_ASSERT_EQUAL_UINT32(12345, r.uptime_s);
 }

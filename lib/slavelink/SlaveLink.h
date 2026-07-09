@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 2;  // v2 added masterId + flags (pairing/filtering)
+static const uint8_t kVersion = 3;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -42,6 +42,11 @@ enum Valid : uint16_t {
     V_LOAD = 1 << 6,
     V_TTG = 1 << 7,
     V_STARTERV = 1 << 8,
+    V_SOLARW = 1 << 9,     // solar PV power (W)
+    V_SOLARV = 1 << 10,    // solar battery-side voltage
+    V_DCDCINV = 1 << 11,   // DC-DC input voltage
+    V_DCDCOUTV = 1 << 12,  // DC-DC output voltage
+    V_CONSUMED = 1 << 13,  // battery consumed Ah
 };
 
 enum Mode : uint8_t {
@@ -78,6 +83,13 @@ struct Snapshot {
     int16_t starterV_cv;  // starter/aux voltage, centivolts
     uint16_t ttg_min;     // time-to-go, minutes (0xFFFF = n/a)
 
+    // v3 additions — round out the mimic (solar/dc-dc detail + battery consumed).
+    int16_t solarW_w;     // solar PV power, whole watts
+    int16_t solarV_cv;    // solar battery-side voltage, centivolts
+    int16_t dcdcInV_cv;   // DC-DC input (alternator-side) voltage, centivolts
+    int16_t dcdcOutV_cv;  // DC-DC output (house-side) voltage, centivolts
+    int16_t consumedAh_da;// battery consumed, deci-amp-hours (signed, usually < 0)
+
     uint16_t seq;         // increments each broadcast (slave can spot gaps)
     uint32_t uptime_s;    // master uptime, seconds
 };
@@ -104,7 +116,12 @@ inline int16_t encCenti(bool valid, float x) {
     if (!valid) return kNA;
     return (int16_t)(x >= 0 ? x * 100.0f + 0.5f : x * 100.0f - 0.5f);
 }
+inline int16_t encWhole(bool valid, float x) {
+    if (!valid) return kNA;
+    return (int16_t)(x >= 0 ? x + 0.5f : x - 0.5f);
+}
 inline float decDeci(int16_t v) { return v == kNA ? 0.0f : v / 10.0f; }
 inline float decCenti(int16_t v) { return v == kNA ? 0.0f : v / 100.0f; }
+inline float decWhole(int16_t v) { return v == kNA ? 0.0f : (float)v; }
 
 }  // namespace slavelink

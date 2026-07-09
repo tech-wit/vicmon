@@ -142,7 +142,10 @@ class Receiver {
       bool stale = !haveFrame_ || (now - lastRxMs_) > kStaleMs;
       if (stale) locked_ = false;
     } else {
-      locked_ = adopting_ && (now - lastAnyMs_) < kStaleMs;  // hold channel to adopt
+      // Hold the channel only while an *inviting* master is being heard here, so
+      // we don't park on a silent/non-inviting master and miss the one pairing.
+      bool invite = (heardFlags_ & F_PAIRING) && (now - lastAnyMs_) < kStaleMs;
+      locked_ = adopting_ && invite;
     }
     if (locked_) return;
     if (now - lastHopMs_ < kHopMs) return;
@@ -192,13 +195,13 @@ class Receiver {
   volatile uint32_t adoptId_ = 0;
   volatile bool startAdopt_ = false;
   volatile bool unpairReq_ = false;
-  bool adopting_ = false;
+  volatile bool adopting_ = false;  // read in the RX callback, written in loop
   uint32_t adoptStartMs_ = 0;
 
   // channel acquisition
   uint8_t channel_ = 1;
   uint32_t lastHopMs_ = 0;
-  bool locked_ = false;
+  volatile bool locked_ = false;  // written in both the RX callback and loop
 };
 
 }  // namespace slavelink

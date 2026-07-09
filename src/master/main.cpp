@@ -121,7 +121,7 @@ static uint32_t gMasterId = 0;              // stable per-chip id (low 32b of ef
 static volatile uint32_t gPairUntilMs = 0;  // pairing window closes at this millis (0 = closed)
 static volatile bool gDebugCapture = false; // capture raw bytes of unknown adverts for troubleshooting
 static bool gEspNowOk = false;              // ESP-NOW radio up (broadcaster in master, receiver in slave)
-static uint16_t gSnapSeq = 0;               // broadcast sequence counter (master role)
+static volatile uint16_t gSnapSeq = 0;      // broadcast sequence counter (esp_timer task)
 
 // Open a 60 s pairing window: while it's up the broadcast sets F_PAIRING so an
 // adopting slave will accept this master's id (see lib/slavelink/SlaveLink.h).
@@ -792,6 +792,8 @@ static const char* chargeModeDisplayName(ChargeMode m) {
 // Returns the worst severity (0/1/2). If outArr is non-null, also serialises the
 // alerts as a JSON array — severity-only callers (LED, ESP-NOW) pass nullptr to
 // skip the string building on the hot path.
+static String jsonEsc(const String& s);  // defined with the web helpers below
+
 static int buildAlerts(uint32_t now, String* outArr = nullptr) {
     if (outArr) *outArr = "[";
     int worst = 0;
@@ -823,7 +825,8 @@ static int buildAlerts(uint32_t now, String* outArr = nullptr) {
     const uint32_t kOfflineMs = 60000;
     for (size_t i = 0; i < gConfig.count(); ++i) {
         DeviceSlot& s = gConfig.slots()[i];
-        if (s.everSeen && s.stale(now, kOfflineMs)) emit(1, String(s.name) + " not responding");
+        if (s.everSeen && s.stale(now, kOfflineMs))
+            emit(1, jsonEsc(String(s.name)) + " not responding");  // name is user input
     }
     if (outArr) *outArr += "]";
     return worst;
@@ -868,16 +871,21 @@ static String buildPanelJson() {
              ",\"soc\":" + String(decDeci(s.soc_d), 1) +
              ",\"v\":" + String(decCenti(s.battV_cv), 2) +
              ",\"a\":" + String(decDeci(s.battA_da), 2) +
-             ",\"consumed\":0,\"consumed_valid\":false" +
+             ",\"consumed\":" + String(decDeci(s.consumedAh_da), 1) +
+             ",\"consumed_valid\":" + jbool(has(V_CONSUMED)) +
              ",\"starter_v\":" + String(decCenti(s.starterV_cv), 2) +
              ",\"starter_valid\":" + jbool(has(V_STARTERV)) +
              ",\"ttg\":" + String(s.ttg_min == 0xFFFF ? 0 : s.ttg_min) +
              ",\"ttg_valid\":" + jbool(has(V_TTG)) + ",\"capacity\":0},";
         j += "\"solar\":{\"valid\":" + jbool(has(V_SOLAR)) + ",\"a\":" + String(decDeci(s.solarA_da), 1) +
-             ",\"w\":0,\"v\":0,\"v_valid\":false},";
+             ",\"w\":" + String(decWhole(s.solarW_w), 0) +
+             ",\"v\":" + String(decCenti(s.solarV_cv), 2) + ",\"v_valid\":" + jbool(has(V_SOLARV)) + "},";
         j += "\"charger\":{\"valid\":" + jbool(has(V_CHARGER)) + ",\"a\":" + String(decDeci(s.chargerA_da), 1) + "},";
         j += "\"dcdc\":{\"valid\":" + jbool(has(V_DCDC)) + ",\"out_a\":" + String(decDeci(s.dcdcA_da), 1) +
-             ",\"in_a\":0,\"in_v\":0,\"in_v_valid\":false,\"out_v\":0,\"out_v_valid\":false},";
+             ",\"in_a\":0,\"in_v\":" + String(decCenti(s.dcdcInV_cv), 2) +
+             ",\"in_v_valid\":" + jbool(has(V_DCDCINV)) +
+             ",\"out_v\":" + String(decCenti(s.dcdcOutV_cv), 2) +
+             ",\"out_v_valid\":" + jbool(has(V_DCDCOUTV)) + "},";
         j += "\"load\":{\"valid\":" + jbool(has(V_LOAD)) + ",\"a\":" + String(decDeci(s.loadA_da), 1) +
              ",\"derived\":false},";
         j += "\"alerts\":[]}";
@@ -1232,9 +1240,11 @@ static void collectSlaveDash(guition::DashData& d) {
     d.a = decDeci(s.battA_da);
     d.ttgValid = has(V_TTG); d.ttg = (s.ttg_min == 0xFFFF) ? 0 : s.ttg_min;
     d.starterValid = has(V_STARTERV); d.starterV = decCenti(s.starterV_cv);
-    d.solarValid = has(V_SOLAR); d.solarA = decDeci(s.solarA_da); d.solarW = 0;  // W not in frame
+    d.solarValid = has(V_SOLAR); d.solarA = decDeci(s.solarA_da);
+    d.solarW = decWhole(s.solarW_w);  // v3
     d.chargerValid = has(V_CHARGER); d.chargerA = decDeci(s.chargerA_da);
     d.dcdcValid = has(V_DCDC); d.dcdcOutA = decDeci(s.dcdcA_da);
+    d.dcdcInVValid = has(V_DCDCINV); d.dcdcInV = decCenti(s.dcdcInV_cv);  // v3
     d.loadValid = has(V_LOAD); d.loadA = decDeci(s.loadA_da); d.loadDerived = false;
     d.profileId = s.profile;
     collectHistory(d);  // Graph page: fill from the history built off received frames
@@ -1662,6 +1672,13 @@ static slavelink::Snapshot buildSnapshot() {
     sig::Resolved cg = resolveSignal(sig::Role::ChargerA, now);
     sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
     sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
+    // v3 detail fields (mimic sub-labels): solar W + battery-side V, DC-DC in/out V,
+    // consumed Ah. Secondary voltages come from the first device of each type.
+    sig::Resolved sw = R(sig::Role::SolarW, now);
+    sig::Resolved con = R(sig::Role::BatteryConsumed, now);
+    sig::Resolved slv = fieldOfType(victron::Record::SolarCharger, sig::Field::SolarBattV, now);
+    sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
+    sig::Resolved dov = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcOutV, now);
 
     switch (chargeMode(ba)) {
         case ChargeMode::Charging: s.mode = M_CHARGING; break;
@@ -1680,6 +1697,11 @@ static slavelink::Snapshot buildSnapshot() {
     if (la.valid) v |= V_LOAD;
     if (ttg.valid) v |= V_TTG;
     if (stv.valid) v |= V_STARTERV;
+    if (sw.valid) v |= V_SOLARW;
+    if (slv.valid) v |= V_SOLARV;
+    if (div.valid) v |= V_DCDCINV;
+    if (dov.valid) v |= V_DCDCOUTV;
+    if (con.valid) v |= V_CONSUMED;
     s.valid = v;
 
     s.soc_d = encDeci(soc.valid, soc.value);
@@ -1691,6 +1713,11 @@ static slavelink::Snapshot buildSnapshot() {
     s.loadA_da = encDeci(la.valid, la.value);
     s.starterV_cv = encCenti(stv.valid, stv.value);
     s.ttg_min = ttg.valid ? (uint16_t)ttg.value : 0xFFFF;
+    s.solarW_w = encWhole(sw.valid, sw.value);
+    s.solarV_cv = encCenti(slv.valid, slv.value);
+    s.dcdcInV_cv = encCenti(div.valid, div.value);
+    s.dcdcOutV_cv = encCenti(dov.valid, dov.value);
+    s.consumedAh_da = encDeci(con.valid, con.value);
 
     s.alertWorst = (uint8_t)buildAlerts(now);
     s.profile = (uint8_t)gProfiles.active();
@@ -1704,12 +1731,22 @@ static slavelink::Snapshot buildSnapshot() {
 // BLE-blocked cadence. Without this a channel-hopping slave rarely coincides with
 // a send and can take a very long time to acquire. seq is stamped per transmit so
 // the slave's drop detection stays correct.
+// gCachedSnap is written whole by the loop and read+stamped by the esp_timer
+// task; a spinlock makes the ~54-byte copy atomic so a tick can't transmit a
+// half-updated frame.
+static portMUX_TYPE gSnapMux = portMUX_INITIALIZER_UNLOCKED;
+
 static void broadcastTick(void*) {
     if (!gEspNowOk || !gSnapReady) return;
-    gCachedSnap.seq = ++gSnapSeq;
-    gCachedSnap.uptime_s = millis() / 1000;
-    gCachedSnap.flags = pairingActive() ? slavelink::F_PAIRING : 0;  // keep pairing fresh between builds
-    esp_err_t e = esp_now_send(kBroadcastMac, (const uint8_t*)&gCachedSnap, sizeof(gCachedSnap));
+    slavelink::Snapshot s;
+    portENTER_CRITICAL(&gSnapMux);
+    s = gCachedSnap;
+    portEXIT_CRITICAL(&gSnapMux);
+    // Stamp per-transmit fields on the local copy (kept fresh between loop builds).
+    s.seq = ++gSnapSeq;
+    s.uptime_s = millis() / 1000;
+    s.flags = pairingActive() ? slavelink::F_PAIRING : 0;
+    esp_err_t e = esp_now_send(kBroadcastMac, (const uint8_t*)&s, sizeof(s));
     static uint32_t lastErrLog = 0;
     if (e != ESP_OK && millis() - lastErrLog > 3000) {
         lastErrLog = millis();
@@ -1721,8 +1758,11 @@ static void broadcastTick(void*) {
 // the actual transmitting).
 static void sendSlaveBroadcast() {
     if (!gEspNowOk) return;
-    gCachedSnap = buildSnapshot();
+    slavelink::Snapshot s = buildSnapshot();
+    portENTER_CRITICAL(&gSnapMux);
+    gCachedSnap = s;
     gSnapReady = true;
+    portEXIT_CRITICAL(&gSnapMux);
 }
 
 // ---- web app ---------------------------------------------------------------
