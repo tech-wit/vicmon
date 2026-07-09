@@ -419,6 +419,7 @@ static void handleAdd(AsyncWebServerRequest* req) {
     String name = param(req, "name"), type = param(req, "type"), key = cleanKey(param(req, "key"));
     uint8_t k[16];
     if (name.length() && DeviceConfig::parseHexKey(key, k)) {
+        RegLock lk;  // mutate the registry off the loop task's readers
         gConfig.add(name.c_str(), parseType(type), k);
         gConfig.save();
         // Auto-bind sensible defaults if this profile has no bindings yet.
@@ -433,6 +434,7 @@ static void handleEdit(AsyncWebServerRequest* req) {
     uint8_t k[16];
     bool haveKey = DeviceConfig::parseHexKey(key, k);
     if (name.length()) {
+        RegLock lk;
         gConfig.update(idx, name.c_str(), parseType(type), haveKey ? k : nullptr);
         gConfig.save();
     }
@@ -442,6 +444,7 @@ static void handleEdit(AsyncWebServerRequest* req) {
 static void handleDel(AsyncWebServerRequest* req) {
     String name = param(req, "name");
     if (name.length()) {
+        RegLock lk;
         gConfig.remove(name.c_str());
         gConfig.save();
     }
@@ -569,10 +572,12 @@ static String profilesCard() {
 }
 
 static void handleProfileSwitch(AsyncWebServerRequest* req) {
+    int id = param(req, "id").toInt();
+    RegLock lk;  // flushes + reloads history and the whole registry
 #ifndef VICMON_SIM
     saveHistFile(gProfiles.active());  // flush the outgoing profile's history first
 #endif
-    gProfiles.setActive(param(req, "id").toInt());
+    gProfiles.setActive(id);
     applyProfile(gProfiles.active());
     req->redirect("/");
 }

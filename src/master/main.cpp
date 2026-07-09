@@ -54,6 +54,7 @@ stats::Stats gStats;
 NimBLEScan* gScan = nullptr;
 AsyncWebServer gServer(80);
 DNSServer gDns;
+SemaphoreHandle_t gRegMux = nullptr;  // registry mutex (see app.h RegLock)
 
 #ifdef VICMON_DISPLAY
 // The Guition JC3248W535 panel. The dashboard is drawn directly with Arduino_GFX
@@ -302,9 +303,14 @@ static void pollBle() {
     gScanVictron = 0;
     gScanDecoded = 0;
     NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
-    for (int i = 0; i < results.getCount(); ++i) {
-        NimBLEAdvertisedDevice d = results.getDevice(i);
-        ingest(&d);
+    {
+        // Hold the registry lock only for the decode pass, never across the ~2 s
+        // scan above, so a config write from the web task waits at most one pass.
+        RegLock lk;
+        for (int i = 0; i < results.getCount(); ++i) {
+            NimBLEAdvertisedDevice d = results.getDevice(i);
+            ingest(&d);
+        }
     }
     gScan->clearResults();
 }
@@ -682,6 +688,7 @@ uint32_t currentLocalEpoch() {
 // Loads a profile's config/signals/settings and clears runtime caches so the
 // mimic, history and discovery don't mix data across profiles.
 void applyProfile(int pid) {
+    RegLock lk;  // reloads the whole registry — exclude the loop's readers
     gConfig.begin(pid);
     gSignals.begin(gConfig.slots(), gConfig.count(), pid);
     loadSettings(pid);
@@ -1791,6 +1798,10 @@ void setup() {
     snprintf(kApSsid, sizeof(kApSsid), "Vicmon-%06X", (unsigned)(gMasterId & 0xFFFFFF));
     Serial.printf("[boot] master id %08X, AP '%s'\n", gMasterId, kApSsid);
 
+    // Registry mutex: created before the server/tasks so RegLock is live the
+    // moment concurrent access becomes possible (it no-ops while null above).
+    gRegMux = xSemaphoreCreateRecursiveMutex();
+
     // Shared init (history rings, LittleFS, profiles/config/signals) — needed by
     // the web app in BOTH roles, so it runs before the role branch.
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
@@ -1894,6 +1905,11 @@ void loop() {
 #else
     pollBle();  // blocks ~2s per scan
 #endif
+    // Everything below reads/iterates the registry; hold gRegMux so a web-task
+    // config write (add/remove/import/profile switch) can't restructure the slot
+    // array mid-iteration. Recursive: serviceDashRequests() may re-lock to apply
+    // a deferred profile switch.
+    RegLock regLk;
     updateDerivedSmoothing();  // refresh median-smoothed derived signals
     sampleHistory();  // continuous logging, regardless of any connected client
     sampleStats();    // integrate energy counters / trip stats

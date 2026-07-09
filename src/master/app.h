@@ -9,6 +9,8 @@
 #include <DNSServer.h>
 #include <ESPAsyncWebServer.h>
 #include <NimBLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "DeviceConfig.h"
 #include "Profiles.h"
@@ -75,6 +77,20 @@ struct PanelModel {
 extern char kApSsid[24];        // Vicmon-<mac3>, filled at boot
 extern const char* kApPass;
 extern const char* kFwVersion;
+
+// Guards structural mutation of the device registry (gConfig add/remove/clear,
+// gSignals/profile reload) done on the AsyncTCP web task against the loop task
+// iterating the same slots (pollBle->ingest, resolveField, collectPanel, ...).
+// Recursive so the loop can hold it while servicing a deferred profile switch
+// that re-locks. Created in setup() before the server/tasks start; the RegLock
+// guard no-ops until then (single-threaded), so it is always safe to use.
+extern SemaphoreHandle_t gRegMux;
+struct RegLock {
+    RegLock()  { if (gRegMux) xSemaphoreTakeRecursive(gRegMux, portMAX_DELAY); }
+    ~RegLock() { if (gRegMux) xSemaphoreGiveRecursive(gRegMux); }
+    RegLock(const RegLock&) = delete;
+    RegLock& operator=(const RegLock&) = delete;
+};
 
 extern DeviceConfig gConfig;
 extern sig::SignalMap gSignals;
