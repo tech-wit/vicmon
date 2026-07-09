@@ -151,6 +151,14 @@ void startPairing();
 bool pairingActive();
 int pairSecsLeft();
 
+// Defined in ble_ingest.cpp, called from main.cpp.
+void pollBle();
+
+// Defined in espnow.cpp, called from main.cpp.
+void setupEspNow();
+void sendSlaveBroadcast();
+void sendStatsFrame();
+
 // Defined in web.cpp, called from main.cpp.
 String jsonEsc(const String& s);
 void setupServer();

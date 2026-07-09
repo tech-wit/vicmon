@@ -1,0 +1,181 @@
+// ESP-NOW broadcaster: packs the live panel into a Snapshot and broadcasts it to
+// slaves ~4/s from a timer, plus a low-rate 7-day StatsFrame. Split out of
+// main.cpp (P2). The panel/registry/stats core stays in main.cpp; this file only
+// serializes and transmits it through the shared contract in app.h.
+
+#include <Arduino.h>
+#include <esp_now.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
+
+#include <cstring>
+
+#include "app.h"
+
+// ---- ESP-NOW broadcast to slaves -------------------------------------------
+// Broadcasts a packed snapshot to FF:FF:FF:FF:FF:FF ~1/s. Connectionless, so any
+// number of slaves can listen with no pairing and a dropped frame self-heals on
+// the next send. Shares the radio with the AP + BLE; the AP is pinned to channel
+// 1, and the broadcast peer uses channel 0 ("current channel") to follow it.
+
+static const uint8_t kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+// gEspNowOk + gSnapSeq are declared with the master-identity globals near the top
+// (collectDash reads them before this section).
+static slavelink::Snapshot gCachedSnap;
+static volatile bool gSnapReady = false;
+static esp_timer_handle_t gBcastTimer = nullptr;
+static void broadcastTick(void*);  // defined after buildSnapshot
+
+void setupEspNow() {
+    if (esp_now_init() != ESP_OK) {
+        Serial.println("ESP-NOW init failed");
+        return;
+    }
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, kBroadcastMac, 6);
+    peer.channel = 0;      // 0 = current WiFi channel (AP pinned to 1)
+    peer.encrypt = false;  // broadcast can't be encrypted; telemetry only
+    // The master always runs SoftAP (channel-pinned); transmit via the AP
+    // interface. The default (STA) interface doesn't exist in AP-only mode, so
+    // esp_now_send would fail silently and no slave would ever hear us.
+    peer.ifidx = WIFI_IF_AP;
+    if (esp_now_add_peer(&peer) != ESP_OK) {
+        Serial.println("ESP-NOW peer add failed");
+        return;
+    }
+    gEspNowOk = true;
+    // Transmit the cached snapshot ~4/s from a timer, independent of the loop.
+    esp_timer_create_args_t ta = {};
+    ta.callback = &broadcastTick;
+    ta.name = "vbcast";
+    if (esp_timer_create(&ta, &gBcastTimer) == ESP_OK)
+        esp_timer_start_periodic(gBcastTimer, 250000);  // 250 ms
+    Serial.println("ESP-NOW broadcaster ready (250ms tick)");
+}
+
+static slavelink::Snapshot buildSnapshot() {
+    using namespace slavelink;
+    uint32_t now = millis();
+    Snapshot s = {};
+    fillHeader(s);
+    s.masterId = gMasterId;
+    s.flags = pairingActive() ? F_PAIRING : 0;
+
+    PanelModel p = collectPanel(now);
+    switch (p.mode) {
+        case ChargeMode::Charging: s.mode = M_CHARGING; break;
+        case ChargeMode::Discharging: s.mode = M_DISCHARGING; break;
+        case ChargeMode::Idle: s.mode = M_IDLE; break;
+        default: s.mode = M_UNKNOWN; break;
+    }
+
+    uint16_t v = 0;
+    if (p.soc.valid) v |= V_SOC;
+    if (p.battV.valid) v |= V_BATTV;
+    if (p.battA.valid) v |= V_BATTA;
+    if (p.solarA.valid) v |= V_SOLAR;
+    if (p.chargerA.valid) v |= V_CHARGER;
+    if (p.dcdcOutA.valid) v |= V_DCDC;
+    if (p.loadA.valid) v |= V_LOAD;
+    if (p.ttg.valid) v |= V_TTG;
+    if (p.starterV.valid) v |= V_STARTERV;
+    if (p.solarW.valid) v |= V_SOLARW;
+    if (p.solarV.valid) v |= V_SOLARV;
+    if (p.dcdcInV.valid) v |= V_DCDCINV;
+    if (p.dcdcOutV.valid) v |= V_DCDCOUTV;
+    if (p.consumed.valid) v |= V_CONSUMED;
+    s.valid = v;
+
+    s.soc_d = encDeci(p.soc.valid, p.soc.value);
+    s.battV_cv = encCenti(p.battV.valid, p.battV.value);
+    s.battA_da = encDeci(p.battA.valid, p.battA.value);
+    s.solarA_da = encDeci(p.solarA.valid, p.solarA.value);
+    s.chargerA_da = encDeci(p.chargerA.valid, p.chargerA.value);
+    s.dcdcA_da = encDeci(p.dcdcOutA.valid, p.dcdcOutA.value);
+    s.loadA_da = encDeci(p.loadA.valid, p.loadA.value);
+    s.starterV_cv = encCenti(p.starterV.valid, p.starterV.value);
+    s.ttg_min = p.ttg.valid ? (uint16_t)p.ttg.value : 0xFFFF;
+    s.solarW_w = encWhole(p.solarW.valid, p.solarW.value);
+    s.solarV_cv = encCenti(p.solarV.valid, p.solarV.value);
+    s.dcdcInV_cv = encCenti(p.dcdcInV.valid, p.dcdcInV.value);
+    s.dcdcOutV_cv = encCenti(p.dcdcOutV.valid, p.dcdcOutV.value);
+    s.consumedAh_da = encDeci(p.consumed.valid, p.consumed.value);
+    s.capacityAh = (uint16_t)(p.capacity > 0 ? p.capacity + 0.5f : 0);
+
+    s.alertWorst = (uint8_t)p.alertWorst;
+    s.profile = (uint8_t)gProfiles.active();
+    s.seq = 0;  // stamped per actual transmit in broadcastTick()
+    s.uptime_s = now / 1000;
+    return s;
+}
+
+// The loop refreshes gCachedSnap (registry-owning thread), and a 250 ms esp_timer
+// transmits it — so the broadcast rate (~4/s) is independent of the loop's ~2 s
+// BLE-blocked cadence. Without this a channel-hopping slave rarely coincides with
+// a send and can take a very long time to acquire. seq is stamped per transmit so
+// the slave's drop detection stays correct.
+// gCachedSnap is written whole by the loop and read+stamped by the esp_timer
+// task; a spinlock makes the ~54-byte copy atomic so a tick can't transmit a
+// half-updated frame.
+static portMUX_TYPE gSnapMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void broadcastTick(void*) {
+    if (!gEspNowOk || !gSnapReady) return;
+    slavelink::Snapshot s;
+    portENTER_CRITICAL(&gSnapMux);
+    s = gCachedSnap;
+    portEXIT_CRITICAL(&gSnapMux);
+    // Stamp per-transmit fields on the local copy (kept fresh between loop builds).
+    s.seq = ++gSnapSeq;
+    s.uptime_s = millis() / 1000;
+    s.flags = pairingActive() ? slavelink::F_PAIRING : 0;
+    esp_err_t e = esp_now_send(kBroadcastMac, (const uint8_t*)&s, sizeof(s));
+    static uint32_t lastErrLog = 0;
+    if (e != ESP_OK && millis() - lastErrLog > 3000) {
+        lastErrLog = millis();
+        Serial.printf("[espnow] send err 0x%x\n", e);
+    }
+}
+
+// Called each loop: refresh the cached snapshot from live signals (the timer does
+// the actual transmitting).
+void sendSlaveBroadcast() {
+    if (!gEspNowOk) return;
+    slavelink::Snapshot s = buildSnapshot();
+    portENTER_CRITICAL(&gSnapMux);
+    gCachedSnap = s;
+    gSnapReady = true;
+    portEXIT_CRITICAL(&gSnapMux);
+}
+
+// Low-rate 7-day energy frame for a slave's Week page (see StatsFrame). Built on
+// the loop task (owns gStats) and sent directly — it changes only at the daily
+// rollover, so a few sends a minute is plenty.
+static uint16_t whU16(float x) { return x <= 0 ? 0 : (x >= 65535 ? 65535 : (uint16_t)(x + 0.5f)); }
+
+void sendStatsFrame() {
+    if (!gEspNowOk) return;
+    using namespace slavelink;
+    StatsFrame f = {};
+    fillStatsHeader(f);
+    f.masterId = gMasterId;
+    f.clockOk = currentLocalEpoch() != 0 ? 1 : 0;
+    int dc = (int)gStats.dayCount();
+    int start = dc > 7 ? dc - 7 : 0, out = 0;
+    for (int i = start; i < dc && out < 7; ++i) {
+        const stats::DayRecord& r = gStats.day(i);
+        f.daySolarWh[out] = whU16(r.solarWh);
+        f.dayDcdcWh[out] = whU16(r.dcdcWh);
+        f.dayChargerWh[out] = whU16(r.chargerWh);
+        f.dayLoadWh[out] = whU16(r.loadWh);
+        f.dayStamp[out] = r.dayStamp;
+        ++out;
+    }
+    f.dayCount = (uint8_t)out;
+    const stats::Bucket& tb = gStats.bucket(stats::TODAY);
+    f.todaySolarWh = whU16(tb.solarWh);
+    f.todayDcdcWh = whU16(tb.dcdcWh);
+    f.todayChargerWh = whU16(tb.chargerWh);
+    f.todayLoadWh = whU16(tb.loadWh);
+    esp_now_send(kBroadcastMac, (const uint8_t*)&f, sizeof(f));
+}
