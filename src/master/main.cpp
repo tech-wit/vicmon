@@ -37,37 +37,23 @@
 #include "VictronDecrypt.h"
 #include "VictronParser.h"
 #include "VictronTypes.h"
+#include "app.h"          // shared state/types + the board seam (VICMON_DISPLAY)
 #include "web_assets.h"  // kStyle / kMimicPage / kStatsPage / kDiagPage (HTML/CSS/JS)
-
-// Board selection: the display DRIVER is chosen at build time per board model,
-// while the master/slave ROLE is chosen at runtime (NVS flag). This one app runs
-// on every board — BOARD_GUITION selects the AXS15231B QSPI driver; BOARD_LILYGO
-// is reserved for the T-Display-S3 (ST7789 + buttons, driver TBD, builds headless
-// for now); no board flag = headless (no screen, e.g. the bare S3 / AtomS3). A
-// selected display board defines VICMON_DISPLAY, which guards all rendering below.
-#if defined(BOARD_GUITION)
-  #define VICMON_DISPLAY 1
-  #include <GuitionDisplay.h>
-  #include <GuitionTouch.h>
-  #include <GfxDashboard.h>
-#elif defined(BOARD_LILYGO)
-  #warning "BOARD_LILYGO: display driver not implemented yet — building headless on the LilyGo"
-#endif
 
 // AP SSID is made unique per device at boot (Vicmon-<last 3 MAC bytes>) so
 // several masters in the same area don't collide — filled in setup() once the
 // master id is known; the default is only a placeholder before then.
-static char kApSsid[24] = "Vicmon";
-static const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
-static const char* kFwVersion = "0.3.0";    // shown on the display Settings page
+char kApSsid[24] = "Vicmon";
+const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
+const char* kFwVersion = "0.3.0";    // shown on the display Settings page
 
-static DeviceConfig gConfig;
-static sig::SignalMap gSignals;
-static ProfileManager gProfiles;
-static stats::Stats gStats;
-static NimBLEScan* gScan = nullptr;
-static AsyncWebServer gServer(80);
-static DNSServer gDns;
+DeviceConfig gConfig;
+sig::SignalMap gSignals;
+ProfileManager gProfiles;
+stats::Stats gStats;
+NimBLEScan* gScan = nullptr;
+AsyncWebServer gServer(80);
+DNSServer gDns;
 
 #ifdef VICMON_DISPLAY
 // The Guition JC3248W535 panel. The dashboard is drawn directly with Arduino_GFX
@@ -102,27 +88,18 @@ static volatile int gGraphWinMin = 60;
 static volatile uint8_t gGraphHidden = 0;  // Graph legend: series toggled off (display-owned)
 #endif
 
-// Victron devices seen but not configured (no matching key).
-struct Discovered {
-    char mac[20] = {0};
-    char name[24] = {0};  // BLE advertised (friendly) name, if any
-    uint16_t model = 0;
-    int rssi = 0;
-    uint32_t lastSeenMs = 0;
-    uint8_t raw[16] = {0};  // encrypted advert payload, captured in debug mode
-    uint8_t rawLen = 0;     // 0 = not captured
-};
-static Discovered gDisc[12];
-static size_t gDiscN = 0;
+// Victron devices seen but not configured (no matching key). (struct in app.h)
+Discovered gDisc[12];
+size_t gDiscN = 0;
 
 // ESP-NOW master identity + pairing window (used by the broadcaster below and by
 // the diagnostics view). Declared here because ingest() and the debug-capture
 // path reference gDebugCapture before the ESP-NOW section.
-static uint32_t gMasterId = 0;              // stable per-chip id (low 32b of efuse MAC)
-static volatile uint32_t gPairUntilMs = 0;  // pairing window closes at this millis (0 = closed)
-static volatile bool gDebugCapture = false; // capture raw bytes of unknown adverts for troubleshooting
-static bool gEspNowOk = false;              // ESP-NOW radio up (broadcaster in master, receiver in slave)
-static volatile uint16_t gSnapSeq = 0;      // broadcast sequence counter (esp_timer task)
+uint32_t gMasterId = 0;              // stable per-chip id (low 32b of efuse MAC)
+volatile uint32_t gPairUntilMs = 0;  // pairing window closes at this millis (0 = closed)
+volatile bool gDebugCapture = false; // capture raw bytes of unknown adverts for troubleshooting
+bool gEspNowOk = false;              // ESP-NOW radio up (broadcaster in master, receiver in slave)
+volatile uint16_t gSnapSeq = 0;      // broadcast sequence counter (esp_timer task)
 
 // Open a 60 s pairing window: while it's up the broadcast sets F_PAIRING so an
 // adopting slave will accept this master's id (see lib/slavelink/SlaveLink.h).
@@ -140,10 +117,9 @@ static int pairSecsLeft() {
 // toggled from the Diagnostics tab (reboots to re-lay-out the radio + tasks).
 // Slave role skips BLE/AP/web and instead receives another master's broadcast
 // via gRx and renders it on the same display.
-enum { ROLE_MASTER = 0, ROLE_SLAVE = 1 };
-static uint8_t gRole = ROLE_MASTER;
-static volatile bool gRoleReq = false;   // display/loop request: toggle role + reboot
-static slavelink::Receiver gRx;          // ESP-NOW receiver, used only in slave role
+uint8_t gRole = ROLE_MASTER;             // ROLE_MASTER / ROLE_SLAVE (enum in app.h)
+volatile bool gRoleReq = false;          // display/loop request: toggle role + reboot
+slavelink::Receiver gRx;                 // ESP-NOW receiver, used only in slave role
 
 static void loadRole() {
     Preferences p;
@@ -271,7 +247,7 @@ static void noteDiscovered(const char* mac, const char* name, uint16_t model, in
     }
 }
 
-static int gScanVictron = 0, gScanDecoded = 0;  // per-scan diagnostics
+int gScanVictron = 0, gScanDecoded = 0;  // per-scan diagnostics
 
 static void ingest(NimBLEAdvertisedDevice* dev) {
     if (!dev->haveManufacturerData()) return;
@@ -530,7 +506,7 @@ static void sampleSlaveHistory() {
 // timestamps in the data, so the gap during downtime simply isn't represented —
 // reloaded samples continue seamlessly at the "now" edge.
 
-static bool gFsOk = false;
+bool gFsOk = false;
 static const uint8_t kHistVer = 2;  // bumped when HistSample gained `soc`
 // How often the history is flushed to flash. At ~26 KB/save (full buffers) this
 // is ~7.5 MB/day; LittleFS wear-levels it across the ~1.5 MB FS partition, so at
@@ -649,14 +625,14 @@ static String buildHistoryJson(int mins) {
 
 // ---- WiFi STA (join an existing network) -----------------------------------
 
-static float gBattCapacity = 0;     // Ah, 0 = unknown
-static float gDeadband = 0.2f;      // A; |current| below this reads as idle
-static int gTzOffsetMin = 600;      // local time offset from UTC, minutes (+10h AEST)
+float gBattCapacity = 0;     // Ah, 0 = unknown
+float gDeadband = 0.2f;      // A; |current| below this reads as idle
+int gTzOffsetMin = 600;      // local time offset from UTC, minutes (+10h AEST)
 // Alert thresholds (0 disables that check).
-static float gSocWarn = 50;         // % — warn at/below
-static float gSocCrit = 30;         // % — critical at/below
-static float gVlow = 11.8f;         // V — critical at/below
-static float gVhigh = 15.0f;        // V — critical at/above
+float gSocWarn = 50;         // % — warn at/below
+float gSocCrit = 30;         // % — critical at/below
+float gVlow = 11.8f;         // V — critical at/below
+float gVhigh = 15.0f;        // V — critical at/above
 static String settingsNs(int profile) {
     return profile == 0 ? String("vicset") : "vicset" + String(profile);
 }
@@ -734,7 +710,7 @@ static void wipeProfile(int pid) {
     if (gFsOk) LittleFS.remove(histPath(pid));
 }
 
-static String gStaSsid, gStaPass;
+String gStaSsid, gStaPass;
 static void loadWifi() {
     Preferences p;
     p.begin("vicwifi", true);
@@ -753,7 +729,7 @@ static void saveWifiCreds(const String& s, const String& pw) {
 // Charge mode from the (possibly invalid) battery current, honouring the idle
 // deadband. One definition shared by the panel/data JSON, the LED, and the
 // ESP-NOW snapshot so the threshold can't drift between them.
-enum class ChargeMode { Unknown, Charging, Discharging, Idle };
+// enum class ChargeMode moved to app.h
 static ChargeMode chargeMode(const sig::Resolved& ba) {
     if (!ba.valid) return ChargeMode::Unknown;
     if (ba.value > gDeadband) return ChargeMode::Charging;
@@ -854,23 +830,8 @@ static sig::Resolved fieldOfType(victron::Record type, sig::Field f, uint32_t no
     return {};
 }
 
-// One canonical snapshot of the live panel, resolved from the registry ONCE per
-// consumer. The three serializers — the ESP-NOW Snapshot (buildSnapshot), the web
-// panel JSON (buildPanelJson) and the LCD DashData (collectDash) — all read from
-// this, so which signal/derived-sentinel/secondary-field a value comes from lives
-// in exactly one place and can't drift between them.
-struct PanelModel {
-    sig::Resolved soc, battV, battA, consumed, starterV, ttg;
-    sig::Resolved solarA, solarW, solarV;
-    sig::Resolved chargerA;
-    sig::Resolved dcdcInA, dcdcOutA, dcdcInV, dcdcOutV;
-    sig::Resolved loadA;
-    bool loadDerived = false;
-    ChargeMode mode = ChargeMode::Unknown;
-    int alertWorst = 0;
-    float capacity = 0;  // battery Ah (0 = unknown)
-};
-
+// PanelModel (the canonical once-per-consumer panel snapshot) moved to app.h so
+// the web / espnow / display serializers can all read the same shape.
 static PanelModel collectPanel(uint32_t now) {
     PanelModel p;
     p.soc = R(sig::Role::BatterySOC, now);
