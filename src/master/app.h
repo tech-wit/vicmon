@@ -72,6 +72,28 @@ struct PanelModel {
     float capacity = 0;  // battery Ah (0 = unknown)
 };
 
+// One time-series sample + ring buffer. Two rings (fine 5 s/1 h, coarse 60 s/24 h)
+// are written by the loop (sampleHistory) and read by the display (collectHistory)
+// and the web history JSON (buildHistoryJson).
+struct HistSample {
+    int16_t battery, solar, charger, dcdc, load;  // deci-amps, -32768 = n/a
+    int16_t soc;                                   // deci-percent (0..1000), -32768 = n/a
+};
+struct HistRing {
+    HistSample* buf = nullptr;
+    size_t cap = 0, head = 0, count = 0;
+    uint32_t intervalMs = 0, lastMs = 0;
+    void init(HistSample* b, size_t c, uint32_t iv) { buf = b; cap = c; intervalMs = iv; }
+    void clear() { head = count = 0; lastMs = 0; }
+    bool due(uint32_t now) const { return count == 0 || now - lastMs >= intervalMs; }
+    void push(const HistSample& s, uint32_t now) {
+        lastMs = now;
+        buf[head] = s;
+        head = (head + 1) % cap;
+        if (count < cap) ++count;
+    }
+};
+
 // ---- shared globals (defined in main.cpp) ----------------------------------
 
 extern char kApSsid[24];        // Vicmon-<mac3>, filled at boot
@@ -126,6 +148,8 @@ extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
 
+extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
+
 // ---- cross-module function prototypes --------------------------------------
 // Defined in main.cpp (the data/registry core), called from web.cpp etc.
 sig::Resolved R(sig::Role role, uint32_t now);
@@ -150,6 +174,9 @@ void saveHistFile(int profile);
 void startPairing();
 bool pairingActive();
 int pairSecsLeft();
+void serviceRole();
+void hexInto(char* out, size_t n, const uint8_t* p, size_t len);
+void summarizeDevice(const DeviceSlot& s, char* out, size_t n);
 
 // Defined in ble_ingest.cpp, called from main.cpp.
 void pollBle();
@@ -162,3 +189,12 @@ void sendStatsFrame();
 // Defined in web.cpp, called from main.cpp.
 String jsonEsc(const String& s);
 void setupServer();
+
+#ifdef VICMON_DISPLAY
+// Defined in display.cpp, called from main.cpp (setup/loop/slaveLoop).
+extern bool gDisplayOk;
+void bringUpDisplay();
+void publishDash();
+void publishSlaveDash();
+void serviceDashRequests();
+#endif
