@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 3;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah
+static const uint8_t kVersion = 4;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -89,11 +89,39 @@ struct Snapshot {
     int16_t dcdcInV_cv;   // DC-DC input (alternator-side) voltage, centivolts
     int16_t dcdcOutV_cv;  // DC-DC output (house-side) voltage, centivolts
     int16_t consumedAh_da;// battery consumed, deci-amp-hours (signed, usually < 0)
+    uint16_t capacityAh;  // v4: configured battery capacity, whole Ah (0 = unknown)
 
     uint16_t seq;         // increments each broadcast (slave can spot gaps)
     uint32_t uptime_s;    // master uptime, seconds
 };
+
+// A second, low-rate frame carrying the 7-day energy history for a slave's Week
+// page (won't fit the main Snapshot). Magic 'V','T' distinguishes it from the
+// snapshot ('V','S'); the receiver dispatches on length + magic. Broadcast a few
+// times a minute — the data changes only at the daily rollover.
+static const uint8_t kStatsMagic1 = 'T';
+struct StatsFrame {
+    uint8_t magic0;       // 'V'
+    uint8_t magic1;       // 'T'
+    uint8_t version;      // kVersion
+    uint8_t clockOk;      // NTP synced (day rollover works) — else no day buckets
+    uint32_t masterId;    // filter to our paired master
+    uint8_t dayCount;     // number of valid past-day entries (0..7)
+    uint8_t pad_;
+    uint16_t daySolarWh[7], dayDcdcWh[7], dayChargerWh[7], dayLoadWh[7];  // whole Wh
+    uint32_t dayStamp[7]; // yyyymmdd per past-day entry
+    uint16_t todaySolarWh, todayDcdcWh, todayChargerWh, todayLoadWh;      // running today
+};
 #pragma pack(pop)
+
+inline void fillStatsHeader(StatsFrame& f) {
+    f.magic0 = kMagic0;
+    f.magic1 = kStatsMagic1;
+    f.version = kVersion;
+}
+inline bool validStatsHeader(const StatsFrame& f) {
+    return f.magic0 == kMagic0 && f.magic1 == kStatsMagic1 && f.version == kVersion;
+}
 
 // ---- helpers ----------------------------------------------------------------
 

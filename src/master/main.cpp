@@ -1252,8 +1252,28 @@ static void collectSlaveDash(guition::DashData& d) {
     d.dcdcValid = has(V_DCDC); d.dcdcOutA = decDeci(s.dcdcA_da);
     d.dcdcInVValid = has(V_DCDCINV); d.dcdcInV = decCenti(s.dcdcInV_cv);  // v3
     d.loadValid = has(V_LOAD); d.loadA = decDeci(s.loadA_da); d.loadDerived = false;
+    d.battCapAh = s.capacityAh;  // v4: for the Dash/Flow remaining-Ah readout
     d.profileId = s.profile;
     collectHistory(d);  // Graph page: fill from the history built off received frames
+
+    // Week page: from the low-rate stats frame (if we've received one).
+    if (gRx.hasStats()) {
+        const slavelink::StatsFrame& f = gRx.stats();
+        d.clockOk = f.clockOk != 0;
+        int n = f.dayCount > guition::DashData::DAYS_N ? guition::DashData::DAYS_N : f.dayCount;
+        for (int i = 0; i < n; ++i) {
+            d.dayStamp[i] = f.dayStamp[i];
+            d.daySolarWh[i] = f.daySolarWh[i];
+            d.dayDcdcWh[i] = f.dayDcdcWh[i];
+            d.dayChargerWh[i] = f.dayChargerWh[i];
+            d.dayLoadWh[i] = f.dayLoadWh[i];
+        }
+        d.dayCount = n;
+        d.todaySolarWh = f.todaySolarWh; d.todayDcdcWh = f.todayDcdcWh;
+        d.todayChargerWh = f.todayChargerWh; d.todayLoadWh = f.todayLoadWh;
+    } else {
+        d.dayCount = 0; d.clockOk = false;
+    }
 
     // Settings (Tune) fields relevant to a slave: its own config AP + display prefs.
     strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1); d.apSsid[sizeof(d.apSsid) - 1] = '\0';
@@ -1708,6 +1728,7 @@ static slavelink::Snapshot buildSnapshot() {
     s.dcdcInV_cv = encCenti(p.dcdcInV.valid, p.dcdcInV.value);
     s.dcdcOutV_cv = encCenti(p.dcdcOutV.valid, p.dcdcOutV.value);
     s.consumedAh_da = encDeci(p.consumed.valid, p.consumed.value);
+    s.capacityAh = (uint16_t)(p.capacity > 0 ? p.capacity + 0.5f : 0);
 
     s.alertWorst = (uint8_t)p.alertWorst;
     s.profile = (uint8_t)gProfiles.active();
@@ -1753,6 +1774,38 @@ static void sendSlaveBroadcast() {
     gCachedSnap = s;
     gSnapReady = true;
     portEXIT_CRITICAL(&gSnapMux);
+}
+
+// Low-rate 7-day energy frame for a slave's Week page (see StatsFrame). Built on
+// the loop task (owns gStats) and sent directly — it changes only at the daily
+// rollover, so a few sends a minute is plenty.
+static uint16_t whU16(float x) { return x <= 0 ? 0 : (x >= 65535 ? 65535 : (uint16_t)(x + 0.5f)); }
+
+static void sendStatsFrame() {
+    if (!gEspNowOk) return;
+    using namespace slavelink;
+    StatsFrame f = {};
+    fillStatsHeader(f);
+    f.masterId = gMasterId;
+    f.clockOk = currentLocalEpoch() != 0 ? 1 : 0;
+    int dc = (int)gStats.dayCount();
+    int start = dc > 7 ? dc - 7 : 0, out = 0;
+    for (int i = start; i < dc && out < 7; ++i) {
+        const stats::DayRecord& r = gStats.day(i);
+        f.daySolarWh[out] = whU16(r.solarWh);
+        f.dayDcdcWh[out] = whU16(r.dcdcWh);
+        f.dayChargerWh[out] = whU16(r.chargerWh);
+        f.dayLoadWh[out] = whU16(r.loadWh);
+        f.dayStamp[out] = r.dayStamp;
+        ++out;
+    }
+    f.dayCount = (uint8_t)out;
+    const stats::Bucket& tb = gStats.bucket(stats::TODAY);
+    f.todaySolarWh = whU16(tb.solarWh);
+    f.todayDcdcWh = whU16(tb.dcdcWh);
+    f.todayChargerWh = whU16(tb.chargerWh);
+    f.todayLoadWh = whU16(tb.loadWh);
+    esp_now_send(kBroadcastMac, (const uint8_t*)&f, sizeof(f));
 }
 
 // ---- web app ---------------------------------------------------------------
@@ -2896,10 +2949,15 @@ void loop() {
 #endif
 
 #ifndef GUITION_MINSYS
-    static uint32_t lastBroadcast = 0;  // push live data to slaves ~1/s
+    static uint32_t lastBroadcast = 0;  // refresh the live snapshot ~1/s (timer TXes it)
     if (now - lastBroadcast >= 1000) {
         lastBroadcast = now;
         sendSlaveBroadcast();
+    }
+    static uint32_t lastStats = 0;  // 7-day energy frame for a slave's Week page
+    if (now - lastStats >= 4000) {
+        lastStats = now;
+        sendStatsFrame();
     }
 #endif
 

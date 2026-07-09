@@ -77,6 +77,9 @@ class Receiver {
   bool anyMasterHeard() const { return lastAnyMs_ != 0 && (millis() - lastAnyMs_) < kStaleMs; }
   bool live() const { return haveFrame_ && (millis() - lastRxMs_) <= kStaleMs; }
   const Snapshot& snapshot() const { return snap_; }
+  // 7-day stats (Week page). Valid longer than the live window since it's low-rate.
+  bool hasStats() const { return haveStats_ && (millis() - lastStatsMs_) < 30000; }
+  const StatsFrame& stats() const { return stats_; }
 
  private:
   static const uint32_t kHopMs = 250;
@@ -104,6 +107,17 @@ class Receiver {
   // Minimal work in the callback: note the frame; accept data only from our
   // paired master; defer NVS writes to servicePairing() via adoptId_.
   void onRecv(const uint8_t*, const uint8_t* data, int len) {
+    // Low-rate 7-day stats frame (Week page) — separate type, our master only.
+    if (len == (int)sizeof(StatsFrame)) {
+      StatsFrame f;
+      memcpy(&f, data, sizeof(f));
+      if (validStatsHeader(f) && paired_ != 0 && f.masterId == paired_) {
+        stats_ = f;
+        haveStats_ = true;
+        lastStatsMs_ = millis();
+      }
+      return;
+    }
     if (len != (int)sizeof(Snapshot)) return;
     Snapshot s;
     memcpy(&s, data, sizeof(s));
@@ -189,6 +203,9 @@ class Receiver {
   volatile uint32_t lastAnyMs_ = 0;
   volatile uint32_t heardMaster_ = 0;
   volatile uint8_t heardFlags_ = 0;
+  StatsFrame stats_ = {};
+  volatile bool haveStats_ = false;
+  volatile uint32_t lastStatsMs_ = 0;
 
   // pairing state
   uint32_t paired_ = 0;

@@ -131,6 +131,12 @@ static void renderDash(Arduino_GFX* c, const DashData& d) {
   numOr(buf, sizeof(buf), d.battValid, d.a, 1, "A");
   gtext(c, &FreeSansBold18pt7b, bx + bw - 16, by + 162, buf, d.a >= 0 ? kGreen : kCyan, R);
 
+  // Remaining / capacity Ah (rem = capacity x SoC), matching the AP mimic.
+  if (d.battCapAh > 0 && d.battValid) {
+    snprintf(buf, sizeof(buf), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
+    gtext(c, &FreeSansBold12pt7b, bx + bw / 2, by + 194, buf, kText, C);
+  }
+
   if (d.ttgValid && d.ttg > 0) {
     float hh = d.ttg / 60.0f;
     if (hh >= 1) snprintf(buf, sizeof(buf), "TTG %.1fh", hh);
@@ -238,11 +244,15 @@ static void renderFlow(Arduino_GFX* c, const DashData& d) {
   c->drawRoundRect(batx, baty, batw, bath, 10, modeColor(d));
   if (d.battValid) snprintf(v, sizeof(v), "%.0f%%", d.soc); else snprintf(v, sizeof(v), "--%%");
   uint16_t socColor = !d.battValid ? kMuted : (d.soc >= 50 ? kGreen : (d.soc >= 20 ? kAmber : kRed));
-  gtext(c, &FreeSansBold18pt7b, batx + batw / 2, baty + 34, v, socColor, C);
+  gtext(c, &FreeSansBold18pt7b, batx + batw / 2, baty + 30, v, socColor, C);
   numOr(v, sizeof(v), d.battValid, d.v, 2, "V");
-  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 60, v, kText, C);
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 52, v, kText, C);
   numOr(v, sizeof(v), d.battValid, d.a, 1, "A");
-  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 82, v, d.a >= 0 ? kGreen : kCyan, C);
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 70, v, d.a >= 0 ? kGreen : kCyan, C);
+  if (d.battCapAh > 0 && d.battValid)  // remaining / capacity Ah
+    snprintf(v, sizeof(v), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
+  else snprintf(v, sizeof(v), "-- Ah");
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 90, v, kMuted, C);
 
   // Load node.
   numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
@@ -873,12 +883,6 @@ int diagHit(int x, int y, int role, int screen) {
   return DIAG_NONE;
 }
 
-// Placeholder for pages that need data the ESP-NOW frame doesn't carry (slave).
-static void renderNA(Arduino_GFX* c, const char* what) {
-  gtext(c, &FreeSansBold18pt7b, W / 2, 140, "Master only", kMuted, C);
-  gtext(c, &FreeSans9pt7b, W / 2, 172, what, kMuted, C);
-}
-
 static void renderSettings(Arduino_GFX* c, const DashData& d) {
   int view = d.setView;
   if (d.role == 1 && view == 1) view = 0;  // slave has no signal bindings -> Tune
@@ -990,7 +994,7 @@ void renderPage(Arduino_GFX* c, Page page, const DashData& d) {
   switch (page) {
     case PAGE_FLOW:     renderFlow(c, d); break;
     case PAGE_GRAPH:    renderGraph(c, d); break;  // slave builds history from received frames
-    case PAGE_DAYS:     if (d.role == 1) renderNA(c, "Week needs the master"); else renderDays(c, d); break;
+    case PAGE_DAYS:     renderDays(c, d); break;  // slave fills from the stats frame
     case PAGE_SETTINGS: renderSettings(c, d); break;
     case PAGE_DASH:
     default:            renderDash(c, d); break;
