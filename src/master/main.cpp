@@ -853,6 +853,47 @@ static sig::Resolved fieldOfType(victron::Record type, sig::Field f, uint32_t no
     return {};
 }
 
+// One canonical snapshot of the live panel, resolved from the registry ONCE per
+// consumer. The three serializers — the ESP-NOW Snapshot (buildSnapshot), the web
+// panel JSON (buildPanelJson) and the LCD DashData (collectDash) — all read from
+// this, so which signal/derived-sentinel/secondary-field a value comes from lives
+// in exactly one place and can't drift between them.
+struct PanelModel {
+    sig::Resolved soc, battV, battA, consumed, starterV, ttg;
+    sig::Resolved solarA, solarW, solarV;
+    sig::Resolved chargerA;
+    sig::Resolved dcdcInA, dcdcOutA, dcdcInV, dcdcOutV;
+    sig::Resolved loadA;
+    bool loadDerived = false;
+    ChargeMode mode = ChargeMode::Unknown;
+    int alertWorst = 0;
+    float capacity = 0;  // battery Ah (0 = unknown)
+};
+
+static PanelModel collectPanel(uint32_t now) {
+    PanelModel p;
+    p.soc = R(sig::Role::BatterySOC, now);
+    p.battV = R(sig::Role::BatteryV, now);
+    p.battA = R(sig::Role::BatteryA, now);
+    p.consumed = R(sig::Role::BatteryConsumed, now);
+    p.starterV = R(sig::Role::BatteryStarterV, now);
+    p.ttg = R(sig::Role::BatteryTTG, now);
+    p.solarA = resolveSignal(sig::Role::SolarA, now);
+    p.solarW = R(sig::Role::SolarW, now);
+    p.solarV = fieldOfType(victron::Record::SolarCharger, sig::Field::SolarBattV, now);
+    p.chargerA = resolveSignal(sig::Role::ChargerA, now);
+    p.dcdcInA = resolveSignal(sig::Role::DcDcInA, now);
+    p.dcdcOutA = resolveSignal(sig::Role::DcDcOutA, now);
+    p.dcdcInV = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
+    p.dcdcOutV = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcOutV, now);
+    p.loadA = resolveSignal(sig::Role::LoadA, now);
+    p.loadDerived = roleIsDerived(sig::Role::LoadA);
+    p.mode = chargeMode(p.battA);
+    p.alertWorst = buildAlerts(now);
+    p.capacity = gBattCapacity;
+    return p;
+}
+
 static String buildPanelJson() {
     // Slave role: the registry is empty (no BLE) — build the panel from the last
     // ESP-NOW frame so the mimic/dashboard show the master's live data.
@@ -892,61 +933,36 @@ static String buildPanelJson() {
         return j;
     }
     uint32_t now = millis();
-    sig::Resolved soc = R(sig::Role::BatterySOC, now);
-    sig::Resolved bv = R(sig::Role::BatteryV, now);
-    sig::Resolved ba = R(sig::Role::BatteryA, now);
-    sig::Resolved con = R(sig::Role::BatteryConsumed, now);
-    sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
-    sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
-    sig::Resolved sa = resolveSignal(sig::Role::SolarA, now);
-    sig::Resolved sw = R(sig::Role::SolarW, now);
-    sig::Resolved chg = resolveSignal(sig::Role::ChargerA, now);
-    sig::Resolved dia = resolveSignal(sig::Role::DcDcInA, now);
-    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
-
-    const char* mode = chargeModeName(chargeMode(ba));
-
-    // Load honours derived sentinels ((derived)/(charge_only)/(load_only)).
-    sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
-    bool loadValid = la.valid;
-    bool loadDerived = roleIsDerived(sig::Role::LoadA);
-    float loadV = la.value;
-
-    bool battValid = soc.valid || bv.valid || ba.valid;
-    bool dcdcValid = doa.valid || dia.valid;
+    PanelModel p = collectPanel(now);
+    bool battValid = p.soc.valid || p.battV.valid || p.battA.valid;
+    bool dcdcValid = p.dcdcOutA.valid || p.dcdcInA.valid;
 
     String j = "{";
-    j += "\"mode\":\"" + String(mode) + "\",";
+    j += "\"mode\":\"" + String(chargeModeName(p.mode)) + "\",";
     j += "\"battery\":{\"valid\":" + jbool(battValid) +
-         ",\"soc\":" + String(soc.value, 1) +
-         ",\"v\":" + String(bv.value, 2) +
-         ",\"a\":" + String(ba.value, 2) +
-         ",\"consumed\":" + String(con.value, 1) + ",\"consumed_valid\":" + jbool(con.valid) +
-         ",\"starter_v\":" + String(stv.value, 2) + ",\"starter_valid\":" + jbool(stv.valid) +
-         ",\"ttg\":" + String(ttg.value, 0) + ",\"ttg_valid\":" + jbool(ttg.valid) +
-         ",\"capacity\":" + String(gBattCapacity, 0) + "},";
-    // Secondary voltages not carried by a signal role (first device of each
-    // type). NB: the SmartSolar advert has no PV-array voltage — only the
-    // charger's battery-side voltage, PV power and yield — so "solar V" is the
-    // battery-side reading.
-    sig::Resolved sv = fieldOfType(victron::Record::SolarCharger, sig::Field::SolarBattV, now);
-    sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
-    sig::Resolved dov = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcOutV, now);
-
-    j += "\"solar\":{\"valid\":" + jbool(sa.valid) +
-         ",\"a\":" + String(sa.value, 1) +
-         ",\"w\":" + String(sw.value, 0) +
-         ",\"v\":" + String(sv.value, 2) + ",\"v_valid\":" + jbool(sv.valid) + "},";
-    j += "\"charger\":{\"valid\":" + jbool(chg.valid) +
-         ",\"a\":" + String(chg.value, 1) + "},";
+         ",\"soc\":" + String(p.soc.value, 1) +
+         ",\"v\":" + String(p.battV.value, 2) +
+         ",\"a\":" + String(p.battA.value, 2) +
+         ",\"consumed\":" + String(p.consumed.value, 1) + ",\"consumed_valid\":" + jbool(p.consumed.valid) +
+         ",\"starter_v\":" + String(p.starterV.value, 2) + ",\"starter_valid\":" + jbool(p.starterV.valid) +
+         ",\"ttg\":" + String(p.ttg.value, 0) + ",\"ttg_valid\":" + jbool(p.ttg.valid) +
+         ",\"capacity\":" + String(p.capacity, 0) + "},";
+    // NB: the SmartSolar advert has no PV-array voltage — only the charger's
+    // battery-side voltage — so "solar V" is the battery-side reading.
+    j += "\"solar\":{\"valid\":" + jbool(p.solarA.valid) +
+         ",\"a\":" + String(p.solarA.value, 1) +
+         ",\"w\":" + String(p.solarW.value, 0) +
+         ",\"v\":" + String(p.solarV.value, 2) + ",\"v_valid\":" + jbool(p.solarV.valid) + "},";
+    j += "\"charger\":{\"valid\":" + jbool(p.chargerA.valid) +
+         ",\"a\":" + String(p.chargerA.value, 1) + "},";
     j += "\"dcdc\":{\"valid\":" + jbool(dcdcValid) +
-         ",\"out_a\":" + String(doa.value, 1) +
-         ",\"in_a\":" + String(dia.value, 1) +
-         ",\"in_v\":" + String(div.value, 2) + ",\"in_v_valid\":" + jbool(div.valid) +
-         ",\"out_v\":" + String(dov.value, 2) + ",\"out_v_valid\":" + jbool(dov.valid) + "},";
-    j += "\"load\":{\"valid\":" + jbool(loadValid) +
-         ",\"a\":" + String(loadV, 1) +
-         ",\"derived\":" + jbool(loadDerived) + "},";
+         ",\"out_a\":" + String(p.dcdcOutA.value, 1) +
+         ",\"in_a\":" + String(p.dcdcInA.value, 1) +
+         ",\"in_v\":" + String(p.dcdcInV.value, 2) + ",\"in_v_valid\":" + jbool(p.dcdcInV.valid) +
+         ",\"out_v\":" + String(p.dcdcOutV.value, 2) + ",\"out_v_valid\":" + jbool(p.dcdcOutV.valid) + "},";
+    j += "\"load\":{\"valid\":" + jbool(p.loadA.valid) +
+         ",\"a\":" + String(p.loadA.value, 1) +
+         ",\"derived\":" + jbool(p.loadDerived) + "},";
     String alerts;
     buildAlerts(now, &alerts);
     j += "\"alerts\":" + alerts;
@@ -1066,33 +1082,22 @@ static void collectHistory(guition::DashData& d) {
 
 static void collectDash(guition::DashData& d) {
     uint32_t now = millis();
-    sig::Resolved soc = R(sig::Role::BatterySOC, now);
-    sig::Resolved bv  = R(sig::Role::BatteryV, now);
-    sig::Resolved ba  = R(sig::Role::BatteryA, now);
-    sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
-    sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
-    sig::Resolved sa  = resolveSignal(sig::Role::SolarA, now);
-    sig::Resolved sw  = R(sig::Role::SolarW, now);
-    sig::Resolved chg = resolveSignal(sig::Role::ChargerA, now);
-    sig::Resolved dia = resolveSignal(sig::Role::DcDcInA, now);
-    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
-    sig::Resolved la  = resolveSignal(sig::Role::LoadA, now);
-    sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
+    PanelModel p = collectPanel(now);
 
-    d.mode  = chargeModeDisplayName(chargeMode(ba));
-    d.worst = buildAlerts(now);
+    d.mode  = chargeModeDisplayName(p.mode);
+    d.worst = p.alertWorst;
 
-    d.battValid = soc.valid || bv.valid || ba.valid;
-    d.soc = soc.value; d.v = bv.value; d.a = ba.value;
-    d.ttgValid = ttg.valid; d.ttg = ttg.value;
-    d.starterValid = stv.valid; d.starterV = stv.value;
+    d.battValid = p.soc.valid || p.battV.valid || p.battA.valid;
+    d.soc = p.soc.value; d.v = p.battV.value; d.a = p.battA.value;
+    d.ttgValid = p.ttg.valid; d.ttg = p.ttg.value;
+    d.starterValid = p.starterV.valid; d.starterV = p.starterV.value;
 
-    d.solarValid = sa.valid; d.solarW = sw.value; d.solarA = sa.value;
-    d.chargerValid = chg.valid; d.chargerA = chg.value;
-    d.dcdcValid = doa.valid || dia.valid; d.dcdcOutA = doa.value;
-    d.dcdcInVValid = div.valid; d.dcdcInV = div.value;
-    d.loadValid = la.valid; d.loadA = la.value;
-    d.loadDerived = roleIsDerived(sig::Role::LoadA);
+    d.solarValid = p.solarA.valid; d.solarW = p.solarW.value; d.solarA = p.solarA.value;
+    d.chargerValid = p.chargerA.valid; d.chargerA = p.chargerA.value;
+    d.dcdcValid = p.dcdcOutA.valid || p.dcdcInA.valid; d.dcdcOutA = p.dcdcOutA.value;
+    d.dcdcInVValid = p.dcdcInV.valid; d.dcdcInV = p.dcdcInV.value;
+    d.loadValid = p.loadA.valid; d.loadA = p.loadA.value;
+    d.loadDerived = p.loadDerived;
 
     // Graph page.
     collectHistory(d);
@@ -1663,24 +1668,8 @@ static slavelink::Snapshot buildSnapshot() {
     s.masterId = gMasterId;
     s.flags = pairingActive() ? F_PAIRING : 0;
 
-    sig::Resolved soc = R(sig::Role::BatterySOC, now);
-    sig::Resolved bv = R(sig::Role::BatteryV, now);
-    sig::Resolved ba = R(sig::Role::BatteryA, now);
-    sig::Resolved stv = R(sig::Role::BatteryStarterV, now);
-    sig::Resolved ttg = R(sig::Role::BatteryTTG, now);
-    sig::Resolved sa = resolveSignal(sig::Role::SolarA, now);
-    sig::Resolved cg = resolveSignal(sig::Role::ChargerA, now);
-    sig::Resolved doa = resolveSignal(sig::Role::DcDcOutA, now);
-    sig::Resolved la = resolveSignal(sig::Role::LoadA, now);
-    // v3 detail fields (mimic sub-labels): solar W + battery-side V, DC-DC in/out V,
-    // consumed Ah. Secondary voltages come from the first device of each type.
-    sig::Resolved sw = R(sig::Role::SolarW, now);
-    sig::Resolved con = R(sig::Role::BatteryConsumed, now);
-    sig::Resolved slv = fieldOfType(victron::Record::SolarCharger, sig::Field::SolarBattV, now);
-    sig::Resolved div = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcInV, now);
-    sig::Resolved dov = fieldOfType(victron::Record::OrionXs, sig::Field::DcDcOutV, now);
-
-    switch (chargeMode(ba)) {
+    PanelModel p = collectPanel(now);
+    switch (p.mode) {
         case ChargeMode::Charging: s.mode = M_CHARGING; break;
         case ChargeMode::Discharging: s.mode = M_DISCHARGING; break;
         case ChargeMode::Idle: s.mode = M_IDLE; break;
@@ -1688,38 +1677,38 @@ static slavelink::Snapshot buildSnapshot() {
     }
 
     uint16_t v = 0;
-    if (soc.valid) v |= V_SOC;
-    if (bv.valid) v |= V_BATTV;
-    if (ba.valid) v |= V_BATTA;
-    if (sa.valid) v |= V_SOLAR;
-    if (cg.valid) v |= V_CHARGER;
-    if (doa.valid) v |= V_DCDC;
-    if (la.valid) v |= V_LOAD;
-    if (ttg.valid) v |= V_TTG;
-    if (stv.valid) v |= V_STARTERV;
-    if (sw.valid) v |= V_SOLARW;
-    if (slv.valid) v |= V_SOLARV;
-    if (div.valid) v |= V_DCDCINV;
-    if (dov.valid) v |= V_DCDCOUTV;
-    if (con.valid) v |= V_CONSUMED;
+    if (p.soc.valid) v |= V_SOC;
+    if (p.battV.valid) v |= V_BATTV;
+    if (p.battA.valid) v |= V_BATTA;
+    if (p.solarA.valid) v |= V_SOLAR;
+    if (p.chargerA.valid) v |= V_CHARGER;
+    if (p.dcdcOutA.valid) v |= V_DCDC;
+    if (p.loadA.valid) v |= V_LOAD;
+    if (p.ttg.valid) v |= V_TTG;
+    if (p.starterV.valid) v |= V_STARTERV;
+    if (p.solarW.valid) v |= V_SOLARW;
+    if (p.solarV.valid) v |= V_SOLARV;
+    if (p.dcdcInV.valid) v |= V_DCDCINV;
+    if (p.dcdcOutV.valid) v |= V_DCDCOUTV;
+    if (p.consumed.valid) v |= V_CONSUMED;
     s.valid = v;
 
-    s.soc_d = encDeci(soc.valid, soc.value);
-    s.battV_cv = encCenti(bv.valid, bv.value);
-    s.battA_da = encDeci(ba.valid, ba.value);
-    s.solarA_da = encDeci(sa.valid, sa.value);
-    s.chargerA_da = encDeci(cg.valid, cg.value);
-    s.dcdcA_da = encDeci(doa.valid, doa.value);
-    s.loadA_da = encDeci(la.valid, la.value);
-    s.starterV_cv = encCenti(stv.valid, stv.value);
-    s.ttg_min = ttg.valid ? (uint16_t)ttg.value : 0xFFFF;
-    s.solarW_w = encWhole(sw.valid, sw.value);
-    s.solarV_cv = encCenti(slv.valid, slv.value);
-    s.dcdcInV_cv = encCenti(div.valid, div.value);
-    s.dcdcOutV_cv = encCenti(dov.valid, dov.value);
-    s.consumedAh_da = encDeci(con.valid, con.value);
+    s.soc_d = encDeci(p.soc.valid, p.soc.value);
+    s.battV_cv = encCenti(p.battV.valid, p.battV.value);
+    s.battA_da = encDeci(p.battA.valid, p.battA.value);
+    s.solarA_da = encDeci(p.solarA.valid, p.solarA.value);
+    s.chargerA_da = encDeci(p.chargerA.valid, p.chargerA.value);
+    s.dcdcA_da = encDeci(p.dcdcOutA.valid, p.dcdcOutA.value);
+    s.loadA_da = encDeci(p.loadA.valid, p.loadA.value);
+    s.starterV_cv = encCenti(p.starterV.valid, p.starterV.value);
+    s.ttg_min = p.ttg.valid ? (uint16_t)p.ttg.value : 0xFFFF;
+    s.solarW_w = encWhole(p.solarW.valid, p.solarW.value);
+    s.solarV_cv = encCenti(p.solarV.valid, p.solarV.value);
+    s.dcdcInV_cv = encCenti(p.dcdcInV.valid, p.dcdcInV.value);
+    s.dcdcOutV_cv = encCenti(p.dcdcOutV.valid, p.dcdcOutV.value);
+    s.consumedAh_da = encDeci(p.consumed.valid, p.consumed.value);
 
-    s.alertWorst = (uint8_t)buildAlerts(now);
+    s.alertWorst = (uint8_t)p.alertWorst;
     s.profile = (uint8_t)gProfiles.active();
     s.seq = 0;  // stamped per actual transmit in broadcastTick()
     s.uptime_s = now / 1000;
