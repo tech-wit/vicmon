@@ -109,3 +109,32 @@ extern float gSocCrit;        // % — critical at/below
 extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
+
+// ---- cross-module function prototypes --------------------------------------
+// Defined in main.cpp (the data/registry core), called from web.cpp etc.
+sig::Resolved R(sig::Role role, uint32_t now);
+sig::Resolved resolveSignal(sig::Role role, uint32_t now);
+PanelModel collectPanel(uint32_t now);
+int buildAlerts(uint32_t now, String* outArr);
+String buildHistoryJson(int mins);
+ChargeMode chargeMode(const sig::Resolved& ba);
+const char* chargeModeName(ChargeMode m);
+const char* chargeModeDisplayName(ChargeMode m);
+uint32_t currentLocalEpoch();
+victron::Record parseType(const String& t);
+const char* typeName(victron::Record r);
+void applyProfile(int pid);
+void wipeProfile(int pid);
+void saveSettings(float capacity, float deadband, int tzMin);
+void saveAlertSettings(float socWarn, float socCrit, float vLow, float vHigh);
+void saveWifiCreds(const String& s, const String& pw);
+void loadWifi();
+String settingsNs(int profile);
+void saveHistFile(int profile);
+void startPairing();
+bool pairingActive();
+int pairSecsLeft();
+
+// Defined in web.cpp, called from main.cpp.
+String jsonEsc(const String& s);
+void setupServer();
