@@ -50,11 +50,7 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
     gtext(c, &FreeSansBold12pt7b, bx + bw / 2, by + 194, buf, kText, C);
   }
 
-  if (d.ttgValid && d.ttg > 0) {
-    float hh = d.ttg / 60.0f;
-    if (hh >= 1) snprintf(buf, sizeof(buf), "TTG %.1fh", hh);
-    else         snprintf(buf, sizeof(buf), "TTG %.0fm", d.ttg);
-  } else snprintf(buf, sizeof(buf), "TTG --");
+  ttgLabel(buf, sizeof(buf), d);  // "TTG 2d 4h" / "Full 1d 3h" / "TTG 45m"
   gtext(c, &FreeSans9pt7b, bx + 16, by + bh - 14, buf, kMuted);
   if (d.starterValid) snprintf(buf, sizeof(buf), "Start %.1fV", d.starterV);
   else                snprintf(buf, sizeof(buf), "Start --");

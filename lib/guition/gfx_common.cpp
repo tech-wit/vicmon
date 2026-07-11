@@ -2,6 +2,7 @@
 // GfxDashboard.cpp, P4). Declared in gfx_internal.h.
 #include "gfx_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +32,43 @@ uint16_t modeColor(const DashData& d) {
   if (strcmp(d.mode, "Charging") == 0) return kGreen;
   if (strcmp(d.mode, "Discharging") == 0) return kRed;
   return kGrey;
+}
+
+// Format a duration in minutes as days/hours/minutes (matches the web ttgStr):
+// >=1d -> "2d 4h", >=1h -> "3h 20m", else "45m".
+static void fmtDuration(char* buf, size_t n, float mins) {
+  if (mins >= 1440.0f) {
+    int d = (int)(mins / 1440.0f);
+    int h = (int)lroundf(fmodf(mins, 1440.0f) / 60.0f);
+    if (h) snprintf(buf, n, "%dd %dh", d, h); else snprintf(buf, n, "%dd", d);
+  } else if (mins >= 60.0f) {
+    int h = (int)(mins / 60.0f);
+    int m = (int)lroundf(fmodf(mins, 60.0f));
+    if (m) snprintf(buf, n, "%dh %dm", h, m); else snprintf(buf, n, "%dh", h);
+  } else {
+    snprintf(buf, n, "%dm", (int)lroundf(mins));
+  }
+}
+
+void ttgLabel(char* buf, size_t n, const DashData& d) {
+  char t[16];
+  // Instantaneous estimate (settles in seconds; uncapped) when we know the
+  // battery capacity and have a live current — charging gives time-to-full,
+  // discharging time-to-empty.
+  if (d.battCapAh > 0 && d.battValid && fabsf(d.a) > 0.05f) {
+    if (d.a > 0) {  // charging into the battery
+      fmtDuration(t, sizeof(t), d.battCapAh * (1.0f - d.soc / 100.0f) / d.a * 60.0f);
+      snprintf(buf, n, "Full %s", t);
+    } else {        // discharging
+      fmtDuration(t, sizeof(t), d.battCapAh * (d.soc / 100.0f) / fabsf(d.a) * 60.0f);
+      snprintf(buf, n, "TTG %s", t);
+    }
+  } else if (d.ttgValid && d.ttg > 0) {  // fall back to the BMV's filtered TTG
+    fmtDuration(t, sizeof(t), d.ttg);
+    snprintf(buf, n, "TTG %s", t);
+  } else {
+    snprintf(buf, n, "TTG --");
+  }
 }
 
 }  // namespace guition

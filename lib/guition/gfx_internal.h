@@ -54,6 +54,13 @@ void gtext(Arduino_GFX* c, const GFXfont* f, int x, int y, const char* s,
 void numOr(char* buf, size_t n, bool valid, float v, int dp, const char* unit);
 uint16_t modeColor(const DashData& d);
 
+// Time-to-go / time-to-full label, e.g. "TTG 2d 4h", "Full 1d 3h", "TTG 45m".
+// Mirrors the web mimic: when the capacity + a live current are known it uses an
+// instantaneous estimate (charging -> time to full, discharging -> time to
+// empty), which also sidesteps the BMV's 240h time-to-go ceiling; otherwise it
+// falls back to the BMV's own filtered time-to-go. Writes "TTG --" when unknown.
+void ttgLabel(char* buf, size_t n, const DashData& d);
+
 // Per-page renderers (one per file), dispatched by the registry in
 // GfxDashboard.cpp. The heterogeneous per-page hit-tests stay in GfxDashboard.h.
 void renderDash(Arduino_GFX* c, const DashData& d);

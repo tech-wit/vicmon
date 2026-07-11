@@ -74,12 +74,15 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   orthoFlow(c, dcPts,    4, dcOn,    kFlowChg);
   orthoFlow(c, loadPts,  2, loadOn,  kFlowLoad);
 
-  // Source nodes.
-  if (d.solarValid) snprintf(v, sizeof(v), "%.0fW", d.solarW); else snprintf(v, sizeof(v), "--");
+  // Source nodes (both numbers per source, matching the Dash tiles).
+  if (d.solarValid) snprintf(v, sizeof(v), "%.0fW %.1fA", d.solarW, d.solarA);
+  else              snprintf(v, sizeof(v), "--");
   node(c, sx, sy[0], sw, sh, kGold, "Solar", v, solarOn);
   numOr(v, sizeof(v), d.chargerValid, d.chargerA, 1, "A");
   node(c, sx, sy[1], sw, sh, kGreen, "Charger", v, chgOn);
-  numOr(v, sizeof(v), d.dcdcValid, d.dcdcOutA, 1, "A");
+  if (d.dcdcValid && d.dcdcInVValid) snprintf(v, sizeof(v), "%.1fA %.0fV", d.dcdcOutA, d.dcdcInV);
+  else if (d.dcdcValid)              snprintf(v, sizeof(v), "%.1fA", d.dcdcOutA);
+  else                               snprintf(v, sizeof(v), "--");
   node(c, sx, sy[2], sw, sh, kBlue, "DC-DC", v, dcOn);
 
   // Battery node (bigger).
@@ -96,6 +99,15 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
     snprintf(v, sizeof(v), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
   else snprintf(v, sizeof(v), "-- Ah");
   gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 90, v, kMuted, C);
+
+  // TTG (time-to-full when charging) + starter voltage, below the battery — so
+  // every number on the Dash page is also present here.
+  const int bcx = batx + batw / 2;  // 244, centred under the battery node
+  ttgLabel(v, sizeof(v), d);
+  gtext(c, &FreeSansBold12pt7b, bcx, baty + bath + 24, v, kText, C);
+  if (d.starterValid) snprintf(v, sizeof(v), "Start %.1fV", d.starterV);
+  else                snprintf(v, sizeof(v), "Start --");
+  gtext(c, &FreeSans9pt7b, bcx, baty + bath + 44, v, kMuted, C);
 
   // Load node.
   numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
