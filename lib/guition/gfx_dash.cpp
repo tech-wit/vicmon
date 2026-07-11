@@ -17,11 +17,13 @@ static void tile(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
 
 void renderDash(Arduino_GFX* c, const DashData& d) {
   char buf[24];
-  // Mode banner + VICMON wordmark on a black badge (top-left, AP-accent blue).
-  c->fillRect(0, 0, W, 38, modeColor(d));
-  c->fillRoundRect(5, 6, 90, 26, 5, kBlack);
-  gtext(c, &FreeSansBold12pt7b, 13, 25, "VICMON", kAccent);
-  gtext(c, &FreeSansBold18pt7b, W / 2, 27, d.mode, kBlack, C);
+  // Top bar in two sections: a dark VICMON brand block on the left, and the
+  // charge-status banner (mode colour, black text) filling the rest.
+  const int kBrandW = 118;
+  c->fillRect(0, 0, kBrandW, 38, kBlack);
+  c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
+  gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
+  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, kBlack, C);
 
   // Battery card (left)
   const int bx = 8, by = 44, bw = 288, bh = 232;

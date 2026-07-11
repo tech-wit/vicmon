@@ -46,11 +46,12 @@ static void orthoFlow(Arduino_GFX* c, const int16_t pts[][2], int n, bool on, ui
 
 void renderFlow(Arduino_GFX* c, const DashData& d) {
   char v[28];
-  // Mode banner — same as the Dash: VICMON badge left, mode centred.
-  c->fillRect(0, 0, W, 38, modeColor(d));
-  c->fillRoundRect(5, 6, 90, 26, 5, kBlack);
-  gtext(c, &FreeSansBold12pt7b, 13, 25, "VICMON", kAccent);
-  gtext(c, &FreeSansBold18pt7b, W / 2, 27, d.mode, kBlack, C);
+  // Top bar in two sections, same as the Dash: dark VICMON block + charge status.
+  const int kBrandW = 118;
+  c->fillRect(0, 0, kBrandW, 38, kBlack);
+  c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
+  gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
+  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, kBlack, C);
 
   // Battery in the centre.
   const int batx = 190, baty = 96, batw = 108, bath = 100;
