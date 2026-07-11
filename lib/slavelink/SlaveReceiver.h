@@ -51,6 +51,7 @@ class Receiver {
   void poll() {
     serviceAcquisition();
     servicePairing();
+    serviceHistory();
   }
 
   // User triggers (raised from a button, touch, or serial command).
@@ -81,6 +82,34 @@ class Receiver {
   bool hasStats() const { return haveStats_ && (millis() - lastStatsMs_) < 30000; }
   const StatsFrame& stats() const { return stats_; }
 
+  // ---- Graph history pull ----
+  bool haveMasterMac() const { return haveMasterMac_; }
+  bool histActive() const { return histActive_; }
+  bool historyReady() const { return histReady_; }
+  uint16_t fineCount() const { return fineTotal_; }
+  uint16_t coarseCount() const { return coarseTotal_; }
+  const HistPointW& finePoint(uint16_t i) const { return fineStage_[i]; }
+  const HistPointW& coarsePoint(uint16_t i) const { return coarseStage_[i]; }
+
+  // Start (or restart) a full history pull from our paired master. No-op until
+  // the master's MAC is known (learned from a received frame). Call once the link
+  // is live; poll() re-sends if it stalls, and stageChunk() fills a per-chunk
+  // bitmap so a re-send only backfills the gaps.
+  void requestHistory() {
+    if (!haveMasterMac_ || paired_ == 0) return;
+    fineTotal_ = coarseTotal_ = 0;
+    memset(fineGot_, 0, sizeof(fineGot_));
+    memset(coarseGot_, 0, sizeof(coarseGot_));
+    HistPointW na;  // init staging to n/a so not-yet-received points render as gaps
+    na.battery = na.solar = na.charger = na.dcdc = na.load = na.soc = -32768;
+    for (uint16_t i = 0; i < kHistFineMax; ++i) fineStage_[i] = na;
+    for (uint16_t i = 0; i < kHistCoarseMax; ++i) coarseStage_[i] = na;
+    histReady_ = false;
+    histActive_ = true;
+    histAttempts_ = 0;
+    sendHistReq();
+  }
+
  private:
   static const uint32_t kHopMs = 250;
   static const uint8_t kMaxChannel = 13;
@@ -106,7 +135,7 @@ class Receiver {
 
   // Minimal work in the callback: note the frame; accept data only from our
   // paired master; defer NVS writes to servicePairing() via adoptId_.
-  void onRecv(const uint8_t*, const uint8_t* data, int len) {
+  void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
     // Low-rate 7-day stats frame (Week page) — separate type, our master only.
     if (len == (int)sizeof(StatsFrame)) {
       StatsFrame f;
@@ -116,6 +145,14 @@ class Receiver {
         haveStats_ = true;
         lastStatsMs_ = millis();
       }
+      return;
+    }
+    // Graph history chunk (pull reply) — stage it, our master only.
+    if (len == (int)sizeof(HistChunk)) {
+      HistChunk c;
+      memcpy(&c, data, sizeof(c));
+      if (validHistChunk(c) && histActive_ && paired_ != 0 && c.masterId == paired_)
+        stageChunk(c);
       return;
     }
     if (len != (int)sizeof(Snapshot)) return;
@@ -138,7 +175,34 @@ class Receiver {
       haveFrame_ = true;
       lastRxMs_ = now;
       locked_ = true;
+      if (mac) { memcpy(masterMac_, mac, 6); haveMasterMac_ = true; }  // for the history pull
     }
+  }
+
+  // Stage one received history chunk into the pull buffers + mark it received.
+  void stageChunk(const HistChunk& c) {
+    uint16_t cap = (c.ring == 0) ? kHistFineMax : kHistCoarseMax;
+    HistPointW* dst = (c.ring == 0) ? fineStage_ : coarseStage_;
+    uint8_t* got = (c.ring == 0) ? fineGot_ : coarseGot_;
+    fineTotal_ = c.fineTotal;      // learn BOTH totals from any chunk, so a completed
+    coarseTotal_ = c.coarseTotal;  // fine ring doesn't prematurely mark us "ready"
+    if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
+    memcpy(&dst[c.offset], c.pts, c.count * sizeof(HistPointW));
+    got[c.offset / kHistChunkPts] = 1;
+    recomputeHistReady();
+  }
+
+  static bool ringComplete(uint16_t total, const uint8_t* got, uint16_t maxChunks) {
+    uint16_t need = (total + kHistChunkPts - 1) / kHistChunkPts;  // chunks required
+    if (need > maxChunks) need = maxChunks;
+    for (uint16_t i = 0; i < need; ++i) if (!got[i]) return false;
+    return true;
+  }
+  void recomputeHistReady() {
+    // total==0 => that ring is trivially complete (master has no samples yet).
+    bool fineDone = ringComplete(fineTotal_, fineGot_, kFineChunks);
+    bool coarseDone = ringComplete(coarseTotal_, coarseGot_, kCoarseChunks);
+    if (fineDone && coarseDone) { histReady_ = true; histActive_ = false; }
   }
   static void onRecvStatic(const uint8_t* mac, const uint8_t* data, int len) {
     if (self_) self_->onRecv(mac, data, len);
@@ -165,6 +229,32 @@ class Receiver {
     if (now - lastHopMs_ < kHopMs) return;
     lastHopMs_ = now;
     setChannel(channel_ >= kMaxChannel ? 1 : channel_ + 1);
+  }
+
+  void sendHistReq() {
+    ensureHistPeer();
+    HistReq r;
+    fillHistReq(r, paired_);
+    esp_now_send(masterMac_, (const uint8_t*)&r, sizeof(r));
+    lastHistReqMs_ = millis();
+  }
+  void ensureHistPeer() {
+    if (histPeerAdded_) return;
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, masterMac_, 6);
+    p.channel = 0;      // current channel
+    p.encrypt = false;
+    p.ifidx = manageWifi_ ? WIFI_IF_STA : WIFI_IF_AP;
+    if (esp_now_add_peer(&p) == ESP_OK) histPeerAdded_ = true;
+  }
+  // Re-send the request if the pull stalls (a lost chunk); the master restarts
+  // from offset 0 and our bitmap backfills only the gaps. Give up after a few.
+  void serviceHistory() {
+    if (!histActive_ || histReady_) return;
+    if (millis() - lastHistReqMs_ < kHistRetryMs) return;
+    if (histAttempts_ >= kHistMaxAttempts) { histActive_ = false; return; }
+    ++histAttempts_;
+    sendHistReq();
   }
 
   void servicePairing() {
@@ -219,6 +309,24 @@ class Receiver {
   uint8_t channel_ = 1;
   uint32_t lastHopMs_ = 0;
   volatile bool locked_ = false;  // written in both the RX callback and loop
+
+  // Graph history pull (staging buffers + per-chunk received bitmaps).
+  static const uint16_t kFineChunks = (kHistFineMax + kHistChunkPts - 1) / kHistChunkPts;
+  static const uint16_t kCoarseChunks = (kHistCoarseMax + kHistChunkPts - 1) / kHistChunkPts;
+  static const uint32_t kHistRetryMs = 15000;   // > one paced pass (~10s); re-request fills gaps
+  static const uint8_t kHistMaxAttempts = 4;
+  HistPointW fineStage_[kHistFineMax];
+  HistPointW coarseStage_[kHistCoarseMax];
+  uint8_t fineGot_[kFineChunks] = {0};
+  uint8_t coarseGot_[kCoarseChunks] = {0};
+  volatile uint16_t fineTotal_ = 0, coarseTotal_ = 0;
+  volatile bool histActive_ = false;
+  volatile bool histReady_ = false;
+  uint8_t histAttempts_ = 0;
+  uint32_t lastHistReqMs_ = 0;
+  uint8_t masterMac_[6] = {0};
+  volatile bool haveMasterMac_ = false;
+  bool histPeerAdded_ = false;
 };
 
 }  // namespace slavelink

@@ -188,6 +188,7 @@ void pollBle();
 void setupEspNow();
 void sendSlaveBroadcast();
 void sendStatsFrame();
+void serviceHistSend();  // master: paced reply to a slave's graph-history pull
 
 // Defined in web.cpp, called from main.cpp.
 String jsonEsc(const String& s);

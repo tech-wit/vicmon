@@ -81,11 +81,19 @@ static constexpr int GL_SLOT = (W - 2 * GL_X0) / 6;
 void renderGraph(Arduino_GFX* c, const DashData& d) {
   char buf[16];
   renderZoomRow(c, d.histWinMin);
+  // Drawn last (on top of the plot), a little below the zoom pills, while the
+  // history is streaming in from the master.
+  auto drawSync = [&]() {
+    if (!d.graphSyncing) return;
+    c->fillRoundRect(W / 2 - 92, 54, 184, 18, 5, kBg);
+    gtext(c, &FreeSans9pt7b, W / 2, 67, "syncing with master...", kAccent, C);
+  };
 
   if (d.histCount < 2) {
     c->fillRoundRect(8, 44, W - 16, TAB_Y - 52, 10, kCard);
     gtext(c, &FreeSansBold18pt7b, W / 2, 150, "Collecting data...", kMuted, C);
     gtext(c, &FreeSans9pt7b, W / 2, 178, "trend appears after a minute", kMuted, C);
+    drawSync();
     return;
   }
   const int n = d.histCount;
@@ -172,6 +180,7 @@ void renderGraph(Arduino_GFX* c, const DashData& d) {
     c->fillRect(sx, GL_Y - 10, 12, 12, off ? kGrey : legs[i].col);
     gtext(c, &FreeSans9pt7b, sx + 16, GL_Y, legs[i].t, off ? kMuted : kText, L);
   }
+  drawSync();  // overlay on top of the plotted series
 }
 
 // Hit-test the Graph legend row: returns the series index 0..5 (tap toggles it),

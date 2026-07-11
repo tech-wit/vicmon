@@ -57,6 +57,7 @@ struct DashData {
   int      histCount = 0;          // valid points (<= HIST_POINTS)
   uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
   uint8_t  graphHidden = 0;        // bitfield: series hidden via the legend (bit 0=batt..5=soc)
+  bool     graphSyncing = false;   // slave: pulling the trend history from the master
 
   // Week page: last-7-"day" energy in Ah (a "day" = a calendar day when a clock
   // is set, else 24h of run-time) + three resettable meters. Filled from gStats

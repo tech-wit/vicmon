@@ -26,11 +26,34 @@ static volatile bool gSnapReady = false;
 static esp_timer_handle_t gBcastTimer = nullptr;
 static void broadcastTick(void*);  // defined after buildSnapshot
 
+// Graph history pull: a slave unicasts a HistReq; we reply with the two trend
+// rings as paced HistChunk frames (see serviceHistSend). Set from the recv cb.
+static volatile bool gHistReqPending = false;
+static uint8_t gHistReqMac[6] = {0};
+static bool gHistSending = false, gHistPeerAdded = false;
+static uint8_t gHistPeerMac[6] = {0};
+static uint8_t gHistRing = 0;      // 0 fine, 1 coarse
+static uint16_t gHistOffset = 0;
+
+// Receive callback (master role). Only handles the tiny history request; the
+// bulky reply is sent from the loop so we never block the WiFi task.
+static void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
+    if (len == (int)sizeof(slavelink::HistReq) && mac) {
+        slavelink::HistReq r;
+        memcpy(&r, data, sizeof(r));
+        if (slavelink::validHistReq(r) && r.masterId == gMasterId) {
+            memcpy(gHistReqMac, mac, 6);
+            gHistReqPending = true;
+        }
+    }
+}
+
 void setupEspNow() {
     if (esp_now_init() != ESP_OK) {
         Serial.println("ESP-NOW init failed");
         return;
     }
+    esp_now_register_recv_cb(&onEspNowRecv);  // answer slave history-pull requests
     esp_now_peer_info_t peer = {};
     memcpy(peer.peer_addr, kBroadcastMac, 6);
     peer.channel = 0;      // 0 = current WiFi channel (AP pinned to 1)
@@ -120,7 +143,9 @@ static slavelink::Snapshot buildSnapshot() {
 static portMUX_TYPE gSnapMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void broadcastTick(void*) {
-    if (!gEspNowOk || !gSnapReady) return;
+    if (!gEspNowOk) return;
+    serviceHistSend();  // pump the paced history reply here (every 250ms, not the 2s loop)
+    if (!gSnapReady) return;
     slavelink::Snapshot s;
     portENTER_CRITICAL(&gSnapMux);
     s = gCachedSnap;
@@ -185,4 +210,61 @@ void sendStatsFrame() {
     }
     f.dayCount = (uint8_t)out;
     esp_now_send(kBroadcastMac, (const uint8_t*)&f, sizeof(f));
+}
+
+// ---- Graph history responder (paced) ---------------------------------------
+static void ensureHistPeer(const uint8_t* mac) {
+    if (gHistPeerAdded && memcmp(gHistPeerMac, mac, 6) == 0) return;
+    if (gHistPeerAdded) { esp_now_del_peer(gHistPeerMac); gHistPeerAdded = false; }
+    esp_now_peer_info_t p = {};
+    memcpy(p.peer_addr, mac, 6);
+    p.channel = 0; p.encrypt = false; p.ifidx = WIFI_IF_AP;  // master is AP
+    if (esp_now_add_peer(&p) == ESP_OK) { memcpy(gHistPeerMac, mac, 6); gHistPeerAdded = true; }
+}
+
+// Serialize one chunk of a ring (chronological order, oldest first) and unicast
+// it. Returns false if the send queue is full (retry the same offset next time).
+static bool sendHistChunk(uint8_t ring, const HistRing& r, uint16_t offset) {
+    using namespace slavelink;
+    HistChunk c = {};
+    fillHistChunkHdr(c);
+    c.ring = ring;
+    c.masterId = gMasterId;
+    c.fineTotal = (uint16_t)gFine.count;      // both totals in every chunk so the slave
+    c.coarseTotal = (uint16_t)gCoarse.count;  // knows to wait for coarse (sent after fine)
+    c.offset = offset;
+    uint16_t remain = (uint16_t)r.count - offset;
+    uint8_t n = remain > kHistChunkPts ? kHistChunkPts : (uint8_t)remain;
+    c.count = n;
+    for (uint8_t i = 0; i < n; ++i) {
+        const HistSample& s = r.buf[(r.head + r.cap - r.count + offset + i) % r.cap];
+        memcpy(&c.pts[i], &s, sizeof(HistPointW));  // HistSample and HistPointW share layout
+    }
+    return esp_now_send(gHistPeerMac, (const uint8_t*)&c, sizeof(c)) == ESP_OK;
+}
+
+// Called each master loop: begin a pull on request, then gently paced-send the
+// fine then coarse ring as unicast chunks (a small batch per cycle, so ~30 s for
+// the full ~120 chunks) — never contending with the BLE scan / AP / broadcast.
+void serviceHistSend() {
+    if (gHistReqPending) {
+        gHistReqPending = false;
+        ensureHistPeer(gHistReqMac);
+        Serial.printf("[hist] req from ..%02X:%02X peer=%d fine=%u coarse=%u\n",
+                      gHistReqMac[4], gHistReqMac[5], gHistPeerAdded,
+                      (unsigned)gFine.count, (unsigned)gCoarse.count);
+        if (gHistPeerAdded) { gHistSending = true; gHistRing = 0; gHistOffset = 0; }
+    }
+    if (!gHistSending) return;
+    const int kBatch = 8;  // chunks per 250ms tick (queue usually fills after ~4)
+    for (int i = 0; i < kBatch; ++i) {
+        const HistRing& r = (gHistRing == 0) ? gFine : gCoarse;
+        if (gHistOffset >= (uint16_t)r.count) {  // this ring done
+            if (gHistRing == 0) { gHistRing = 1; gHistOffset = 0; continue; }
+            gHistSending = false; Serial.println("[hist] send complete"); break;
+        }
+        if (!sendHistChunk(gHistRing, r, gHistOffset)) break;  // queue full -> next tick
+        uint16_t remain = (uint16_t)r.count - gHistOffset;
+        gHistOffset += remain > slavelink::kHistChunkPts ? slavelink::kHistChunkPts : remain;
+    }
 }

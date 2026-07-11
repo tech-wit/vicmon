@@ -334,6 +334,7 @@ static void collectSlaveDash(guition::DashData& d) {
     d.battCapAh = s.capacityAh;  // v4: for the Dash/Flow remaining-Ah readout
     d.profileId = s.profile;
     collectHistory(d);  // Graph page: fill from the history built off received frames
+    d.graphSyncing = gRx.histActive();  // show the "syncing" hint while pulling history
 
     // Week page: from the low-rate stats frame (if we've received one).
     if (gRx.hasStats()) {

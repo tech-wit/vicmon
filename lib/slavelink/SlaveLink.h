@@ -120,6 +120,36 @@ struct StatsFrame {
     uint16_t daySolarAh[7], dayDcdcAh[7], dayChargerAh[7], dayLoadAh[7]; // whole Ah per day
     uint32_t dayStamp[7]; // yyyymmdd (clocked) or run-day index per past-day entry
 };
+
+// ---- Graph history sync (on-demand, paced) ---------------------------------
+// The slave pulls the master's two trend rings once after boot, then extends
+// them from the live Snapshot stream. The request is tiny; the reply is many
+// small chunks sent unicast (link-layer ACK/retry) and gently paced so it never
+// contends with the BLE scan / AP / live broadcast. Magics 'V','Q' / 'V','C'.
+static const uint8_t kHistReqMagic1 = 'Q';
+static const uint8_t kHistChunkMagic1 = 'C';
+// Ring capacities — MUST match the app's HIST_CAP / HIST2_CAP (fine 1h@5s,
+// coarse 24h@60s). Used to size the slave's staging buffers.
+static const uint16_t kHistFineMax = 720;
+static const uint16_t kHistCoarseMax = 1440;
+struct HistPointW { int16_t battery, solar, charger, dcdc, load, soc; };  // == app HistSample
+
+struct HistReq {
+    uint8_t magic0, magic1, version, pad_;  // 'V','Q'
+    uint32_t masterId;                       // target master (ignored by others)
+};
+static const int kHistChunkPts = 18;         // 18*12 + 16 hdr = 232 B (< 250)
+struct HistChunk {
+    uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse
+    uint32_t masterId;
+    uint16_t fineTotal, coarseTotal;         // BOTH ring totals in every chunk, so the
+                                             // slave knows to wait for coarse even while
+                                             // fine (sent first) is still arriving
+    uint16_t offset;                         // index of pts[0] within `ring`
+    uint8_t count;                           // valid samples in pts[] (<= kHistChunkPts)
+    uint8_t pad_;
+    HistPointW pts[kHistChunkPts];
+};
 #pragma pack(pop)
 
 inline void fillStatsHeader(StatsFrame& f) {
@@ -129,6 +159,19 @@ inline void fillStatsHeader(StatsFrame& f) {
 }
 inline bool validStatsHeader(const StatsFrame& f) {
     return f.magic0 == kMagic0 && f.magic1 == kStatsMagic1 && f.version == kVersion;
+}
+
+inline void fillHistReq(HistReq& r, uint32_t id) {
+    r.magic0 = kMagic0; r.magic1 = kHistReqMagic1; r.version = kVersion; r.pad_ = 0; r.masterId = id;
+}
+inline bool validHistReq(const HistReq& r) {
+    return r.magic0 == kMagic0 && r.magic1 == kHistReqMagic1 && r.version == kVersion;
+}
+inline void fillHistChunkHdr(HistChunk& c) {
+    c.magic0 = kMagic0; c.magic1 = kHistChunkMagic1; c.version = kVersion;
+}
+inline bool validHistChunk(const HistChunk& c) {
+    return c.magic0 == kMagic0 && c.magic1 == kHistChunkMagic1 && c.version == kVersion;
 }
 
 // ---- helpers ----------------------------------------------------------------

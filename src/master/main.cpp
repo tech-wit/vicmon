@@ -836,6 +836,10 @@ static void simTick() {
 
 static void setupSlave() {
     Serial.println("[boot] SLAVE role — ESP-NOW receiver + config AP (no BLE)");
+    // Drop any history loaded from our own flash — on a slave it's stale; the
+    // authoritative trend comes live + from the master's history pull.
+    gFine.clear();
+    gCoarse.clear();
     // Config SoftAP on channel 1 (matches the master's default AP channel).
     WiFi.mode(WIFI_AP);
     WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
@@ -856,11 +860,57 @@ static void setupSlave() {
 #endif
 }
 
+// Load a completed history pull into the trend rings (chronological, native
+// resolution) so the Graph page is fully populated; live frames extend it after.
+static void applyPulledHistory() {
+    // Only replace a ring the master actually sent samples for — otherwise keep
+    // the slave's own live-accumulated ring (don't wipe 12h/24h when the master
+    // has no coarse history yet).
+    if (gRx.fineCount() > 0) {
+        gFine.clear();
+        for (uint16_t i = 0; i < gRx.fineCount(); ++i) {
+            const slavelink::HistPointW& p = gRx.finePoint(i);
+            HistSample s{p.battery, p.solar, p.charger, p.dcdc, p.load, p.soc};
+            gFine.push(s, millis());
+        }
+    }
+    if (gRx.coarseCount() > 0) {
+        gCoarse.clear();
+        for (uint16_t i = 0; i < gRx.coarseCount(); ++i) {
+            const slavelink::HistPointW& p = gRx.coarsePoint(i);
+            HistSample s{p.battery, p.solar, p.charger, p.dcdc, p.load, p.soc};
+            gCoarse.push(s, millis());
+        }
+    }
+}
+
 static void slaveLoop() {
     gDns.processNextRequest();
     gRx.poll();
-    sampleSlaveHistory();  // build the Trend history from received frames
     serviceRole();  // "Switch to Master" (reboots)
+
+    // Graph history: pull the master's rings once the link is live + settled, then
+    // trend from live frames. While the pull is in flight, render whatever's been
+    // staged so far (it fills in progressively); live sampling pauses meanwhile.
+    static bool gHistApplied = false;
+    static uint32_t gLiveSince = 0;
+    if (gRx.histActive()) {
+        applyPulledHistory();  // progressive: staged points, gaps fill as chunks land
+    } else if (gRx.historyReady() && !gHistApplied) {
+        applyPulledHistory();
+        gHistApplied = true;
+        Serial.printf("[slave] graph history synced: %u fine + %u coarse pts\n",
+                      gRx.fineCount(), gRx.coarseCount());
+    } else {
+        sampleSlaveHistory();  // normal live trend (before the request / after sync)
+    }
+    if (gRx.live() && gRx.haveMasterMac()) {
+        if (gLiveSince == 0) gLiveSince = millis();
+        if (!gHistApplied && !gRx.histActive() && !gRx.historyReady() && millis() - gLiveSince > 3000)
+            gRx.requestHistory();
+    } else {
+        gLiveSince = 0;
+    }
 #ifdef VICMON_DISPLAY
     if (gDisplayOk) { serviceDashRequests(); publishSlaveDash(); }  // apply tunable/brightness taps
 #endif
@@ -869,8 +919,9 @@ static void slaveLoop() {
     if (now - last >= 1000) {
         last = now;
         if (gRx.isPaired())
-            Serial.printf("[slave] %08X %s ch%u drops=%lu\n", gRx.pairedMaster(),
-                          gRx.live() ? "live" : "stale", gRx.channel(), (unsigned long)gRx.drops());
+            Serial.printf("[slave] %08X %s ch%u drops=%lu%s\n", gRx.pairedMaster(),
+                          gRx.live() ? "live" : "stale", gRx.channel(), (unsigned long)gRx.drops(),
+                          gRx.histActive() ? " syncing-history" : "");
         else
             Serial.printf("[slave] unpaired ch%u %s\n", gRx.channel(),
                           gRx.isAdopting() ? "adopting" : "idle");
@@ -1052,6 +1103,8 @@ void loop() {
         lastStats = now;
         sendStatsFrame();
     }
+    // serviceHistSend() is pumped from broadcastTick (250ms) so the paced reply
+    // isn't bottlenecked by this loop's ~2s BLE scan.
 #endif
 
     Serial.printf("[state] victron_adverts=%d decoded=%d |", gScanVictron, gScanDecoded);
