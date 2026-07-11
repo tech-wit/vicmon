@@ -339,6 +339,7 @@ static void collectSlaveDash(guition::DashData& d) {
     d.profileId = s.profile;
     collectHistory(d);  // Graph page: fill from the history built off received frames
     d.graphSyncing = gRx.histActive();  // show the "syncing" hint while pulling history
+    d.graphSyncPct = gRx.histPercent();
 
     // Week page: from the low-rate stats frame (retain the last one when stale).
     if (gRx.everStats()) {

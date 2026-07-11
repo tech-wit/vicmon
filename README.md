@@ -9,10 +9,11 @@ them locally with each device's key, aggregates everything, and serves a dark
 **energy-flow "mimic"** UI plus a configurable signal/profile system over its own
 WiFi access point.
 
-> **Status:** the full master logic + web app run **headless on an M5Stack
-> AtomS3 Lite** today (Phases 1–2). The physical LVGL display and ESP-NOW slaves
-> (Phases 3–4) are pending their boards. See `PROJECT_PLAN.md` for the roadmap
-> and architecture, and `PROJECT_SPEC.md` for the original brief.
+> **Status:** running on hardware end to end. The **Guition JC3248W535** is the
+> touch master (BLE + WiFi AP + web app + an on-screen dashboard), and **ESP-NOW
+> slave displays** mirror it. One firmware runs on every board; master vs slave is
+> a runtime NVS flag. See `PROJECT_PLAN.md` for the architecture and `PROJECT_SPEC.md`
+> for the original brief.
 
 ## What works now
 

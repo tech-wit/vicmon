@@ -85,8 +85,10 @@ void renderGraph(Arduino_GFX* c, const DashData& d) {
   // history is streaming in from the master.
   auto drawSync = [&]() {
     if (!d.graphSyncing) return;
-    c->fillRoundRect(W / 2 - 92, 54, 184, 18, 5, kBg);
-    gtext(c, &FreeSans9pt7b, W / 2, 67, "syncing with master...", kAccent, C);
+    char s[40];
+    snprintf(s, sizeof(s), "syncing with master  %u%%", d.graphSyncPct);
+    c->fillRoundRect(W / 2 - 98, 54, 196, 18, 5, kBg);
+    gtext(c, &FreeSans9pt7b, W / 2, 67, s, kAccent, C);
   };
 
   const int n = d.histCount;

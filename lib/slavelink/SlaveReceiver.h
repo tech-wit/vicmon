@@ -88,6 +88,17 @@ class Receiver {
   bool haveMasterMac() const { return haveMasterMac_; }
   bool histActive() const { return histActive_; }
   bool historyReady() const { return histReady_; }
+  // Backlog-pull progress 0..100 (received chunks / expected chunks).
+  uint8_t histPercent() const {
+    uint16_t need = (fineTotal_ + kHistChunkPts - 1) / kHistChunkPts +
+                    (coarseTotal_ + kHistChunkPts - 1) / kHistChunkPts;
+    if (need == 0) return 0;
+    uint16_t got = 0;
+    for (uint16_t i = 0; i < kFineChunks; ++i) got += fineGot_[i];
+    for (uint16_t i = 0; i < kCoarseChunks; ++i) got += coarseGot_[i];
+    uint32_t p = (uint32_t)got * 100 / need;
+    return p > 100 ? 100 : (uint8_t)p;
+  }
   uint16_t fineCount() const { return fineTotal_; }
   uint16_t coarseCount() const { return coarseTotal_; }
   const HistPointW& finePoint(uint16_t i) const { return fineStage_[i]; }
