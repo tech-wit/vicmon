@@ -555,13 +555,57 @@ void saveAlertSettings(float socWarn, float socCrit, float vLow, float vHigh) {
 uint32_t gManualEpoch = 0;
 uint32_t gManualMillis = 0;
 
-// Local (TZ-adjusted) unix seconds, or 0 if no clock at all. Prefers a real NTP
-// fix, else the manually-set clock; 0 tells Stats to fall back to run-time days.
-uint32_t currentLocalEpoch() {
+// Best-known UTC unix seconds, or 0 if no clock at all. Prefers a real NTP fix,
+// else the manually-set / restored / master-supplied clock base (which is UTC).
+uint32_t currentUtcEpoch() {
     time_t t = time(nullptr);
-    if (t >= 1700000000) return static_cast<uint32_t>(t) + gTzOffsetMin * 60;  // NTP
-    if (gManualEpoch) return gManualEpoch + (millis() - gManualMillis) / 1000 + gTzOffsetMin * 60;
-    return 0;  // no clock -> run-time day boundaries
+    if (t >= 1700000000) return static_cast<uint32_t>(t);                        // NTP
+    if (gManualEpoch) return gManualEpoch + (millis() - gManualMillis) / 1000;   // manual base is UTC
+    return 0;
+}
+
+// Local (TZ-adjusted) unix seconds, or 0 if no clock at all. 0 tells Stats to
+// fall back to run-time day boundaries.
+uint32_t currentLocalEpoch() {
+    uint32_t u = currentUtcEpoch();
+    return u ? u + gTzOffsetMin * 60 : 0;
+}
+
+// Rough clock persistence (NVS ns "vicclock"): the manual clock is RAM-only, so a
+// reboot would lose it. We snapshot the current UTC epoch to flash periodically
+// and restore it at boot, so the time survives resets to a rough order (it lags
+// by up to the save interval + the powered-off duration — fine for the daily-
+// stats midnight rollover; NTP corrects it exactly if it ever syncs).
+//
+// Flash wear is a non-issue: NVS appends each rewrite into a 4KB page (~126
+// entries) and only *erases* a page on compaction, so ~1 erase per ~126 writes,
+// wear-levelled across the partition. At the 60s cadence below that's ~1440
+// writes/day ≈ 11 page-erases/day; against ~100k erase cycles/sector this is
+// decades of life. It could go faster still, but 60s already bounds the worst-
+// case backwards jump (zero-downtime reboot) to a minute, which is plenty.
+static constexpr uint32_t kClockSaveMs = 60000;  // snapshot the clock every 1 min
+static void loadClock() {
+    Preferences p;
+    p.begin("vicclock", true);
+    uint32_t e = p.getUInt("utc", 0);
+    p.end();
+    if (e > 1700000000u) { gManualEpoch = e; gManualMillis = millis(); }
+}
+void saveClock() {
+    if (gRole != ROLE_MASTER) return;  // master owns the clock; a slave takes it live
+    uint32_t u = currentUtcEpoch();
+    if (u <= 1700000000u) return;  // nothing worth saving yet
+    Preferences p;
+    p.begin("vicclock", false);
+    p.putUInt("utc", u);
+    p.end();
+}
+// Persist the clock on the kClockSaveMs cadence (see wear note above). Master-only
+// — the slave takes its time live from the master and never writes it to NVS.
+void serviceClockPersist() {
+    static uint32_t lastSaveMs = 0;
+    uint32_t now = millis();
+    if (now - lastSaveMs >= kClockSaveMs) { lastSaveMs = now; saveClock(); }
 }
 
 // Loads a profile's config/signals/settings and clears runtime caches so the
@@ -980,6 +1024,8 @@ void setup() {
     Serial.printf("[boot] role: %s\n", gRole == ROLE_SLAVE ? "SLAVE" : "MASTER");
     if (gRole == ROLE_SLAVE) { setupSlave(); return; }
 
+    loadClock();  // master owns the clock: restore the rough time saved before reboot
+
 #ifdef GUITION_NO_WIFI
     IPAddress ip;
     Serial.println("WiFi DISABLED (diag)");
@@ -1074,6 +1120,7 @@ void loop() {
     sampleStats();    // integrate energy counters / trip stats
 
     uint32_t now = millis();
+    serviceClockPersist();  // master-only: snapshot the rough clock to NVS every ~5 min
     int worst = buildAlerts(now);
 #ifndef VICMON_DISPLAY
     // Status LED on GPIO 35 — but on the Guition (OPI PSRAM) GPIO 35 is a PSRAM

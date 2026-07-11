@@ -13,6 +13,16 @@ void Display::setBrightness(uint8_t pct) {
   ledcWrite(kBlChannel, (uint32_t)pct * 255 / 100);
 }
 
+void Display::setRotation(uint8_t rotation) {
+  rotation_ = rotation;
+  if (!canvas_) return;
+  // Arduino_GFX::setRotation just updates the rotation used by the canvas'
+  // per-pixel mapping (1<->3 keep the 480x320 framebuffer, no realloc). Clear so
+  // no stale pixels from the old orientation survive until the next full redraw.
+  canvas_->setRotation(rotation_);
+  canvas_->fillScreen(BLACK);
+}
+
 bool Display::begin(uint8_t rotation) {
   rotation_ = rotation;
 

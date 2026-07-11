@@ -46,7 +46,8 @@ static String buildPanelJson() {
              ",\"starter_v\":" + String(decCenti(s.starterV_cv), 2) +
              ",\"starter_valid\":" + jbool(has(V_STARTERV)) +
              ",\"ttg\":" + String(s.ttg_min == 0xFFFF ? 0 : s.ttg_min) +
-             ",\"ttg_valid\":" + jbool(has(V_TTG)) + ",\"capacity\":0},";
+             ",\"ttg_valid\":" + jbool(has(V_TTG)) +
+             ",\"capacity\":" + String(s.capacityAh) + "},";  // v4: enables charging "Full"/remaining-Ah, matching the master
         j += "\"solar\":{\"valid\":" + jbool(has(V_SOLAR)) + ",\"a\":" + String(decDeci(s.solarA_da), 1) +
              ",\"w\":" + String(decWhole(s.solarW_w), 0) +
              ",\"v\":" + String(decCenti(s.solarV_cv), 2) + ",\"v_valid\":" + jbool(has(V_SOLARV)) + "},";
@@ -139,12 +140,55 @@ static String bucketJson(const stats::Bucket& b) {
     j += "}";
     return j;
 }
+// A slave has no local stats::Stats — it receives the master's energy summary as
+// an ESP-NOW StatsFrame (Ah + durations, plus per-day Ah bars). Emit the same JSON
+// shape the Stats page expects; the fields the frame doesn't carry (Wh, peaks, SoC/
+// V ranges, per-scope start epoch) are 0 / null (the page treats SoC as optional).
+static String slaveBucketJson(const slavelink::StatMeterW& m) {
+    String j = "{";
+    j += "\"solar_ah\":" + String((float)m.solarAh, 1) + ",\"solar_wh\":0,";
+    j += "\"dcdc_ah\":" + String((float)m.dcdcAh, 1) + ",\"dcdc_wh\":0,";
+    j += "\"charger_ah\":" + String((float)m.chargerAh, 1) + ",\"charger_wh\":0,";
+    j += "\"load_ah\":" + String((float)m.loadAh, 1) + ",\"load_wh\":0,";
+    j += "\"charged_ah\":" + String((float)m.inAh, 1) + ",\"charged_wh\":0,";
+    j += "\"discharged_ah\":" + String((float)m.outAh, 1) + ",\"discharged_wh\":0,";
+    j += "\"soc_min\":null,\"soc_max\":null,\"v_min\":null,\"v_max\":null,";
+    j += "\"peak_solar_w\":0,\"peak_load_w\":0,\"peak_charge_a\":0,\"peak_discharge_a\":0,";
+    j += "\"charge_secs\":0,\"discharge_secs\":0,";
+    j += "\"duration_secs\":" + String(m.durSecs) + ",\"start_epoch\":0";
+    j += "}";
+    return j;
+}
+static String buildSlaveStatsJson() {
+    const slavelink::StatsFrame& f = gRx.stats();  // all-zero until the first frame
+    uint32_t epoch = currentLocalEpoch();           // slave adopts the master's clock
+    String j = "{";
+    j += "\"clock\":" + jbool(f.clockOk != 0) + ",\"clock_ro\":true,\"now_epoch\":" + String(epoch) +
+         ",\"run_day\":" + String(f.clockOk ? 0 : f.dayNow) + ",";
+    j += "\"today\":" + slaveBucketJson(f.today) + ",";
+    j += "\"trip\":"  + slaveBucketJson(f.trip)  + ",";
+    j += "\"total\":" + slaveBucketJson(f.total) + ",";
+    j += "\"days\":[";
+    int nd = f.dayCount > 7 ? 7 : f.dayCount;
+    for (int i = 0; i < nd; ++i) {
+        if (i) j += ",";
+        j += "{\"stamp\":" + String(f.dayStamp[i]) +
+             ",\"solar_ah\":" + String((float)f.daySolarAh[i], 1) +
+             ",\"dcdc_ah\":" + String((float)f.dayDcdcAh[i], 1) +
+             ",\"charger_ah\":" + String((float)f.dayChargerAh[i], 1) +
+             ",\"load_ah\":" + String((float)f.dayLoadAh[i], 1) +
+             ",\"soc_min\":null,\"soc_max\":null}";
+    }
+    j += "]}";
+    return j;
+}
 static String buildStatsJson() {
+    if (gRole == ROLE_SLAVE) return buildSlaveStatsJson();
     uint32_t epoch = currentLocalEpoch();
     String j = "{";
     // clock=true when a real/manual clock is set (day labels are dates); otherwise
     // days come from the run-time odometer and run_day is the current index.
-    j += "\"clock\":" + jbool(epoch != 0) + ",\"now_epoch\":" + String(epoch) +
+    j += "\"clock\":" + jbool(epoch != 0) + ",\"clock_ro\":false,\"now_epoch\":" + String(epoch) +
          ",\"run_day\":" + String(gStats.runDay()) + ",";
     j += "\"today\":" + bucketJson(gStats.bucket(stats::TODAY)) + ",";
     j += "\"trip\":" + bucketJson(gStats.bucket(stats::TRIP)) + ",";
@@ -182,10 +226,10 @@ static String pageHead(const char* active) {
     } links[] = {{"/", "Mimic"}, {"/stats", "Stats"}, {"/devices", "Devices"},
                  {"/bindings", "Settings"}, {"/diag", "Diag"}};
     for (auto& l : links) {
-        // A slave has no BLE devices / local history — hide those pages, leaving
-        // the live Mimic + Settings (System card: pair / role / unpair).
+        // A slave has no BLE devices of its own — hide those pages. It DOES get the
+        // energy stats from the master (ESP-NOW StatsFrame), so /stats stays. Leaves
+        // the live Mimic + Stats + Settings (System card: pair / role / unpair).
         if (gRole == ROLE_SLAVE && (strcmp(l.href, "/devices") == 0 ||
-                                    strcmp(l.href, "/stats") == 0 ||
                                     strcmp(l.href, "/diag") == 0))
             continue;
         h += "<a href='";
@@ -506,13 +550,14 @@ static void handleTime(AsyncWebServerRequest* req) {
         int64_t v = (int64_t)base + h * 3600 + m * 60 - (int64_t)gTzOffsetMin * 60;
         gManualEpoch = (uint32_t)v;
         gManualMillis = millis();
+        saveClock();  // persist the just-set time so a reboot keeps it
         req->send(200, "text/plain", "ok");
         return;
     }
     // Or a full UTC epoch straight from the browser clock ("Now").
     uint32_t e = (uint32_t)strtoul(pv("epoch").c_str(), nullptr, 10);
     bool ok = e > 1700000000;
-    if (ok) { gManualEpoch = e; gManualMillis = millis(); }
+    if (ok) { gManualEpoch = e; gManualMillis = millis(); saveClock(); }
     req->send(200, "text/plain", ok ? "ok" : "bad");
 }
 

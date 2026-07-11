@@ -163,6 +163,9 @@ ChargeMode chargeMode(const sig::Resolved& ba);
 const char* chargeModeName(ChargeMode m);
 const char* chargeModeDisplayName(ChargeMode m);
 uint32_t currentLocalEpoch();
+uint32_t currentUtcEpoch();      // best-known UTC seconds (0 = no clock)
+void saveClock();                // snapshot the clock to NVS now
+void serviceClockPersist();      // periodic clock snapshot (call from both loops)
 victron::Record parseType(const String& t);
 const char* typeName(victron::Record r);
 void applyProfile(int pid);

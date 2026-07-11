@@ -25,6 +25,10 @@ class Touch {
   // rotation must match guition::Display's rotation (0/2 portrait, 1/3 landscape).
   bool begin(uint8_t rotation = 1);
 
+  // Change orientation at runtime; must track guition::Display's rotation so the
+  // coordinate mapping stays aligned with the canvas (e.g. after a 180° flip).
+  void setRotation(uint8_t rotation) { rotation_ = rotation; }
+
   // Poll the controller. Returns true and fills `p` (mapped to logical coords)
   // when a finger is down; returns false otherwise.
   bool read(TouchPoint& p);

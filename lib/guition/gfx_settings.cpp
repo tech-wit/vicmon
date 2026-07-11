@@ -10,18 +10,19 @@ namespace guition {
 // --------------------------------------------------------- settings page ----
 // Layout constants shared by renderSettings() and settingsHit().
 static constexpr int PROF_X = 8,   PROF_Y = 66, PROF_W = 200, PROF_RH = 24;  // profile rows
-static constexpr int TUN_X = 216,  TUN_Y = 68, TUN_W = W - 8 - 216, TUN_RH = 20;  // tunable rows
+static constexpr int TUN_X = 216,  TUN_Y = 68, TUN_W = W - 8 - 216, TUN_RH = 18;  // tunable rows (9 fit above -/+)
 static constexpr int ADJ_Y = 232, ADJ_H = 40;                               // -/+ buttons
 static constexpr int ADJ_W = (TUN_W - 8) / 2;
 static constexpr int PAIR_X = 14, PAIR_Y = 240, PAIR_W = 188, PAIR_H = 30;   // Pair action (Tune)
 // Tunables a slave shows on Tune (display-relevant only; the rest are master alert
 // settings). render + hit-test share this ordering.
-static const uint8_t kSlaveTun[2] = {TUN_BRIGHT, TUN_TZ};
+static const uint8_t kSlaveTun[3] = {TUN_BRIGHT, TUN_TZ, TUN_FLIP};
 
 struct TunInfo { const char* label; const char* unit; };
 static const TunInfo kTun[TUNABLE_N] = {
   {"Brightness", "%"}, {"Battery cap", "Ah"}, {"Deadband", "A"}, {"Timezone", "h"},
   {"SoC warn", "%"},   {"SoC crit", "%"},     {"Volt low", "V"}, {"Volt high", "V"},
+  {"Screen flip", ""},
 };
 
 static float tunValue(const DashData& d, int i) {
@@ -34,6 +35,7 @@ static float tunValue(const DashData& d, int i) {
     case TUN_SOCCRIT:  return d.socCrit;
     case TUN_VLOW:     return d.vLow;
     case TUN_VHIGH:    return d.vHigh;
+    case TUN_FLIP:     return d.displayFlip ? 1 : 0;
   }
   return 0;
 }
@@ -46,6 +48,7 @@ static void tunText(char* buf, size_t n, int i, float v) {
     case TUN_TZ:      snprintf(buf, n, "%+.1f h", v); break;
     case TUN_SOCWARN:
     case TUN_SOCCRIT: snprintf(buf, n, "%.0f%%", v); break;
+    case TUN_FLIP:    snprintf(buf, n, v > 0.5f ? "Flipped" : "Normal"); break;
     default:          snprintf(buf, n, "%.1f V", v); break;
   }
 }
@@ -402,7 +405,7 @@ void renderSettings(Arduino_GFX* c, const DashData& d) {
 
   char buf[48];
   bool slave = (d.role == 1);
-  int ntun = slave ? 2 : TUNABLE_N;
+  int ntun = slave ? 3 : TUNABLE_N;  // slave: brightness + timezone + screen flip
 
   // --- Left column: profiles (master) or link status (slave) + shared status ---
   c->fillRoundRect(8, 44, 200, TAB_Y - 52, 10, kCard);
@@ -474,7 +477,7 @@ SettingsHitResult settingsHit(int x, int y, int role) {
   auto in = [&](int rx, int ry, int rw, int rh) {
     return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
   };
-  int ntun = role == 1 ? 2 : TUNABLE_N;
+  int ntun = role == 1 ? 3 : TUNABLE_N;  // slave list = brightness + timezone + screen flip
   // Pair action + adjust buttons.
   if (in(PAIR_X, PAIR_Y, PAIR_W, PAIR_H)) return {SA_PAIR, 0};
   if (in(TUN_X, ADJ_Y, ADJ_W, ADJ_H)) return {SA_ADJ_DN, 0};

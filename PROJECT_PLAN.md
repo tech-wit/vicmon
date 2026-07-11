@@ -34,12 +34,15 @@ former standalone `src/slave` was folded in and deleted.
 - **Transmit:** a 250 ms `esp_timer` broadcasts a cached snapshot (~4/s) so the
   rate is independent of the loop's ~2 s BLE scan; the broadcast peer uses
   `ifidx = WIFI_IF_AP` (the master is AP-only — the original STA default sent
-  nothing). Wire format `lib/slavelink/SlaveLink.h` (v4; +solar W/V, dc-dc V,
-  consumed & capacity Ah), shared receiver `lib/slavelink/SlaveReceiver.h`.
+  nothing). Wire format `lib/slavelink/SlaveLink.h` (v5; +solar W/V, dc-dc V,
+  consumed & capacity Ah, master clock), shared receiver `lib/slavelink/SlaveReceiver.h`.
+  A version bump forces both ends onto the same firmware — flash master **and**
+  slave together, or the link goes silent (all frame types gate on `kVersion`).
 - **Extra frames** (same file, dispatched by length + magic): a low-rate
   **StatsFrame** (`V T`) carries the Today/Trip/Total energy meters + runtime-day
-  bars for the slave's Week page; a **HistReq/HistChunk** pair (`V Q` / `V C`)
-  lets a slave *pull* the master's full trend rings on connect (see below).
+  bars for the slave's Week page **and the master's UTC clock** (`utcNow`, v5) so
+  the slave shows real dates/time without its own clock; a **HistReq/HistChunk**
+  pair (`V Q` / `V C`) lets a slave *pull* the master's full trend rings on connect.
 - **Channel:** the master AP is channel 1; a slave running a config AP is pinned
   to ch1 (a SoftAP can't channel-hop), which matches the offline/no-router setup.
 - **Slave UI (display + web):** a slave shows the **same** dashboard/web app as a
@@ -50,10 +53,13 @@ former standalone `src/slave` was folded in and deleted.
   stale the slave keeps the **last-known** values (banner shows "STALE") rather
   than blanking. Weekly meters come from the StatsFrame.
   Master-only surfaces are hidden by role: on the LCD the Settings > Tune screen
-  shows link status + AP details + brightness/timezone + Pair (no profiles / alert
-  tunables), Bind is hidden, and Diag is Link + Switch-to-Master; the web nav drops
-  Devices/Stats/Diag. Parity: pair / switch-role / debug are reachable from the
-  screen **and** the AP (web `/api/pair|/api/role|/api/debug`, serial `pair`/`role`).
+  shows link status + AP details + brightness/timezone/screen-flip + Pair (no
+  profiles / alert tunables), Bind is hidden, and Diag is Link + Switch-to-Master;
+  the web nav drops Devices/Diag. **Stats/Week is shown on the slave** (fed from the
+  StatsFrame; its clock-set controls are hidden since the slave takes the master's
+  time), and the slave mimic reads capacity from the snapshot so remaining-Ah +
+  time-to-full/go match the master. Parity: pair / switch-role / debug are reachable
+  from the screen **and** the AP (web `/api/pair|/api/role|/api/debug`, serial `pair`/`role`).
 
 The system also runs **headless** (no display) on a bare ESP32-S3 / AtomS3, in
 either role — it scans + serves the web UI, or receives + serves a config AP.
@@ -96,7 +102,7 @@ vicmon/
 │   ├── VictronParser.*     # record parsers (battery / dcdc / solar / ac-charger)
 │   └── VictronTypes.h      # decoded structs + Record/AuxMode enums
 ├── lib/slavelink/          # SHARED master<->slave ESP-NOW code
-│   ├── SlaveLink.h         # packed wire formats: Snapshot(v4) + StatsFrame + HistReq/HistChunk
+│   ├── SlaveLink.h         # packed wire formats: Snapshot(v5) + StatsFrame(+clock) + HistReq/HistChunk
 │   └── SlaveReceiver.h     # ESP-NOW rx + acquisition + pairing + history-pull state machine
 ├── src/
 │   ├── wroom/main.cpp      # Phase-1/2 reference scanner (Serial output; wroom/atoms3 envs)
@@ -162,6 +168,7 @@ profile *N*≥1 appends the id):
 - energy stats: `vicstat` / `vicstat<N>`  (Today/Trip/Total buckets + day records + run-seconds odometer)
 - profiles index: `vicprof`  ·  WiFi STA creds: `vicwifi`  (global)
 - device role: `vicrole`  ·  slave's paired master id: `vicslave`  ·  custom AP name/pass: `vicap`  (all global)
+- screen flip: `vicdisp/flip`  ·  rough clock snapshot (master only): `vicclock/utc`  (both global)
 - history (LittleFS, not NVS): `/hist<N>.bin` per profile
 
 **History.** A `HistRing` struct (buffer + cap + head/count + interval) with two
@@ -218,6 +225,16 @@ time** entered on the AP (HH:MM/AM-PM, or the browser clock; date doesn't matter
 — it rolls at local midnight instead and labels become dates. `currentLocalEpoch`
 prefers NTP, then the manual clock, else 0 → run-days. TZ offset shifts the
 calendar rollover only.
+
+**Clock persistence + transmission.** The manual clock is RAM-only, so the master
+snapshots the current UTC epoch to NVS (`vicclock/utc`) every 60 s (and on any
+manual set) and restores it at boot — the time survives reboots to a rough order
+(it lags by the save interval + downtime; NTP corrects it exactly if it syncs).
+Flash wear is a non-issue: NVS appends rewrites into a 4 KB page (~126 entries)
+and only erases on compaction (~1 erase per ~126 writes, wear-levelled) → decades
+at this cadence. **Master-only** — a slave never writes the clock; it adopts the
+master's `utcNow` from the StatsFrame (re-syncing on >5 s drift), so `saveClock()`
+is a no-op off the master role.
 
 Each rollover archives the finished Today bucket into a 14-day ring of
 `DayRecord`s (per-source **Ah** + SoC min/max). The **Energy** view (web + TFT
@@ -336,11 +353,11 @@ notes, pins, and gotchas. Summary:
 - **Driver** in `lib/guition/` (`GuitionDisplay` canvas+PWM backlight, `GuitionTouch`,
   `GfxDashboard`). Full-frame PSRAM canvas; whole-frame `flush()` (QSPI has no
   partial DMA). GPIO 35 = OPI PSRAM pin — must not drive it (status LED disabled).
-- **5 pages**, bottom tab bar, touch nav: Dash (mimic), Flow (energy diagram),
+- **5 pages**, bottom tab bar, touch nav: Dash (mimic), Mimic (energy diagram),
   Graph (SoC + battery-A trend, 1m/10m/1h/12h/24h windows matching the web chart's
   fine/coarse ring selection), Week (7-day stacked energy, mirrors the web day
   chart), Settings (profile switch + brightness/battery-cap/deadband/timezone/
-  alert-threshold tunables via touch; WiFi + profile CRUD stay web-only).
+  screen-flip/alert-threshold tunables via touch; WiFi + profile CRUD stay web-only).
 - **Threading:** display + touch on a dedicated FreeRTOS task reading a
   mutex-protected `DashData` snapshot the loop publishes, so the ~2s blocking BLE
   scan can't stall touch. Registry/NVS writes are deferred to the loop task.

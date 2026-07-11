@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 4;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity
+static const uint8_t kVersion = 5;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow)
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -116,6 +116,7 @@ struct StatsFrame {
     uint8_t dayCount;     // number of valid past-day entries (0..7)
     uint8_t pad_[3];
     uint32_t dayNow;      // current day key (run-index or yyyymmdd) for axis labels
+    uint32_t utcNow;      // master's current UTC epoch (0 = no clock); slave adopts it as its clock
     StatMeterW today, trip, total;                                       // resettable meters
     uint16_t daySolarAh[7], dayDcdcAh[7], dayChargerAh[7], dayLoadAh[7]; // whole Ah per day
     uint32_t dayStamp[7]; // yyyymmdd (clocked) or run-day index per past-day entry

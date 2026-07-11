@@ -105,7 +105,8 @@ struct DashData {
   int      menuRole = -1;          // open source-picker role (-1 = list), display-owned
   uint8_t  bindPage = 0;           // bindings-list page (display-owned)
   uint8_t  menuPage = 0;           // source-picker page (display-owned)
-  uint8_t  diagScreen = 0;         // Diag sub-screen: 0 menu / MON / DISC / DEBUG / ROLE / LINK
+  uint8_t  diagScreen = 0;         // Diag sub-screen: 0 menu / MON / DISC / DEBUG / DISPLAY / ROLE / LINK
+  bool     displayFlip = false;    // panel rotated 180° (display-owned; persisted in NVS)
 
   // Settings > Bindings. `srcLabels` is the shared list of selectable sources
   // (index 0 = none, 1 = derived charge, 2 = derived load, then device+field);
@@ -154,7 +155,9 @@ enum Page : uint8_t { PAGE_DASH = 0, PAGE_FLOW, PAGE_GRAPH, PAGE_DAYS, PAGE_SETT
 // apply logic). Index 0 (brightness) is handled locally by the display task.
 enum Tunable : uint8_t {
   TUN_BRIGHT = 0, TUN_BATTCAP, TUN_DEADBAND, TUN_TZ,
-  TUN_SOCWARN, TUN_SOCCRIT, TUN_VLOW, TUN_VHIGH, TUNABLE_N
+  TUN_SOCWARN, TUN_SOCCRIT, TUN_VLOW, TUN_VHIGH,
+  TUN_FLIP,  // display-owned boolean (180° screen flip); handled by the display task
+  TUNABLE_N
 };
 
 // Result of a tap on the Settings page (Tune sub-view). SA_PAIR = the Pair action

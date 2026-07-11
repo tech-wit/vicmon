@@ -35,6 +35,10 @@ static int gBindMenuRole = -1;           // display-local: open source-picker ro
 static int gBindPage = 0;                // display-local: bindings-list page
 static int gMenuPage = 0;                // display-local: source-picker page
 static int gDiagScreen = 0;              // display-local: Diag sub-screen (guition::DiagScreen)
+static bool gDisplayFlip = false;        // display-local: panel rotated 180° (NVS-persisted)
+static volatile bool gFlipSaveReq = false;  // request: persist gDisplayFlip on the loop task
+static uint8_t flipRotation();           // 1 normal / 3 flipped (defined near bringUpDisplay)
+static void saveDisplayFlip();           // defined near bringUpDisplay (NVS ns "vicdisp")
 
 static_assert(guition::ROLE_N == static_cast<int>(sig::kRoleCount),
               "display ROLE_N must match sig::kRoleCount");
@@ -345,6 +349,14 @@ static void collectSlaveDash(guition::DashData& d) {
     if (gRx.everStats()) {
         const slavelink::StatsFrame& f = gRx.stats();
         d.clockOk = f.clockOk != 0;
+        // Take the time from the master (the master owns + persists the clock). Adopt
+        // it as our local clock base so this slave's own currentLocalEpoch()/AP page
+        // agree; re-sync only on >5s drift so we don't reset the base every frame.
+        if (f.utcNow > 1700000000u) {
+            uint32_t mine = currentUtcEpoch();
+            uint32_t diff = mine > f.utcNow ? mine - f.utcNow : f.utcNow - mine;
+            if (!mine || diff > 5) { gManualEpoch = f.utcNow; gManualMillis = millis(); }
+        }
         auto fillM = [](guition::DashData::StatMeter& m, const slavelink::StatMeterW& w) {
             m.inAh = w.inAh;       m.outAh = w.outAh;
             m.solarAh = w.solarAh; m.dcdcAh = w.dcdcAh;
@@ -451,6 +463,10 @@ void serviceDashRequests() {
         startPairing();
         Serial.printf("[display] pairing window open %ds\n", pairSecsLeft());
     }
+    if (gFlipSaveReq) {
+        gFlipSaveReq = false;
+        saveDisplayFlip();  // gDisplayFlip already applied live by the display task
+    }
     if (gStatResetReq >= 0) {
         int scope = gStatResetReq;
         gStatResetReq = -1;
@@ -471,9 +487,11 @@ void serviceDashRequests() {
 // BLE-blocked cadence, so without this the on-screen number lags ~1-2 s. These
 // step/clamp tables MIRROR applyTunableAdjust() (keep them in sync) so the display
 // can show the new value the instant you tap. Index = guition::Tunable.
-static const float kTunStep[guition::TUNABLE_N] = {10, 5, 0.05f, 30, 5, 5, 0.1f, 0.1f};
-static const float kTunMin[guition::TUNABLE_N]  = {10, 0, 0, -720, 0, 0, 5, 5};
-static const float kTunMax[guition::TUNABLE_N]  = {100, 2000, 2, 840, 100, 100, 20, 20};
+// TUN_FLIP (index 8) is display-owned/boolean, applied directly (not via the
+// optimistic loop path); its step/clamp entries are placeholders for array parity.
+static const float kTunStep[guition::TUNABLE_N] = {10, 5, 0.05f, 30, 5, 5, 0.1f, 0.1f, 1};
+static const float kTunMin[guition::TUNABLE_N]  = {10, 0, 0, -720, 0, 0, 5, 5, 0};
+static const float kTunMax[guition::TUNABLE_N]  = {100, 2000, 2, 840, 100, 100, 20, 20, 1};
 
 static float tunVal(const guition::DashData& d, int i) {
     switch (i) {
@@ -485,6 +503,7 @@ static float tunVal(const guition::DashData& d, int i) {
         case guition::TUN_SOCCRIT:  return d.socCrit;
         case guition::TUN_VLOW:     return d.vLow;
         case guition::TUN_VHIGH:    return d.vHigh;
+        case guition::TUN_FLIP:     return d.displayFlip ? 1 : 0;
     }
     return 0;
 }
@@ -606,6 +625,16 @@ static void displayTask(void*) {
                                     int b = gDisplay.brightness() + dir * 10;
                                     if (b < 10) b = 10; if (b > 100) b = 100;
                                     gDisplay.setBrightness((uint8_t)b);
+                                } else if (gSetSel == guition::TUN_FLIP) {
+                                    // Display-owned 180° flip: + = flipped, - = normal.
+                                    // Applied live (canvas + touch), persisted by the loop.
+                                    bool nf = (dir > 0);
+                                    if (nf != gDisplayFlip) {
+                                        gDisplayFlip = nf;
+                                        gDisplay.setRotation(flipRotation());
+                                        gTouch.setRotation(flipRotation());
+                                        gFlipSaveReq = true;
+                                    }
                                 } else {
                                     // Show the new value instantly; the loop applies
                                     // the real change + NVS on its next cycle.
@@ -661,6 +690,7 @@ static void displayTask(void*) {
             d.bindPage = (uint8_t)gBindPage;        // bindings-list page (display-owned)
             d.menuPage = (uint8_t)gMenuPage;        // source-picker page (display-owned)
             d.diagScreen = (uint8_t)gDiagScreen;    // Diag sub-screen (display-owned)
+            d.displayFlip = gDisplayFlip;           // screen 180° flip (display-owned)
             d.debugCapture = gDebugCapture;         // reflect the toggle instantly (display-owned)
             d.weekHold = wkHold; d.weekHoldFrac = wkFrac;  // Week long-press feedback (display-owned)
             // Optimistic tunable: show the adjusted number now; clear once the loop
@@ -680,15 +710,32 @@ static void displayTask(void*) {
     }
 }
 
+// Screen orientation (device-wide, NVS ns "vicdisp"). false = normal landscape
+// (rotation 1), true = flipped 180° (rotation 3) for an upside-down mount.
+static uint8_t flipRotation() { return gDisplayFlip ? 3 : 1; }
+static void loadDisplayFlip() {
+    Preferences p;
+    p.begin("vicdisp", true);
+    gDisplayFlip = p.getBool("flip", false);
+    p.end();
+}
+static void saveDisplayFlip() {
+    Preferences p;
+    p.begin("vicdisp", false);
+    p.putBool("flip", gDisplayFlip);
+    p.end();
+}
+
 // Bring up the panel + touch + display task (shared by both roles). Seeds the
 // first snapshot for the active role so the task has something to draw.
 void bringUpDisplay() {
-    if (!gDisplay.begin(1 /*landscape 480x320*/)) {
+    loadDisplayFlip();  // restore a saved 180° flip before the panel comes up
+    if (!gDisplay.begin(flipRotation() /*landscape 480x320, 1 or flipped 3*/)) {
         Serial.println("Display init FAILED (PSRAM/panel)");
         return;
     }
     Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
-    gTouch.begin(1);
+    gTouch.begin(flipRotation());
     gDashMux = xSemaphoreCreateMutex();
     if (gRole == ROLE_SLAVE) publishSlaveDash(); else publishDash();  // seed
     // Priority 2 (above the Arduino loop's 1) so touch polling preempts the loop's

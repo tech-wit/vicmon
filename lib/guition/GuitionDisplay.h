@@ -42,6 +42,11 @@ class Display {
   // Present the framebuffer to the panel (pushes the whole frame).
   void flush() { if (canvas_) canvas_->flush(); }
 
+  // Change orientation at runtime (e.g. flip 180°: landscape 1 <-> 3). Re-applies
+  // to the canvas and clears it; the next flush() presents the new orientation.
+  // Only same-parity swaps (1<->3, 0<->2) keep the logical dimensions.
+  void setRotation(uint8_t rotation);
+
   // Logical dimensions after rotation.
   int16_t width()  const { return canvas_ ? canvas_->width()  : PANEL_W; }
   int16_t height() const { return canvas_ ? canvas_->height() : PANEL_H; }

@@ -9,7 +9,7 @@ namespace guition {
 
 // ---------------------------------------------------------------- tab bar ----
 static void renderTabs(Arduino_GFX* c, Page page) {
-  static const char* names[PAGE_COUNT] = {"Dash", "Flow", "Graph", "Week", "Set"};
+  static const char* names[PAGE_COUNT] = {"Dash", "Mimic", "Graph", "Week", "Settings"};
   c->fillRect(0, TAB_Y, W, TAB_H, kBg);
   c->drawFastHLine(0, TAB_Y, W, kGrey);
   for (int i = 0; i < PAGE_COUNT; ++i) {

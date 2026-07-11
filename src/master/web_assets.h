@@ -254,7 +254,7 @@ static const char kStatsPage[] = R"HTML(
 <div class=card>
  <div class=erow>
   <div><h3 style="margin:0 0 .15em">Energy</h3><div id=daynote class=muted style="font-size:.82em">--</div></div>
-  <div style="display:flex;gap:.35em;align-items:center;flex-wrap:wrap">
+  <div id=clockset style="display:flex;gap:.35em;align-items:center;flex-wrap:wrap">
    <input id=th type=number min=1 max=12 placeholder=h style="width:3.4em;text-align:center">
    <span style="color:var(--muted)">:</span>
    <input id=tm type=number min=0 max=59 placeholder=m style="width:3.4em;text-align:center">
@@ -291,6 +291,7 @@ function meters(){document.getElementById('meters').innerHTML=SC.map(function(sc
   '<form method=post action=/stats/reset onsubmit="return rst(\''+k+'\')"><input type=hidden name=scope value='+k+'>'+
   '<button class=ghost>Reset</button></form></div></div>';}).join('');}
 function render(){if(!data)return;
+ var cs=document.getElementById('clockset');if(cs)cs.style.display=data.clock_ro?'none':'';
  SC.forEach(function(sc){var k=sc[0],b=data[k];if(!b)return;
   set('in_'+k,'+'+ah(b.charged_ah)+'<small>Ah</small>');
   set('out_'+k,'&minus;'+ah(b.discharged_ah)+'<small>Ah</small>');
