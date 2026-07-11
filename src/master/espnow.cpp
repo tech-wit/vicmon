@@ -168,6 +168,7 @@ void sendStatsFrame() {
     fillStatsHeader(f);
     f.masterId = gMasterId;
     f.clockOk = currentLocalEpoch() != 0 ? 1 : 0;
+    f.dayNow = gStats.bucket(stats::TODAY).dayStamp;  // current day key (axis labels)
     fillMeter(f.today, gStats.bucket(stats::TODAY));
     fillMeter(f.trip,  gStats.bucket(stats::TRIP));
     fillMeter(f.total, gStats.bucket(stats::TOTAL));

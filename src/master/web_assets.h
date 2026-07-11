@@ -299,8 +299,8 @@ function lbl(d){if(d.now)return 'now';if(d.empty)return '';var s=''+d.stamp;retu
 function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getContext)return;
  var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=32,padR=8,padT=8,padB=18;
  ctx.clearRect(0,0,W,H);
- var real=(data&&data.days)?data.days.slice(-6):[];
- var days=[];for(var pi=real.length;pi<6;pi++)days.push({empty:1});   // always a 7-wide frame
+ var real=(data&&data.days)?data.days.slice(-6):[],rd=(data&&data.run_day)||1;
+ var days=[];for(var pi=real.length;pi<6;pi++)days.push({empty:1,idx:rd-(6-days.length)}); // 7-wide frame
  real.forEach(function(d){days.push({stamp:d.stamp,s:d.solar_ah,d:d.dcdc_ah,c:d.charger_ah,o:d.load_ah});});
  if(data&&data.today){var t=data.today;days.push({now:1,s:t.solar_ah,d:t.dcdc_ah,c:t.charger_ah,o:t.discharged_ah});}else days.push({empty:1});
  var em=document.getElementById('dayEmpty');

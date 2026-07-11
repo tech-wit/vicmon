@@ -185,6 +185,7 @@ static void collectDash(guition::DashData& d) {
     fillM(d.statToday, gStats.bucket(stats::TODAY));
     fillM(d.statTrip,  gStats.bucket(stats::TRIP));
     fillM(d.statTotal, gStats.bucket(stats::TOTAL));
+    d.dayNow = gStats.bucket(stats::TODAY).dayStamp;  // current day key (axis labels)
     d.clockOk = (currentLocalEpoch() != 0);
     int dc = (int)gStats.dayCount();
     int start = dc > guition::DashData::DAYS_N ? dc - guition::DashData::DAYS_N : 0;
@@ -345,6 +346,7 @@ static void collectSlaveDash(guition::DashData& d) {
             m.durSecs = w.durSecs;
         };
         fillM(d.statToday, f.today); fillM(d.statTrip, f.trip); fillM(d.statTotal, f.total);
+        d.dayNow = f.dayNow;
         int n = f.dayCount > guition::DashData::DAYS_N ? guition::DashData::DAYS_N : f.dayCount;
         for (int i = 0; i < n; ++i) {
             d.dayStamp[i] = f.dayStamp[i];
@@ -355,7 +357,7 @@ static void collectSlaveDash(guition::DashData& d) {
         }
         d.dayCount = n;
     } else {
-        d.dayCount = 0; d.clockOk = false;
+        d.dayCount = 0; d.clockOk = false; d.dayNow = 0;
         d.statToday = d.statTrip = d.statTotal = guition::DashData::StatMeter{};
     }
 

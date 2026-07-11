@@ -86,6 +86,7 @@ static void meterCard(Arduino_GFX* c, int x, int y, int w, int h, const char* ti
 void renderDays(Arduino_GFX* c, const DashData& d) {
   char b[28];
   gtext(c, &FreeSansBold18pt7b, 12, 26, "Energy", kText);
+  gtext(c, &FreeSans9pt7b, W - 8, 24, "hold = reset", kMuted, R);  // hint above the cards
 
   // ---- Right rail: three resettable meters ----
   const int gap = 8, ch = (WK_BOT - WK_TOP - 2 * gap) / 3;
@@ -161,12 +162,18 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
       }
       if (out > 0) { int yo = yOf(out); c->fillRect(xo, yo, bw, base - yo, kSerLoad); }
     }
-    // label: "now", a date MM/DD (clocked) or the run-day index; blank if empty
+    // Bottom axis label: "now"; a date MM/DD (clocked) or the run-day index for a
+    // real day; and for empty run-day slots, the projected index (dayNow counts
+    // back one per slot) so the axis reads as a run of days even before history.
     if (now) snprintf(b, sizeof(b), "now");
-    else if (empty) b[0] = '\0';
-    else if (d.clockOk && d.dayStamp[di] >= kYmdMin)
+    else if (!empty && d.clockOk && d.dayStamp[di] >= kYmdMin)
       snprintf(b, sizeof(b), "%u/%u", (d.dayStamp[di] / 100) % 100, d.dayStamp[di] % 100);
-    else snprintf(b, sizeof(b), "%u", d.dayStamp[di]);
+    else if (!empty) snprintf(b, sizeof(b), "%u", d.dayStamp[di]);
+    else {  // empty slot
+      int idx = (int)d.dayNow - (NSLOT - 1 - col);
+      if (!d.clockOk && d.dayNow < kYmdMin && idx >= 1) snprintf(b, sizeof(b), "%d", idx);
+      else b[0] = '\0';
+    }
     if (b[0]) gtext(c, &FreeSans9pt7b, ccx, base + 16, b, now ? kText : kMuted, C);
   }
 }

@@ -115,6 +115,7 @@ struct StatsFrame {
     uint32_t masterId;    // filter to our paired master
     uint8_t dayCount;     // number of valid past-day entries (0..7)
     uint8_t pad_[3];
+    uint32_t dayNow;      // current day key (run-index or yyyymmdd) for axis labels
     StatMeterW today, trip, total;                                       // resettable meters
     uint16_t daySolarAh[7], dayDcdcAh[7], dayChargerAh[7], dayLoadAh[7]; // whole Ah per day
     uint32_t dayStamp[7]; // yyyymmdd (clocked) or run-day index per past-day entry
