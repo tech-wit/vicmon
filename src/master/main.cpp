@@ -935,7 +935,13 @@ static void slaveLoop() {
     gRx.poll();
     serviceRole();  // "Switch to Master" (reboots)
     serviceOta();   // firmware clone push/receive state machine
-    if (gOta.busy()) return;  // dedicate the loop to the transfer
+    if (gOta.busy()) {  // dedicate the loop to the transfer
+#ifdef VICMON_DISPLAY
+        static uint32_t lastOtaPub = 0;  // still refresh the LCD so progress animates
+        if (gDisplayOk && millis() - lastOtaPub > 200) { lastOtaPub = millis(); serviceDashRequests(); publishSlaveDash(); }
+#endif
+        return;
+    }
 
     // Live trend ALWAYS runs, so the Graph populates from now immediately and is
     // never blocked on the backlog pull (a slow/stuck pull can't stall it). The
@@ -1115,7 +1121,13 @@ void loop() {
     serviceMasterSerial();  // `pair` / `role` console commands
     serviceRole();          // consume a serial/web role-toggle on headless masters
     serviceOta();           // firmware clone push/receive state machine
-    if (gOta.busy()) return; // dedicate the loop to the transfer (skip the ~2s BLE scan)
+    if (gOta.busy()) {      // dedicate the loop to the transfer (skip the ~2s BLE scan)
+#ifdef VICMON_DISPLAY
+        static uint32_t lastOtaPub = 0;  // still refresh the LCD so progress animates
+        if (gDisplayOk && millis() - lastOtaPub > 200) { lastOtaPub = millis(); serviceDashRequests(); publishDash(); }
+#endif
+        return;
+    }
 
 #ifndef GUITION_MINSYS
     gDns.processNextRequest();

@@ -224,6 +224,7 @@ static constexpr int DCTL_Y = 52, DCTL_H = 42, DCTL_X = 8, DCTL_W = W - 16;
 static constexpr int DROLE_BTN_Y = 116, DROLE_BTN_H = 46;
 static constexpr int DRESTART_Y = 248, DRESTART_H = 30;  // Diag menu: bottom Restart button
 static constexpr int DLINK_UNPAIR_Y = 196;  // slave Link screen: Unpair button
+static constexpr int DFW_PUSH_Y = 132, DFW_PULL_Y = 184, DFW_BTN_H = 44;  // Firmware screen buttons
 
 static void diagBtn(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
                     uint16_t bg, uint16_t fg) {
@@ -233,22 +234,25 @@ static void diagBtn(Arduino_GFX* c, int x, int y, int w, int h, const char* labe
 
 // Menu structure — role-dependent. Master: Monitored/Discovered/Debug/Role.
 // Slave (no BLE): Link/Role. render + hit-test share this ordering.
-static int diagMenuCount(int role) { return role == 1 ? 2 : 4; }
+// Master: Monitored/Discovered/Debug/Firmware/Role. Slave (no BLE): Link/Firmware/Role.
+static int diagMenuCount(int role) { return role == 1 ? 3 : 5; }
 static DiagAction diagMenuAction(int role, int i) {
-  if (role == 1) return i == 0 ? DIAG_OPEN_LINK : DIAG_OPEN_ROLE;
+  if (role == 1) { return i == 0 ? DIAG_OPEN_LINK : (i == 1 ? DIAG_OPEN_FW : DIAG_OPEN_ROLE); }
   switch (i) {
     case 0:  return DIAG_OPEN_MON;
     case 1:  return DIAG_OPEN_DISC;
     case 2:  return DIAG_OPEN_DEBUG;
+    case 3:  return DIAG_OPEN_FW;
     default: return DIAG_OPEN_ROLE;
   }
 }
 static void diagMenuLabel(const DashData& d, int i, char* out, size_t n) {
-  if (d.role == 1) { snprintf(out, n, i == 0 ? "Link status" : "Switch to Master"); return; }
+  if (d.role == 1) { snprintf(out, n, i == 0 ? "Link status" : (i == 1 ? "Firmware" : "Switch to Master")); return; }
   switch (i) {
     case 0:  snprintf(out, n, "Monitored (%d)", d.monCount); break;
     case 1:  snprintf(out, n, "Discovered (%d)", d.discCount); break;
     case 2:  snprintf(out, n, d.debugCapture ? "Debug capture: ON" : "Debug capture: OFF"); break;
+    case 3:  snprintf(out, n, "Firmware"); break;
     default: snprintf(out, n, "Switch to Slave"); break;
   }
 }
@@ -361,6 +365,25 @@ static void renderDiagLink(Arduino_GFX* c, const DashData& d) {  // slave role
   diagBack(c);
 }
 
+// Firmware clone (OTA) screen — push our image to the paired device, or pull a
+// newer image from it. Reachable in either role.
+static void renderDiagFw(Arduino_GFX* c, const DashData& d) {
+  char buf[64];
+  gtext(c, &FreeSansBold18pt7b, 12, 28, "Firmware", kText);
+  snprintf(buf, sizeof(buf), "Version %s", d.version[0] ? d.version : "--");
+  gtext(c, &FreeSansBold12pt7b, 12, 62, buf, kText);
+  if (d.otaStatus[0]) {
+    if (d.otaBusy) snprintf(buf, sizeof(buf), "%s %u%%", d.otaStatus, d.otaPct);
+    else           snprintf(buf, sizeof(buf), "%s", d.otaStatus);
+    gtext(c, &FreeSans9pt7b, 12, 94, buf, d.otaBusy ? kBlue : kMuted);
+  } else {
+    gtext(c, &FreeSans9pt7b, 12, 94, "Clone firmware over the wireless link.", kMuted);
+  }
+  diagBtn(c, DCTL_X, DFW_PUSH_Y, DCTL_W, DFW_BTN_H, "Send to paired device", kBlue, kBg);
+  diagBtn(c, DCTL_X, DFW_PULL_Y, DCTL_W, DFW_BTN_H, "Update from paired device", kGrey, kText);
+  diagBack(c);
+}
+
 static void renderDiag(Arduino_GFX* c, const DashData& d) {
   switch (d.diagScreen) {
     case DS_MON:   renderDiagMon(c, d); break;
@@ -368,6 +391,7 @@ static void renderDiag(Arduino_GFX* c, const DashData& d) {
     case DS_DEBUG: renderDiagDebug(c, d); break;
     case DS_ROLE:  renderDiagRole(c, d); break;
     case DS_LINK:  renderDiagLink(c, d); break;
+    case DS_FW:    renderDiagFw(c, d); break;
     default:       renderDiagMenu(c, d); break;
   }
 }
@@ -391,6 +415,10 @@ int diagHit(int x, int y, int role, int screen) {
   if (screen == DS_LINK && y >= DLINK_UNPAIR_Y && y < DLINK_UNPAIR_Y + DBACK_H &&
       x >= DCTL_X && x < DCTL_X + DCTL_W)
     return DIAG_UNPAIR;
+  if (screen == DS_FW && x >= DCTL_X && x < DCTL_X + DCTL_W) {
+    if (y >= DFW_PUSH_Y && y < DFW_PUSH_Y + DFW_BTN_H) return DIAG_OTA_PUSH;
+    if (y >= DFW_PULL_Y && y < DFW_PULL_Y + DFW_BTN_H) return DIAG_OTA_PULL;
+  }
   return DIAG_NONE;
 }
 

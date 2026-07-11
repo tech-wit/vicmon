@@ -126,6 +126,9 @@ struct DashData {
   uint16_t snapSeq = 0;            // master: last broadcast sequence number
   bool     pairing = false;        // pairing window (master) / adopt window (slave) open
   int      pairSecLeft = 0;        // seconds left in that window
+  char     otaStatus[48] = "";     // firmware-clone (OTA) status line
+  uint8_t  otaPct = 0;             // OTA transfer progress 0..100
+  bool     otaBusy = false;        // OTA transfer engaged
   bool     linkLive = false;       // slave: receiving frames from our master
   bool     linkStale = false;      // slave: link dropped but showing last-known values
   uint32_t linkDrops = 0;          // slave: sequence gaps observed
@@ -185,12 +188,12 @@ int settingsViewHit(int tx, int ty);
 // The Diagnostics sub-view is a small menu of screens. Screen ids (DashData.
 // diagScreen) and the actions a tap can produce.
 enum DiagScreen : uint8_t {
-  DS_MENU = 0, DS_MON, DS_DISC, DS_DEBUG, DS_ROLE, DS_LINK
+  DS_MENU = 0, DS_MON, DS_DISC, DS_DEBUG, DS_ROLE, DS_LINK, DS_FW
 };
 enum DiagAction : uint8_t {
   DIAG_NONE = 0, DIAG_BACK,
-  DIAG_OPEN_MON, DIAG_OPEN_DISC, DIAG_OPEN_DEBUG, DIAG_OPEN_ROLE, DIAG_OPEN_LINK,
-  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR, DIAG_RESTART
+  DIAG_OPEN_MON, DIAG_OPEN_DISC, DIAG_OPEN_DEBUG, DIAG_OPEN_ROLE, DIAG_OPEN_LINK, DIAG_OPEN_FW,
+  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR, DIAG_RESTART, DIAG_OTA_PUSH, DIAG_OTA_PULL
 };
 
 // Hit-test the Diagnostics sub-view given the current screen + role. Returns a

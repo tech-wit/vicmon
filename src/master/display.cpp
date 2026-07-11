@@ -28,6 +28,8 @@ static volatile int gSetAdjSteps = 0;    // accumulated signed steps to apply
 static volatile int gBindSetRole = -1;   // request: bind this role...
 static volatile int gBindSetIdx = -1;    // ...to this shared source index
 static volatile bool gPairReq = false;   // request: open the master pairing window
+static volatile bool gOtaPushReq = false;// request: start an OTA firmware push (from the LCD)
+static volatile bool gOtaPullReq = false;// request: start an OTA firmware pull (from the LCD)
 static volatile int gStatResetReq = -1;  // request: reset stats scope (0 today/1 trip/2 total)
 static int gSetSel = 0;                  // display-local: selected tunable row
 static int gSetView = 0;                 // display-local: Settings sub-view (0 tune, 1 bind)
@@ -178,6 +180,14 @@ static void collectHistory(guition::DashData& d) {
     d.histCount = out;
 }
 
+// Firmware-clone (OTA) status into DashData for the Diag > Firmware screen.
+static void fillOtaDash(guition::DashData& d) {
+    strncpy(d.otaStatus, gOta.statusText(), sizeof(d.otaStatus) - 1);
+    d.otaStatus[sizeof(d.otaStatus) - 1] = '\0';
+    d.otaPct = gOta.percent();
+    d.otaBusy = gOta.busy();
+}
+
 static void collectDash(guition::DashData& d) {
     uint32_t now = millis();
     PanelModel p = collectPanel(now);
@@ -248,6 +258,7 @@ static void collectDash(guition::DashData& d) {
     d.freeHeapKb = ESP.getFreeHeap() / 1024;
     strncpy(d.version, kFwVersion, sizeof(d.version) - 1);
     d.version[sizeof(d.version) - 1] = '\0';
+    fillOtaDash(d);
     d.battCapAh = gBattCapacity;
     d.deadbandA = gDeadband;
     d.tzMin = gTzOffsetMin;
@@ -415,6 +426,7 @@ static void collectSlaveDash(guition::DashData& d) {
     d.freeHeapKb = ESP.getFreeHeap() / 1024;
     d.tzMin = gTzOffsetMin;
     strncpy(d.version, kFwVersion, sizeof(d.version) - 1); d.version[sizeof(d.version) - 1] = '\0';
+    fillOtaDash(d);
 }
 
 void publishSlaveDash() {
@@ -490,6 +502,14 @@ void serviceDashRequests() {
         gPairReq = false;
         startPairing();
         Serial.printf("[display] pairing window open %ds\n", pairSecsLeft());
+    }
+    if (gOtaPushReq) {  // firmware clone triggered from the LCD (does flash reads on the loop)
+        gOtaPushReq = false;
+        gOta.startPush();
+    }
+    if (gOtaPullReq) {
+        gOtaPullReq = false;
+        gOta.startPull();
     }
     if (gFlipSaveReq) {
         gFlipSaveReq = false;
@@ -621,7 +641,10 @@ static void displayTask(void*) {
                             case guition::DIAG_OPEN_DEBUG: gDiagScreen = guition::DS_DEBUG; redraw = true; break;
                             case guition::DIAG_OPEN_ROLE:  gDiagScreen = guition::DS_ROLE;  redraw = true; break;
                             case guition::DIAG_OPEN_LINK:  gDiagScreen = guition::DS_LINK;  redraw = true; break;
+                            case guition::DIAG_OPEN_FW:    gDiagScreen = guition::DS_FW;    redraw = true; break;
                             case guition::DIAG_BACK:       gDiagScreen = guition::DS_MENU;  redraw = true; break;
+                            case guition::DIAG_OTA_PUSH:   gOtaPushReq = true; redraw = true; break;
+                            case guition::DIAG_OTA_PULL:   gOtaPullReq = true; redraw = true; break;
                             case guition::DIAG_DEBUG_TOGGLE: gDebugCapture = !gDebugCapture; redraw = true; break;
                             case guition::DIAG_ROLE_TOGGLE: gRoleReq = true; break;
                             case guition::DIAG_RESTART: gRebootReq = true; break;  // loop applies (serviceRole)
