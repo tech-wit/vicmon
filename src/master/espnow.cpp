@@ -256,7 +256,9 @@ void serviceHistSend() {
         if (gHistPeerAdded) { gHistSending = true; gHistRing = 0; gHistOffset = 0; }
     }
     if (!gHistSending) return;
-    const int kBatch = 8;  // chunks per 250ms tick (queue usually fills after ~4)
+    static uint8_t tick = 0;
+    if (++tick & 1) return;  // pace: send on every other 250ms tick (gentler = less loss)
+    const int kBatch = 6;  // chunks per send (queue usually fills after ~4)
     for (int i = 0; i < kBatch; ++i) {
         const HistRing& r = (gHistRing == 0) ? gFine : gCoarse;
         if (gHistOffset >= (uint16_t)r.count) {  // this ring done

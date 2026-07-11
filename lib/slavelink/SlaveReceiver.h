@@ -109,6 +109,7 @@ class Receiver {
     histReady_ = false;
     histActive_ = true;
     histAttempts_ = 0;
+    lastChunkMs_ = 0;
     sendHistReq();
   }
 
@@ -191,6 +192,7 @@ class Receiver {
     if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
     memcpy(&dst[c.offset], c.pts, c.count * sizeof(HistPointW));
     got[c.offset / kHistChunkPts] = 1;
+    lastChunkMs_ = millis();
     recomputeHistReady();
   }
 
@@ -249,11 +251,15 @@ class Receiver {
     p.ifidx = manageWifi_ ? WIFI_IF_STA : WIFI_IF_AP;
     if (esp_now_add_peer(&p) == ESP_OK) histPeerAdded_ = true;
   }
-  // Re-send the request if the pull stalls (a lost chunk); the master restarts
-  // from offset 0 and our bitmap backfills only the gaps. Give up after a few.
+  // Resilient, resumable pull: re-send the request whenever progress stalls — a
+  // lost request (no chunk at all) is nudged quickly, a mid-transfer stall a bit
+  // slower. The master restarts from offset 0 but our per-chunk bitmap keeps all
+  // prior progress, so each pass only backfills the gaps and it always converges.
   void serviceHistory() {
     if (!histActive_ || histReady_) return;
-    if (millis() - lastHistReqMs_ < kHistRetryMs) return;
+    uint32_t idle = millis() - (lastChunkMs_ ? lastChunkMs_ : lastHistReqMs_);
+    uint32_t timeout = lastChunkMs_ ? kHistStallMs : kHistReqLostMs;
+    if (idle < timeout) return;
     if (histAttempts_ >= kHistMaxAttempts) { histActive_ = false; return; }
     ++histAttempts_;
     sendHistReq();
@@ -315,8 +321,9 @@ class Receiver {
   // Graph history pull (staging buffers + per-chunk received bitmaps).
   static const uint16_t kFineChunks = (kHistFineMax + kHistChunkPts - 1) / kHistChunkPts;
   static const uint16_t kCoarseChunks = (kHistCoarseMax + kHistChunkPts - 1) / kHistChunkPts;
-  static const uint32_t kHistRetryMs = 15000;   // > one paced pass (~10s); re-request fills gaps
-  static const uint8_t kHistMaxAttempts = 4;
+  static const uint32_t kHistReqLostMs = 4000;  // no chunk yet -> request likely lost, resend
+  static const uint32_t kHistStallMs = 8000;    // mid-transfer stall -> nudge a resend
+  static const uint8_t kHistMaxAttempts = 20;   // plenty of passes; each backfills gaps
   HistPointW fineStage_[kHistFineMax];
   HistPointW coarseStage_[kHistCoarseMax];
   uint8_t fineGot_[kFineChunks] = {0};
@@ -326,6 +333,7 @@ class Receiver {
   volatile bool histReady_ = false;
   uint8_t histAttempts_ = 0;
   uint32_t lastHistReqMs_ = 0;
+  volatile uint32_t lastChunkMs_ = 0;  // last chunk arrival (drives the resilient retry)
   uint8_t masterMac_[6] = {0};
   volatile bool haveMasterMac_ = false;
   bool histPeerAdded_ = false;

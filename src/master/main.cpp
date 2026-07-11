@@ -889,25 +889,26 @@ static void slaveLoop() {
     gRx.poll();
     serviceRole();  // "Switch to Master" (reboots)
 
-    // Graph history: pull the master's rings once the link is live + settled, then
-    // trend from live frames. While the pull is in flight, render whatever's been
-    // staged so far (it fills in progressively); live sampling pauses meanwhile.
+    // Live trend ALWAYS runs, so the Graph populates from now immediately and is
+    // never blocked on the backlog pull (a slow/stuck pull can't stall it). The
+    // pull fetches the older history in the background and splices it in when it
+    // completes.
+    sampleSlaveHistory();
+
     static bool gHistApplied = false;
     static uint32_t gLiveSince = 0;
-    if (gRx.histActive()) {
-        applyPulledHistory();  // progressive: staged points, gaps fill as chunks land
-    } else if (gRx.historyReady() && !gHistApplied) {
-        applyPulledHistory();
-        gHistApplied = true;
-        Serial.printf("[slave] graph history synced: %u fine + %u coarse pts\n",
-                      gRx.fineCount(), gRx.coarseCount());
-    } else {
-        sampleSlaveHistory();  // normal live trend (before the request / after sync)
-    }
     if (gRx.live() && gRx.haveMasterMac()) {
         if (gLiveSince == 0) gLiveSince = millis();
-        if (!gHistApplied && !gRx.histActive() && !gRx.historyReady() && millis() - gLiveSince > 3000)
+        // Wait until the link has been solidly live for a few seconds (first
+        // status packets in + channel/peer settled) before asking for the backlog.
+        if (!gHistApplied && !gRx.histActive() && !gRx.historyReady() && millis() - gLiveSince > 5000)
             gRx.requestHistory();
+        if (gRx.historyReady() && !gHistApplied) {
+            applyPulledHistory();  // splice in the older history in one step
+            gHistApplied = true;
+            Serial.printf("[slave] graph backlog loaded: %u fine + %u coarse pts\n",
+                          gRx.fineCount(), gRx.coarseCount());
+        }
     } else {
         gLiveSince = 0;
     }

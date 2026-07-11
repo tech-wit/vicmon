@@ -89,22 +89,26 @@ void renderGraph(Arduino_GFX* c, const DashData& d) {
     gtext(c, &FreeSans9pt7b, W / 2, 67, "syncing with master...", kAccent, C);
   };
 
-  if (d.histCount < 2) {
-    c->fillRoundRect(8, 44, W - 16, TAB_Y - 52, 10, kCard);
-    gtext(c, &FreeSansBold18pt7b, W / 2, 150, "Collecting data...", kMuted, C);
-    gtext(c, &FreeSans9pt7b, W / 2, 178, "trend appears after a minute", kMuted, C);
-    drawSync();
-    return;
-  }
   const int n = d.histCount;
 
   // Plot card + interior data area (left gutter = Amps labels, right = % labels,
-  // bottom band = time labels).
+  // bottom band = time labels). Always drawn — even empty — so the graph just
+  // populates as points arrive rather than showing a "collecting" placeholder.
   const int LX = 30, RX = 28, BAND = 16;
   const int cardX = LX, cardY = 42, cardW = W - 8 - LX, cardH = 202;
   const int dX = cardX + 4, dW = cardW - 4 - RX;
   const int dY = cardY + 4, dH = cardH - 4 - BAND;
   c->fillRoundRect(cardX, cardY, cardW, cardH, 8, kCard);
+
+  if (n < 2) {  // empty frame — bare gridlines, no message; fills in as data arrives
+    for (int gi = 0; gi <= 4; ++gi) {
+      int y = dY + dH - 1 - (int)lroundf((float)gi / 4 * (dH - 1));
+      c->drawFastHLine(dX, y, dW, kGrey);
+    }
+    gtext(c, &FreeSans9pt7b, dX + dW - 2, cardY + cardH - 5, "now", kMuted, R);
+    drawSync();
+    return;
+  }
 
   // Auto-scale the Amps axis across all five current series; always span zero.
   float mn = 0, mx = 0;
