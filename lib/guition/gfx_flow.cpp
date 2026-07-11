@@ -47,7 +47,7 @@ static void orthoFlow(Arduino_GFX* c, const int16_t pts[][2], int n, bool on, ui
 void renderFlow(Arduino_GFX* c, const DashData& d) {
   char v[28];
   // Top bar in two sections, same as the Dash: dark VICMON block + charge status.
-  const int kBrandW = 118;
+  const int kBrandW = 140;
   c->fillRect(0, 0, kBrandW, 38, kBlack);
   c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
   gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
