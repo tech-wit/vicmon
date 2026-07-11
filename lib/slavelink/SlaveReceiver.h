@@ -315,6 +315,11 @@ class Receiver {
       haveMasterMac_ = false;  // re-learn the new master's MAC before any history pull
       histActive_ = false;     // drop any in-flight/complete pull from the old master
       histReady_ = false;
+      // Drop the ESP-NOW unicast peer for the OLD master, else ensureHistPeer()
+      // (guarded by histPeerAdded_) never registers the NEW master's MAC and every
+      // HistReq esp_now_send fails silently — the history sync stalls until a
+      // reboot clears the flag. masterMac_ still holds the old MAC here.
+      if (histPeerAdded_) { esp_now_del_peer(masterMac_); histPeerAdded_ = false; }
     }
   }
 
