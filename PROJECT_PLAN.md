@@ -12,7 +12,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 1 | BLE advertisement decryption core | ✅ done, verified on hardware |
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
-| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP; LilyGo display driver still TBD |
+| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); LilyGo display driver still TBD |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
 **One app, one codebase (2026-07-08).** `src/master/` is *the* application, and the
@@ -190,9 +190,10 @@ sentinels (energy balance; `bat` = net battery current, `src` = solar + dcdc-out
 - `(charge_only)` = `max(0, bat − src)` — charge not explained by measured sources.
 - `(load_only)` / `(derived)` = `max(0, src − bat)` — load (battery flow offset by sources).
 
-The two derived halves are passed through a **median-of-3 smoother**
-(`updateDerivedSmoothing`, refreshed once per BLE poll) so they don't flicker
-when devices advertise asynchronously; measured device readings stay raw.
+The two derived halves are passed through a **min-over-4-samples** filter
+(`updateDerivedSmoothing`, refreshed once per BLE poll) — a value only shows once
+every recent sample agrees ("assume zero until stable"), so out-of-step device
+adverts don't flicker charge/load; measured device readings stay raw.
 
 **Profiles (`Profiles.*`).** Up to 4 named profiles, each with independent
 devices, bindings and settings. Switching is immediate: `applyProfile()` reloads
@@ -369,14 +370,12 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   (the new `/diag` page makes confirming it a 5-minute job once one is on hand).
 - **Async advertisement skew** — the derived signals (load/charge from the
   energy balance) momentarily disagree when one contributing device advertises
-  before another. Damped with a median-of-3 smoother on the derived outputs
-  (adds ~2 polls of lag to a genuine change; single-sample glitches are
-  outvoted). Inherent residual skew remains but is no longer visible as flicker.
-- Slave firmware is a stub; ESP-NOW not implemented.
-- Master display: firmware complete + soak-tested, but the touch controls
-  (Settings profile-switch / tunable -/+, Graph zoom pill) are validated by
-  construction, **not yet physically tap-tested** on the panel.
-- Display brightness is not persisted across reboots (resets to 100%).
+  before another. Damped by a **min-over-4-samples** filter on the derived outputs
+  ("assume zero until every recent sample agrees"), so out-of-step device adverts
+  no longer flicker charge/load. Residual skew remains but isn't visible.
+- Master display + touch: verified on hardware (the Guition ships as the master
+  panel and has been driven live all through Phase 3/4, incl. OTA from the LCD).
+- Display brightness **is** persisted (NVS `vicdisp/bright`) — restored on boot.
 
 ## Phases (remaining)
 
@@ -403,27 +402,21 @@ notes, pins, and gotchas. Summary:
 
 ### Phase 4 — Slaves & ESP-NOW
 
-**Done (hardware-free, builds + host-tested):**
-- **Wire format** `lib/slavelink/SlaveLink.h` — versioned, packed `Snapshot`
-  (~36 B, < 250 B ESP-NOW limit): mode, per-field `valid` bitfield, SoC/V/A,
-  solar/charger/dcdc/load currents, starter V, TTG, worst-alert, active profile,
-  seq + uptime. Fixed-point (deci/centi) encoders. Shared by master, slave, and
-  the native test `test/test_slavelink` (round-trip + size + header/version).
-- **Master broadcaster** (`setupEspNow`/`buildSnapshot`/`sendSlaveBroadcast`) —
-  inits a broadcast peer (`FF:FF:FF:FF:FF:FF`, channel 0 = follow current) and
-  sends the snapshot ~1/s from `loop()`. Connectionless; no pairing; self-healing.
-  Runs on the current AtomS3.
-- **Slave receive core** (`src/slave/main.cpp`) — ESP-NOW receive, **channel-hop
-  acquisition** (sweeps 1–13 until a frame arrives, then locks; resumes sweeping
-  if the link goes stale → immune to the AP channel moving when the master joins
-  a router), sequence-gap counting, 5 s staleness, and a serial render. Builds
-  for the `slave` env (LVGL/TFT deps deferred to the board profile).
+**Done + hardware-verified** — see the full **"ESP-NOW master ↔ slave (Phase 4,
+verified)"** section near the top of this doc for the detail. In short: versioned
+packed wire format (`lib/slavelink/SlaveLink.h`, Snapshot v5 + StatsFrame +
+HistReq/HistChunk + the OTA quartet), a 250 ms timer broadcaster, a shared receiver
+with pairing/filtering/acquisition, graph-history sync, the dual-role one-app model,
+the slave config AP + full web app, and the **wireless OTA firmware clone**. The
+former standalone `src/slave` was folded into the master app and deleted; all S3
+boards build the one universal `s3` image. `test/test_slavelink` covers the wire
+format on the host.
 
-**Remaining (needs the LilyGo T-Display-S3):**
-- Replace `renderToSerial()` with the TFT/LVGL screen (big SoC, signed current,
-  mode-coloured banner, sources, "disconnected" state).
-- Optional HTTP poll fallback against `/api/panel`; on-screen link status.
-- End-to-end channel-coexistence test with the real board.
+**Remaining (needs the LilyGo T-Display-S3 on the bench):**
+- **LilyGo display + button-nav driver (P3):** an ST7789 320×170 `IDisplay` +
+  two-button `IInput` implementation (the dashboard/render layer is already display-
+  agnostic behind `DashData`; `BOARD_LILYGO` currently builds headless). Hardware-
+  blocked — everything else in Phase 4 is done.
 
 ### Phase 5 — Vehicle integration (+ optional GATT)
 - Mounting, 12/24V→5V supply, vibration test, final polish.
