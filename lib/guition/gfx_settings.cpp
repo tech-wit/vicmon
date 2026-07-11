@@ -224,7 +224,10 @@ static constexpr int DCTL_Y = 52, DCTL_H = 42, DCTL_X = 8, DCTL_W = W - 16;
 static constexpr int DROLE_BTN_Y = 116, DROLE_BTN_H = 46;
 static constexpr int DRESTART_Y = 248, DRESTART_H = 30;  // Diag menu: bottom Restart button
 static constexpr int DLINK_UNPAIR_Y = 196;  // slave Link screen: Unpair button
-static constexpr int DFW_PUSH_Y = 132, DFW_PULL_Y = 184, DFW_BTN_H = 44;  // Firmware screen buttons
+// Firmware screen: two side-by-side action buttons.
+static constexpr int DFW_BTN_Y = 64, DFW_BTN_H = 46, DFW_GAP = 10;
+static constexpr int DFW_BTN_W = (DCTL_W - DFW_GAP) / 2;
+static constexpr int DFW_R_X = DCTL_X + DFW_BTN_W + DFW_GAP;  // right button x
 
 static void diagBtn(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
                     uint16_t bg, uint16_t fg) {
@@ -370,25 +373,26 @@ static void renderDiagLink(Arduino_GFX* c, const DashData& d) {  // slave role
 static void renderDiagFw(Arduino_GFX* c, const DashData& d) {
   char buf[64];
   gtext(c, &FreeSansBold18pt7b, 12, 28, "Firmware", kText);
-  // This unit's version + the paired device's (from the version beacon).
-  snprintf(buf, sizeof(buf), "This unit: %s", d.version[0] ? d.version : "--");
-  gtext(c, &FreeSansBold12pt7b, 12, 58, buf, kText);
-  if (d.otaPeerKnown) {
-    uint16_t rc = !strcmp(d.otaPeerRel, "newer") ? kGreen
-                : (!strcmp(d.otaPeerRel, "older") ? kAmber : kMuted);
-    gtext(c, &FreeSansBold12pt7b, 12, 84, "Paired:", kText, L);
-    snprintf(buf, sizeof(buf), "%s (%s)", d.otaPeerVer[0] ? d.otaPeerVer : "?", d.otaPeerRel);
-    gtext(c, &FreeSansBold12pt7b, 92, 84, buf, rc, L);
-  } else {
-    gtext(c, &FreeSans9pt7b, 12, 84, "Paired: not heard yet", kMuted);
-  }
+  // Two actions, side by side.
+  diagBtn(c, DCTL_X, DFW_BTN_Y, DFW_BTN_W, DFW_BTN_H, "Send to peer", kBlue, kBg);
+  diagBtn(c, DFW_R_X, DFW_BTN_Y, DFW_BTN_W, DFW_BTN_H, "Get from peer", kGrey, kText);
+  // Transfer status (when active).
+  int y = DFW_BTN_Y + DFW_BTN_H + 30;
   if (d.otaStatus[0]) {
     if (d.otaBusy) snprintf(buf, sizeof(buf), "%s %u%%", d.otaStatus, d.otaPct);
     else           snprintf(buf, sizeof(buf), "%s", d.otaStatus);
-    gtext(c, &FreeSans9pt7b, 12, 110, buf, d.otaBusy ? kBlue : kMuted);
+    gtext(c, &FreeSans9pt7b, 12, y, buf, d.otaBusy ? kBlue : kMuted);
   }
-  diagBtn(c, DCTL_X, DFW_PUSH_Y, DCTL_W, DFW_BTN_H, "Send to paired device", kBlue, kBg);
-  diagBtn(c, DCTL_X, DFW_PULL_Y, DCTL_W, DFW_BTN_H, "Update from paired device", kGrey, kText);
+  // Versions — lower on the screen, consistent non-bold text.
+  y += 30;
+  snprintf(buf, sizeof(buf), "This unit: %s", d.version[0] ? d.version : "--");
+  gtext(c, &FreeSans9pt7b, 12, y, buf, kText);
+  y += 24;
+  if (d.otaPeerKnown)
+    snprintf(buf, sizeof(buf), "Paired: %s (%s)", d.otaPeerVer[0] ? d.otaPeerVer : "?", d.otaPeerRel);
+  else
+    snprintf(buf, sizeof(buf), "Paired: not heard yet");
+  gtext(c, &FreeSans9pt7b, 12, y, buf, kText);
   diagBack(c);
 }
 
@@ -423,9 +427,9 @@ int diagHit(int x, int y, int role, int screen) {
   if (screen == DS_LINK && y >= DLINK_UNPAIR_Y && y < DLINK_UNPAIR_Y + DBACK_H &&
       x >= DCTL_X && x < DCTL_X + DCTL_W)
     return DIAG_UNPAIR;
-  if (screen == DS_FW && x >= DCTL_X && x < DCTL_X + DCTL_W) {
-    if (y >= DFW_PUSH_Y && y < DFW_PUSH_Y + DFW_BTN_H) return DIAG_OTA_PUSH;
-    if (y >= DFW_PULL_Y && y < DFW_PULL_Y + DFW_BTN_H) return DIAG_OTA_PULL;
+  if (screen == DS_FW && y >= DFW_BTN_Y && y < DFW_BTN_Y + DFW_BTN_H) {
+    if (x >= DCTL_X && x < DCTL_X + DFW_BTN_W) return DIAG_OTA_PUSH;
+    if (x >= DFW_R_X && x < DFW_R_X + DFW_BTN_W) return DIAG_OTA_PULL;
   }
   return DIAG_NONE;
 }
