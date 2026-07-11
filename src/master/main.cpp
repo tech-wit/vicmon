@@ -219,26 +219,27 @@ static float measuredSources(uint32_t now) {
     return (sa.valid ? sa.value : 0) + (doa.valid ? doa.value : 0) + (cg.valid ? cg.value : 0);
 }
 
-static float median3(float a, float b, float c) {
-    return a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b));
-}
-
-// Median-of-3 smoother over recent BLE polls, applied to the derived
-// energy-balance signals so they don't flicker for a second or two when one
-// contributing device advertises before another (e.g. the DC-DC drops to 0 a
-// beat before the BMV current refreshes). Measured device readings stay raw.
+// "Assume zero until stable" smoother for the derived energy-balance signals.
+// They can spike for a poll or two when contributing devices advertise out of
+// step (e.g. the DC-DC reads 0 a beat before the BMV current refreshes). Report
+// the MINIMUM over the last few samples: a value only shows once every recent
+// sample agrees it's genuinely present, and a transient spike is pulled to zero.
+// Measured device readings stay raw.
 struct Smoothed {
-    float ring[3] = {0, 0, 0};
+    static const int N = 4;  // recent samples the derived value must agree over
+    float ring[N] = {0};
     int n = 0, pos = 0;
     float value = 0;
     bool valid = false;
     void push(bool v, float x) {
         valid = v;
-        if (!v) return;
+        if (!v) { value = 0; return; }
         ring[pos] = x;
-        pos = (pos + 1) % 3;
-        if (n < 3) ++n;
-        value = (n < 3) ? x : median3(ring[0], ring[1], ring[2]);  // settle before smoothing
+        pos = (pos + 1) % N;
+        if (n < N) ++n;
+        float mn = ring[0];
+        for (int i = 1; i < n; ++i) if (ring[i] < mn) mn = ring[i];
+        value = mn;
     }
 };
 static Smoothed gSmCharge, gSmLoad;
