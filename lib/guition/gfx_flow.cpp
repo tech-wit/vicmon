@@ -8,13 +8,21 @@
 namespace guition {
 
 // ------------------------------------------------------------ flow page ----
-// A small node (rounded rect) with a title and a value.
+// A small node (rounded rect): title, then up to two stacked value lines (e.g.
+// amps on one line, watts on the next) so wide readings never overflow the tile.
+// Pass val2 = nullptr/"" for a single centred value.
 static void node(Arduino_GFX* c, int x, int y, int w, int h, uint16_t accent,
-                 const char* title, const char* value, bool on) {
+                 const char* title, const char* val1, const char* val2, bool on) {
   c->fillRoundRect(x, y, w, h, 8, kCard);
   c->drawRoundRect(x, y, w, h, 8, on ? accent : kGrey);
-  gtext(c, &FreeSans9pt7b, x + w / 2, y + 20, title, on ? accent : kMuted, C);
-  gtext(c, &FreeSans9pt7b, x + w / 2, y + h - 11, value, on ? kText : kMuted, C);
+  gtext(c, &FreeSans9pt7b, x + w / 2, y + 17, title, on ? accent : kMuted, C);
+  uint16_t vc = on ? kText : kMuted;
+  if (val2 && val2[0]) {
+    gtext(c, &FreeSans9pt7b, x + w / 2, y + h - 23, val1, vc, C);
+    gtext(c, &FreeSans9pt7b, x + w / 2, y + h - 8,  val2, vc, C);
+  } else {
+    gtext(c, &FreeSans9pt7b, x + w / 2, y + h - 11, val1, vc, C);
+  }
 }
 
 // A 3px-thick dot, thickness perpendicular to the segment direction.
@@ -84,33 +92,37 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   // per-branch voltage in the adverts). PV-array voltage isn't advertised, so
   // it's not shown.
   const bool bv = d.battValid;
-  if (d.solarValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.solarA, d.solarW);
-  else              snprintf(v, sizeof(v), "--");
-  node(c, sx, sy[0], sw, sh, kGold, "Solar", v, solarOn);
-  if (d.chargerValid && bv) snprintf(v, sizeof(v), "%.1fA %.0fW", d.chargerA, d.chargerA * d.v);
-  else if (d.chargerValid)  snprintf(v, sizeof(v), "%.1fA", d.chargerA);
-  else                      snprintf(v, sizeof(v), "--");
-  node(c, sx, sy[1], sw, sh, kGreen, "Charger", v, chgOn);
-  if (d.dcdcValid && bv) snprintf(v, sizeof(v), "%.1fA %.0fW", d.dcdcOutA, d.dcdcOutA * d.v);
-  else if (d.dcdcValid)  snprintf(v, sizeof(v), "%.1fA", d.dcdcOutA);
-  else                   snprintf(v, sizeof(v), "--");
-  node(c, sx, sy[2], sw, sh, kBlue, "DC-DC", v, dcOn);
+  char w2[12];  // second value line (watts)
+  // Solar W = real PV power; charger/DC-DC W = branch current x battery voltage.
+  if (d.solarValid) { snprintf(v, sizeof(v), "%.1fA", d.solarA); snprintf(w2, sizeof(w2), "%.0fW", d.solarW); }
+  else              { snprintf(v, sizeof(v), "--"); w2[0] = '\0'; }
+  node(c, sx, sy[0], sw, sh, kGold, "Solar", v, w2, solarOn);
+  numOr(v, sizeof(v), d.chargerValid, d.chargerA, 1, "A");
+  if (d.chargerValid && bv) snprintf(w2, sizeof(w2), "%.0fW", d.chargerA * d.v); else w2[0] = '\0';
+  node(c, sx, sy[1], sw, sh, kGreen, "Charger", v, w2, chgOn);
+  numOr(v, sizeof(v), d.dcdcValid, d.dcdcOutA, 1, "A");
+  if (d.dcdcValid && bv) snprintf(w2, sizeof(w2), "%.0fW", d.dcdcOutA * d.v); else w2[0] = '\0';
+  node(c, sx, sy[2], sw, sh, kBlue, "DC-DC", v, w2, dcOn);
 
   // Battery node (bigger).
   c->fillRoundRect(batx, baty, batw, bath, 10, kCard);
   c->drawRoundRect(batx, baty, batw, bath, 10, modeColor(d));
   if (d.battValid) snprintf(v, sizeof(v), "%.0f%%", d.soc); else snprintf(v, sizeof(v), "--%%");
   uint16_t socColor = !d.battValid ? kMuted : (d.soc >= 50 ? kGreen : (d.soc >= 20 ? kAmber : kRed));
-  gtext(c, &FreeSansBold18pt7b, batx + batw / 2, baty + 30, v, socColor, C);
+  gtext(c, &FreeSansBold18pt7b, batx + batw / 2, baty + 28, v, socColor, C);
+  // Stacked readouts: V, then A and W on their own lines, then remaining Ah.
   numOr(v, sizeof(v), d.battValid, d.v, 2, "V");
-  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 52, v, kText, C);
-  if (d.battValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.a, d.v * d.a);  // current + power
-  else             numOr(v, sizeof(v), d.battValid, d.a, 1, "A");
-  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 70, v, d.a >= 0 ? kGreen : kCyan, C);
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 46, v, kText, C);
+  numOr(v, sizeof(v), d.battValid, d.a, 1, "A");
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 62, v, d.a >= 0 ? kGreen : kCyan, C);
+  if (d.battValid) snprintf(v, sizeof(v), "%.0fW", d.v * d.a);
+  else             snprintf(v, sizeof(v), "--W");
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 78, v,
+        d.battValid ? (d.a >= 0 ? kGreen : kCyan) : kMuted, C);
   if (d.battCapAh > 0 && d.battValid)  // remaining / capacity Ah
     snprintf(v, sizeof(v), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
   else snprintf(v, sizeof(v), "-- Ah");
-  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 90, v, kMuted, C);
+  gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 94, v, kMuted, C);
 
   // Bottom row, same FreeSans9pt7b muted treatment as the Dash battery-card
   // footer: TTG on the bottom-left, starter voltage in the bottom-middle.
@@ -120,10 +132,10 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   else                snprintf(v, sizeof(v), "Starter --");
   gtext(c, &FreeSans9pt7b, W / 2, TAB_Y - 10, v, kMuted, C);
 
-  // Load node (amps + watts = load A x battery V).
-  if (d.loadValid && d.battValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.loadA, d.loadA * d.v);
-  else                            numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
-  node(c, lx, ly, lw, lh, kRed, d.loadDerived ? "Load*" : "Load", v, loadOn);
+  // Load node (amps + watts = load A x battery V) on two lines.
+  numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
+  if (d.loadValid && d.battValid) snprintf(w2, sizeof(w2), "%.0fW", d.loadA * d.v); else w2[0] = '\0';
+  node(c, lx, ly, lw, lh, kRed, d.loadDerived ? "Load*" : "Load", v, w2, loadOn);
 }
 
 }  // namespace guition

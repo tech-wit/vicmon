@@ -9,9 +9,12 @@ namespace guition {
 
 // ------------------------------------------------------------ dash page ----
 static void tile(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
-                 uint16_t labelColor, const char* value) {
+                 uint16_t labelColor, const char* value, const char* topRight = nullptr) {
   c->fillRoundRect(x, y, w, h, 6, kCard);
   gtext(c, &FreeSans9pt7b, x + 10, y + 19, label, labelColor);
+  // Optional second reading (e.g. solar watts) on the label row, so it sits on a
+  // separate line from the main value below.
+  if (topRight && topRight[0]) gtext(c, &FreeSans9pt7b, x + w - 10, y + 19, topRight, kMuted, R);
   gtext(c, &FreeSansBold12pt7b, x + w - 10, y + h - 11, value, kText, R);
 }
 
@@ -48,17 +51,17 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
   gtext(c, &FreeSansBold18pt7b, bx + 16, by + 162, buf, kText);
   numOr(buf, sizeof(buf), d.battValid, d.a, 1, "A");
   gtext(c, &FreeSansBold18pt7b, bx + bw - 16, by + 162, buf, d.a >= 0 ? kGreen : kCyan, R);
-  // Battery power (V x A, signed) between the V and A readouts.
-  if (d.battValid) snprintf(buf, sizeof(buf), "%.0fW", d.v * d.a);
-  else             snprintf(buf, sizeof(buf), "--W");
-  gtext(c, &FreeSansBold12pt7b, bx + bw / 2, by + 161, buf,
-        d.battValid ? (d.a >= 0 ? kGreen : kCyan) : kMuted, C);
 
-  // Remaining / capacity Ah (rem = capacity x SoC), matching the AP mimic.
+  // Second row: remaining/capacity Ah on the left (under V), battery power on the
+  // right (under A, V x A signed).
   if (d.battCapAh > 0 && d.battValid) {
     snprintf(buf, sizeof(buf), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
-    gtext(c, &FreeSansBold12pt7b, bx + bw / 2, by + 194, buf, kText, C);
+    gtext(c, &FreeSansBold12pt7b, bx + 16, by + 192, buf, kText, L);
   }
+  if (d.battValid) snprintf(buf, sizeof(buf), "%.0fW", d.v * d.a);
+  else             snprintf(buf, sizeof(buf), "--W");
+  gtext(c, &FreeSansBold12pt7b, bx + bw - 16, by + 192, buf,
+        d.battValid ? (d.a >= 0 ? kGreen : kCyan) : kMuted, R);
 
   ttgLabel(buf, sizeof(buf), d);  // "TTG 2d 4h" / "Full 1d 3h" / "TTG 45m"
   gtext(c, &FreeSans9pt7b, bx + 16, by + bh - 14, buf, kMuted);
@@ -70,14 +73,16 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
   const int tx = 304, tw = 168, th = 52, gap = 6;
   int ty = 44;
   char v[28];
-  if (d.solarValid) snprintf(v, sizeof(v), "%.0fW %.1fA", d.solarW, d.solarA);
-  else              snprintf(v, sizeof(v), "--");
-  tile(c, tx, ty, tw, th, "Solar", kGold, v); ty += th + gap;
+  // Solar: amps as the main value, watts on the label row (separate lines).
+  char sw[12] = "";
+  numOr(v, sizeof(v), d.solarValid, d.solarA, 1, "A");
+  if (d.solarValid) snprintf(sw, sizeof(sw), "%.0fW", d.solarW);
+  tile(c, tx, ty, tw, th, "Solar", kGold, v, sw); ty += th + gap;
   numOr(v, sizeof(v), d.chargerValid, d.chargerA, 1, "A");
   tile(c, tx, ty, tw, th, "Charger", kGreen, v); ty += th + gap;
-  if (d.dcdcValid && d.dcdcInVValid) snprintf(v, sizeof(v), "%.1fA %.0fV", d.dcdcOutA, d.dcdcInV);
-  else if (d.dcdcValid)              snprintf(v, sizeof(v), "%.1fA", d.dcdcOutA);
-  else                               snprintf(v, sizeof(v), "--");
+  // DC-DC: amps only. (Its input voltage is the starter/crank battery, already
+  // shown as "Starter" on the battery card — no need to repeat it here.)
+  numOr(v, sizeof(v), d.dcdcValid, d.dcdcOutA, 1, "A");
   tile(c, tx, ty, tw, th, "DC-DC", kBlue, v); ty += th + gap;
   numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
   tile(c, tx, ty, tw, th, d.loadDerived ? "Load*" : "Load", kRed, v);

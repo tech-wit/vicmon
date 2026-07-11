@@ -142,16 +142,36 @@ static void collectHistory(guition::DashData& d) {
     if (want < 2) { d.histCount = 0; return; }
     int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
     size_t start = (r.head + r.cap - (size_t)want) % r.cap;
+    // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
+    // Nearest-sample aliases — every column jumps as the window slides. Mean is
+    // stable but flattens the transient current spikes that matter most (a 50A load
+    // blip averages down to ~8A). So each column takes the sample of LARGEST
+    // magnitude in its slice, keeping sign: spikes survive, and a bucket's peak only
+    // changes when that extreme sample scrolls across a boundary (stable, not
+    // aliasing). Windows small enough that out==want reduce to 1 sample per bucket.
     for (int k = 0; k < out; ++k) {
-        int src = (out == 1) ? (want - 1) : (int)((long)k * (want - 1) / (out - 1));
-        size_t idx = (start + (size_t)src) % r.cap;
-        const HistSample& s = r.buf[idx];
-        d.histSoc[k]     = s.soc;
-        d.histBatt[k]    = s.battery;
-        d.histSolar[k]   = s.solar;
-        d.histCharger[k] = s.charger;
-        d.histDcdc[k]    = s.dcdc;
-        d.histLoad[k]    = s.load;
+        int lo = (int)((long)k * want / out);
+        int hi = (int)((long)(k + 1) * want / out);
+        if (hi <= lo) hi = lo + 1;
+        if (hi > want) hi = want;
+        int16_t peak[6]; bool has[6] = {false, false, false, false, false, false};
+        for (int si = lo; si < hi; ++si) {
+            const HistSample& s = r.buf[(start + (size_t)si) % r.cap];
+            const int16_t fv[6] = {s.battery, s.solar, s.charger, s.dcdc, s.load, s.soc};
+            for (int f = 0; f < 6; ++f) {
+                if (fv[f] == -32768) continue;
+                int av = fv[f] < 0 ? -fv[f] : fv[f];
+                int pv = peak[f] < 0 ? -peak[f] : peak[f];
+                if (!has[f] || av > pv) { peak[f] = fv[f]; has[f] = true; }
+            }
+        }
+        auto val = [&](int f) -> int16_t { return has[f] ? peak[f] : (int16_t)-32768; };
+        d.histBatt[k]    = val(0);
+        d.histSolar[k]   = val(1);
+        d.histCharger[k] = val(2);
+        d.histDcdc[k]    = val(3);
+        d.histLoad[k]    = val(4);
+        d.histSoc[k]     = val(5);
     }
     d.histCount = out;
 }
@@ -737,8 +757,13 @@ static void saveDisplayFlip() {
 // first snapshot for the active role so the task has something to draw.
 void bringUpDisplay() {
     loadDisplayFlip();  // restore a saved 180° flip before the panel comes up
+    // Universal image: the display driver is compiled in for every S3 board and
+    // used only where the hardware is present. begin() needs PSRAM for the 300KB
+    // framebuffer, so it succeeds only on a real display board (Guition); any other
+    // S3 fails here and runs headless. (psramFound() alone isn't reliable on a
+    // no-PSRAM board — the framebuffer allocation is the true test.)
     if (!gDisplay.begin(flipRotation() /*landscape 480x320, 1 or flipped 3*/)) {
-        Serial.println("Display init FAILED (PSRAM/panel)");
+        Serial.println("[display] no panel/PSRAM — running headless");
         return;
     }
     Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());

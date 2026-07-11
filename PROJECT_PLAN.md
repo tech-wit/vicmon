@@ -15,13 +15,22 @@ development can resume cleanly when the display/slave hardware arrives.
 | 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP; LilyGo display driver still TBD |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
-**One app, one codebase (2026-07-08).** `src/master/` is *the* application: the
-**display driver** is chosen at build time per board (`BOARD_GUITION` = the
-AXS15231B panel; no flag = headless; `BOARD_LILYGO` reserved), and the
+**One app, one codebase (2026-07-08).** `src/master/` is *the* application, and the
 **master/slave role** is chosen at runtime from an NVS flag. Any board can be a
 master (BLE scan + WiFi AP + web + ESP-NOW broadcast) or a slave (ESP-NOW receiver
 + its own config AP), switchable from the screen, the AP web page, or serial. The
 former standalone `src/slave` was folded in and deleted.
+
+**One universal image (`env:s3`).** All ESP32-S3 boards now build from a single
+artifact: the AXS15231B display driver + OPI PSRAM are compiled in and used only
+where the hardware is present. A board with PSRAM brings up the panel; any other S3
+fails the framebuffer allocation and runs headless — the OPI-PSRAM boot init bails
+out gracefully (verified on a no-PSRAM AtomS3). Built on the 8MB partition (fits
+every S3; a 16MB board uses its first 8MB), and NVS (config/keys/pairing) sits at a
+fixed offset shared across partition tables, so it survives re-provisioning. This
+also makes an **ESP-NOW OTA "clone my image to any S3 slave"** path viable — the
+old per-board envs (`master`/`atoms3`/`headless`/`lilygo`) are retired in its
+favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
 
 ### ESP-NOW master ↔ slave (Phase 4, verified)
 
@@ -81,7 +90,7 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 
 | Role | Board | Notes |
 |---|---|---|
-| Dev master (current) | **M5Stack AtomS3 Lite** (ESP32-S3) | Native USB → `/dev/ttyACM0`, more reliable than the WROOM's CP210x. Runs the headless master firmware (`atoms3` env). |
+| Dev master (current) | **M5Stack AtomS3 Lite** (ESP32-S3) | Native USB → `/dev/ttyACM0`, more reliable than the WROOM's CP210x. Runs the universal `s3` image (headless — no PSRAM). |
 | Original dev board | **ESP32 WROOM-32** | Used for Phase-1 bring-up; dropped off USB mid-session (CP210x). `wroom` env still builds the Phase-1 scanner. |
 | Master (ordered) | **Guition JC3248W535** | ESP32-S3, 16MB/8MB PSRAM, 3.5" 320×480 IPS, cap touch. Phase 3. |
 | Slave (ordered) | **LilyGo T-Display-S3** | ESP32-S3, 1.9" 320×170, two buttons. Phase 4. |
@@ -91,7 +100,7 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 
 ```
 vicmon/
-├── platformio.ini          # envs: wroom, atoms3(-sim), master, headless, lilygo, guition, gfxref, lvglref, native
+├── platformio.ini          # envs: s3 (universal S3 image), atoms3-sim, guition, gfxref, lvglref, wroom, native
 ├── README.md               # usage / quick start
 ├── PROJECT_SPEC.md         # original brief
 ├── PROJECT_PLAN.md         # this file

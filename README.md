@@ -37,7 +37,7 @@ WiFi access point.
 
 - **Master with display:** Guition JC3248W535 (3.5" 480×320 capacitive touch, ESP32-S3 + PSRAM).
 - **Slave / headless nodes:** any ESP32-S3 (bare dev board, M5Stack AtomS3, …) — the same firmware runs as a master (BLE + AP) or a screenless slave, chosen at runtime.
-- **Coming:** LilyGo T-Display-S3 display + button driver (builds headless for now).
+- **Coming:** LilyGo T-Display-S3 display + button driver (runs headless under the universal `s3` image for now).
 - Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect.
 
 ## Quick start
@@ -50,21 +50,22 @@ python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
 # host unit tests (decrypt/parse) — no hardware needed
 .piovenv/bin/pio test -e native
 
-# build + flash the touch master to the Guition (or -e headless for a screenless S3)
-.piovenv/bin/pio run -e master -t upload --upload-port /dev/ttyACM0
+# build + flash — ONE universal image for every ESP32-S3 board (Guition, AtomS3, bare S3)
+.piovenv/bin/pio run -e s3 -t upload --upload-port /dev/ttyACM0
 
 # read the serial log (pio's own monitor needs an interactive TTY)
 .piovenv/bin/python tools/monitor.py --port /dev/ttyACM0 --seconds 20
 ```
 
 One app (`src/master/`, split into `main`/`web`/`display`/`espnow`/`ble_ingest`
-behind `app.h`) builds for every board; the display driver is picked per board at
-build time, the **master/slave role at runtime** (NVS flag — switch it from the
-screen, the AP web page, or serial `role`). Build envs for the current app:
-`master` (Guition touch display), `headless` (bare ESP32-S3, no display),
-`lilygo` (T-Display-S3, driver TBD — builds headless), `guition` (bench dashboard
-demo), `atoms3-sim` (simulator), `native` (host tests). (`wroom`/`atoms3` build
-the earlier Phase-1/2 scanner in `src/wroom/`.)
+behind `app.h`) runs on every board, with the **master/slave role chosen at
+runtime** (NVS flag — switch it from the screen, the AP web page, or serial
+`role`). A single **universal `s3` image** covers all ESP32-S3 boards: the display
+driver + OPI PSRAM are compiled in and used only where the hardware is present, so
+a Guition brings up the dashboard and any other S3 (e.g. an AtomS3) runs headless
+from the *same* binary. Other envs: `atoms3-sim` (synthetic data, no hardware),
+`guition`/`gfxref`/`lvglref` (bench/reference), `native` (host tests), `wroom` (the
+Phase-1 scanner in `src/wroom/`, classic ESP32).
 
 **Slaves (ESP-NOW):** a slave receives the master's ~4/s broadcast and shows it on
 its screen (or serial, if headless) plus its own config AP. Pairing is two-sided:
