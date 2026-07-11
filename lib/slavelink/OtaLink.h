@@ -55,10 +55,14 @@ class OtaEngine {
   const char* localVersion() const { return localVer_; }
   const char* builtStr() const { return builtStr_; }        // "Mmm dd HH:MM"
   const char* peerVersion() const { return peerVer_; }      // the other unit's version, once known
-  // "newer" / "older" / "same" of the peer relative to us (empty until a peer is known).
+  // "newer" / "older" / "same" of the peer relative to us — compared by the version
+  // STRING (semver), which every firmware transmits, so it's correct even across a
+  // mismatched pair. (The build date/time the toolchain embeds is constant across
+  // builds in this Arduino/PlatformIO setup, so it can't be used for ordering.)
   const char* peerRel() const {
-    if (peerSerial_ == 0) return "";
-    return peerSerial_ > buildSerial_ ? "newer" : (peerSerial_ < buildSerial_ ? "older" : "same");
+    if (!peerVer_[0]) return "";
+    uint32_t me = verSerial(localVer_), pe = verSerial(peerVer_);
+    return pe > me ? "newer" : (pe < me ? "older" : "same");
   }
   // The paired peer's version was heard recently (version beacon or a transfer).
   bool peerKnown() const { return peerHeardMs_ != 0 && (millis() - peerHeardMs_) < kPeerStaleMs; }
@@ -197,8 +201,9 @@ class OtaEngine {
   static const uint32_t kFinalWaitMs = 12000;  // await target's DONE after the last chunk
   static const uint32_t kRecvTimeoutMs = 15000;// abort a receive stalled this long
   static const uint32_t kPullWindowMs = 30000; // how long a pull request keeps asking
-  static const uint32_t kHelloMs = 10000;      // version-beacon broadcast interval
-  static const uint32_t kPeerStaleMs = 40000;  // peer version considered stale after this
+  static const uint32_t kHelloMs = 4000;       // version-beacon broadcast interval
+  static const uint32_t kPeerStaleMs = 60000;  // peer version considered stale after this
+                                               // (~15 missed beacons — broadcasts have no ACK)
 
   void fail(const char* why) {
     phase_ = FAILED;
@@ -425,28 +430,30 @@ class OtaEngine {
   // be larger than the image). Standard esp_image layout: header, then N segments
   // (each an 8-byte header + data), a 1-byte checksum padded to 16, and an
   // optional 32-byte SHA-256 when hash_appended.
-  // Our version string + a monotonic build serial, from the running app's
-  // descriptor (the toolchain embeds __DATE__/__TIME__ there every build, so no
-  // manual bumping is needed for the newness comparison).
+  // Our version string + a build serial DERIVED FROM the version. The serial can't
+  // come from the compile date/time: arduino-esp32 on PlatformIO ships the app
+  // descriptor precompiled, so its __DATE__/__TIME__ are frozen at framework-build
+  // time — identical across every app build. The version string (kFwVersion) is the
+  // real per-release identity, so bumping it is the only "increment" needed.
   void computeBuild() {
     esp_app_desc_t d;
-    if (esp_ota_get_partition_description(esp_ota_get_running_partition(), &d) != ESP_OK) return;
-    buildSerial_ = parseBuildSerial(d.date, d.time);
-    snprintf(builtStr_, sizeof(builtStr_), "%.11s %.5s", d.date, d.time);  // "Mmm dd HH:MM"
-    if (localVer_[0] == 0) { strncpy(localVer_, d.version, kOtaVerLen - 1); localVer_[kOtaVerLen - 1] = 0; }
+    if (esp_ota_get_partition_description(esp_ota_get_running_partition(), &d) == ESP_OK) {
+      snprintf(builtStr_, sizeof(builtStr_), "%.11s %.5s", d.date, d.time);  // "Mmm dd HH:MM"
+      if (localVer_[0] == 0) { strncpy(localVer_, d.version, kOtaVerLen - 1); localVer_[kOtaVerLen - 1] = 0; }
+    }
+    buildSerial_ = verSerial(localVer_);
   }
-  // Fold the compile date "Mmm dd yyyy" + time "hh:mm:ss" into a strictly
-  // increasing 32-bit serial (approx seconds since 2020) — comparable, not a true
-  // epoch. Later build => larger value, which is all the newness check needs.
-  static uint32_t parseBuildSerial(const char* date, const char* time) {
-    static const char* kMon = "JanFebMarAprMayJunJulAugSepOctNovDec";
-    int mon = 0;
-    for (int i = 0; i < 12; ++i) if (strncmp(date, kMon + i * 3, 3) == 0) { mon = i + 1; break; }
-    int day = atoi(date + 4), year = atoi(date + 7);
-    int hh = atoi(time), mm = atoi(time + 3), ss = atoi(time + 6);
-    if (year < 2020) year = 2020;
-    uint32_t days = (uint32_t)(year - 2020) * 372 + (uint32_t)(mon > 0 ? mon - 1 : 0) * 31 + (uint32_t)(day > 0 ? day - 1 : 0);
-    return days * 86400u + (uint32_t)hh * 3600u + (uint32_t)mm * 60u + (uint32_t)ss;
+  // Parse "MAJOR.MINOR.PATCH" into a comparable integer (missing parts = 0). Any
+  // non-digit/non-dot char ends the current field. e.g. "0.4.2" -> 4002.
+  static uint32_t verSerial(const char* v) {
+    uint32_t part[3] = {0, 0, 0};
+    int pi = 0;
+    for (const char* p = v; *p && pi < 3; ++p) {
+      if (*p >= '0' && *p <= '9') part[pi] = part[pi] * 10 + (uint32_t)(*p - '0');
+      else if (*p == '.') ++pi;
+      else break;
+    }
+    return part[0] * 1000000u + part[1] * 1000u + part[2];
   }
 
   // Head of the running app's ELF SHA-256 (build fingerprint) — used to skip a

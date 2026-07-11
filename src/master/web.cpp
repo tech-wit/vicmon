@@ -1051,12 +1051,12 @@ static String systemCard() {
     h += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
          String(gRole == ROLE_SLAVE ? "paired master" : "id") + " " + String(idbuf) + "</p>";
     if (gRole == ROLE_SLAVE) {
-        h += "<button onclick=\"fetch('/api/pair',{method:'POST'})\">Pair to a master</button> ";
+        h += "<button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
         h += "<button onclick=\"if(confirm('Forget the paired master?'))fetch('/api/unpair',{method:'POST'})\">Unpair</button> ";
         h += "<button onclick=\"if(confirm('Switch to Master and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Master</button>";
         h += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots.</p>";
     } else {
-        h += "<button onclick=\"fetch('/api/pair',{method:'POST'}).then(()=>alert('Pairing window open 60s'))\">Pair a slave</button> ";
+        h += "<button id=pairBtn data-lbl='Pair a slave' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair a slave</button> ";
         h += "<button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
         h += "<button onclick=\"if(confirm('Switch to Slave and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Slave</button>";
         h += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
@@ -1083,6 +1083,7 @@ static String systemCard() {
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
          "var v=document.getElementById('otaVer');if(v&&s.version){var pt=s.peerKnown?(' \\u00b7 paired: '+s.peer+' ('+s.peerRel+')'):' \\u00b7 paired: not heard yet';v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built+pt;}"
          "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
+         "var pb=document.getElementById('pairBtn');if(pb){if(s.pairing){pb.textContent='Pairing\\u2026 '+s.pairSec+'s';pb.style.background='#22d3ee';pb.style.color='#001018';}else{pb.textContent=pb.dataset.lbl;pb.style.background='';pb.style.color='';}}"
          "}).catch(()=>{});}"
          "function otaPush(){if(!confirm('Push this firmware to the paired device? It reboots when done.'))return;"
          "fetch('/api/ota/push',{method:'POST'}).then(r=>r.text()).then(t=>{"
@@ -1143,6 +1144,11 @@ void setupServer() {
         j += gOta.peerKnown() ? "true" : "false";
         j += ",\"peer\":\"" + jsonEsc(String(gOta.peerVersion())) + "\"";
         j += ",\"peerRel\":\"" + jsonEsc(String(gOta.peerRel())) + "\"";
+        bool pairing = gRole == ROLE_SLAVE ? gRx.isAdopting() : pairingActive();
+        int pairSec = gRole == ROLE_SLAVE ? (int)gRx.adoptSecsLeft() : pairSecsLeft();
+        j += ",\"pairing\":";
+        j += pairing ? "true" : "false";
+        j += ",\"pairSec\":" + String(pairSec);
         j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"}";
         req->send(200, "application/json", j);
     });
