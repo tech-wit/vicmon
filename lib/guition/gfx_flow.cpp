@@ -46,8 +46,9 @@ static void orthoFlow(Arduino_GFX* c, const int16_t pts[][2], int n, bool on, ui
 
 void renderFlow(Arduino_GFX* c, const DashData& d) {
   char v[28];
-  // Mode banner — same as the Dash: full-width coloured bar with black text.
+  // Mode banner — same as the Dash: VICMON wordmark left, mode centred.
   c->fillRect(0, 0, W, 38, modeColor(d));
+  gtext(c, &FreeSansBold12pt7b, 10, 26, "VICMON", kAccent);
   gtext(c, &FreeSansBold18pt7b, W / 2, 27, d.mode, kBlack, C);
 
   // Battery in the centre.

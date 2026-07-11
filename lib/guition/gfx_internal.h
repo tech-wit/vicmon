@@ -29,6 +29,7 @@ static constexpr uint16_t kGold  = RGB565(0xf0, 0xb4, 0x29);
 static constexpr uint16_t kBlue  = RGB565(0x58, 0xd0, 0xff);
 static constexpr uint16_t kGrey  = RGB565(0x30, 0x36, 0x3d);
 static constexpr uint16_t kBlack = RGB565(0, 0, 0);
+static constexpr uint16_t kAccent = RGB565(0x22, 0xd3, 0xee);  // #22d3ee — matches the AP header
 
 // Trend series colours — matched to the AP chart palette so the LCD Graph and the
 // web chart are consistent (batt cyan vs dc-dc violet are now clearly distinct).

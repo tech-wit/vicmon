@@ -108,12 +108,22 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
   const int px = cx0 + 34, py = WK_TOP + 32, pw = cw - 34 - 10, ph = (WK_BOT - WK_TOP) - 32 - 22;
   const int base = py + ph;
 
-  // Columns = archived days + the current (partial) day.
+  // Always draw a fixed 7-"day" frame: the rightmost column is "now" (the current
+  // partial day) and the six to its left are the most recent completed days,
+  // left-padded with empty slots before any history has accrued.
   const int nd = d.dayCount;
-  const int ncol = nd + 1;  // + "now"
+  const int NSLOT = 7;
+  const int capShown = nd < NSLOT - 1 ? nd : NSLOT - 1;  // completed days shown (<= 6)
+  const int capFirst = (NSLOT - 1) - capShown;           // first slot holding a real day
+  const int dBase = nd - capShown;                       // day-array index of that first day
+
+  auto dayIn = [&](int di) { return d.daySolarAh[di] + d.dayDcdcAh[di] + d.dayChargerAh[di]; };
   float mx = 1;
-  auto dayIn = [&](int i) { return d.daySolarAh[i] + d.dayDcdcAh[i] + d.dayChargerAh[i]; };
-  for (int i = 0; i < nd; ++i) { if (dayIn(i) > mx) mx = dayIn(i); if (d.dayLoadAh[i] > mx) mx = d.dayLoadAh[i]; }
+  for (int j = 0; j < capShown; ++j) {
+    int di = dBase + j;
+    if (dayIn(di) > mx) mx = dayIn(di);
+    if (d.dayLoadAh[di] > mx) mx = d.dayLoadAh[di];
+  }
   float nowIn = d.statToday.solarAh + d.statToday.dcdcAh + d.statToday.chargerAh;
   if (nowIn > mx) mx = nowIn;
   if (d.statToday.outAh > mx) mx = d.statToday.outAh;
@@ -127,37 +137,37 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
     gtext(c, &FreeSans9pt7b, px - 4, gy + 4, b, kMuted, R);
   }
 
-  float slot = (float)pw / (ncol < 1 ? 1 : ncol);
+  float slot = (float)pw / NSLOT;
   int bw = (int)(slot * 0.30f); if (bw < 3) bw = 3;
-  for (int i = 0; i < ncol; ++i) {
-    bool now = (i == nd);
-    int ccx = px + (int)(slot * (i + 0.5f));
+  for (int col = 0; col < NSLOT; ++col) {
+    bool now = (col == NSLOT - 1);
+    bool empty = !now && col < capFirst;
+    int ccx = px + (int)(slot * (col + 0.5f));
     int xi = ccx - bw - 1, xo = ccx + 1;
-    float sol = now ? d.statToday.solarAh   : d.daySolarAh[i];
-    float dcd = now ? d.statToday.dcdcAh    : d.dayDcdcAh[i];
-    float chg = now ? d.statToday.chargerAh : d.dayChargerAh[i];
-    float out = now ? d.statToday.outAh     : d.dayLoadAh[i];
-    // stacked IN
-    float acc = 0;
-    const float vals[3] = {sol, dcd, chg};
-    const uint16_t cols[3] = {kSerSolar, kSerDcdc, kSerChg};
-    for (int sIdx = 0; sIdx < 3; ++sIdx) {
-      float v = vals[sIdx]; if (v <= 0) continue;
-      int y0 = yOf(acc), y1 = yOf(acc + v);
-      c->fillRect(xi, y1, bw, y0 - y1, cols[sIdx]);
-      acc += v;
+    int di = dBase + (col - capFirst);  // valid only when !empty && !now
+    if (!empty) {
+      float sol = now ? d.statToday.solarAh   : d.daySolarAh[di];
+      float dcd = now ? d.statToday.dcdcAh    : d.dayDcdcAh[di];
+      float chg = now ? d.statToday.chargerAh : d.dayChargerAh[di];
+      float out = now ? d.statToday.outAh     : d.dayLoadAh[di];
+      float acc = 0;
+      const float vals[3] = {sol, dcd, chg};
+      const uint16_t cols[3] = {kSerSolar, kSerDcdc, kSerChg};
+      for (int sIdx = 0; sIdx < 3; ++sIdx) {
+        float v = vals[sIdx]; if (v <= 0) continue;
+        int y0 = yOf(acc), y1 = yOf(acc + v);
+        c->fillRect(xi, y1, bw, y0 - y1, cols[sIdx]);
+        acc += v;
+      }
+      if (out > 0) { int yo = yOf(out); c->fillRect(xo, yo, bw, base - yo, kSerLoad); }
     }
-    if (out > 0) { int yo = yOf(out); c->fillRect(xo, yo, bw, base - yo, kSerLoad); }
-    // label: "now", a date MM/DD (clocked) or the run-day index
-    uint32_t ds = d.dayStamp[i];
+    // label: "now", a date MM/DD (clocked) or the run-day index; blank if empty
     if (now) snprintf(b, sizeof(b), "now");
-    else if (d.clockOk && ds >= kYmdMin) snprintf(b, sizeof(b), "%u/%u", (ds / 100) % 100, ds % 100);
-    else snprintf(b, sizeof(b), "%u", ds);
-    gtext(c, &FreeSans9pt7b, ccx, base + 16, b, now ? kText : kMuted, C);
-  }
-  if (ncol == 1) {  // only the "now" column, no history yet
-    gtext(c, &FreeSans9pt7b, px + pw / 2, py + ph / 2,
-          d.clockOk ? "new day at midnight" : "day 1 accruing", kMuted, C);
+    else if (empty) b[0] = '\0';
+    else if (d.clockOk && d.dayStamp[di] >= kYmdMin)
+      snprintf(b, sizeof(b), "%u/%u", (d.dayStamp[di] / 100) % 100, d.dayStamp[di] % 100);
+    else snprintf(b, sizeof(b), "%u", d.dayStamp[di]);
+    if (b[0]) gtext(c, &FreeSans9pt7b, ccx, base + 16, b, now ? kText : kMuted, C);
   }
 }
 

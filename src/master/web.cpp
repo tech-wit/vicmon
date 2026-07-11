@@ -484,9 +484,15 @@ static void handleStatsReset(AsyncWebServerRequest* req) {
 // Manually set the clock (UTC epoch from the browser). Lets the day rollover use
 // a real calendar without NTP; RAM-only, so lost on reboot (run-days take over).
 static void handleTime(AsyncWebServerRequest* req) {
-    uint32_t e = (uint32_t)strtoul(param(req, "epoch").c_str(), nullptr, 10);
-    if (e > 1700000000) { gManualEpoch = e; gManualMillis = millis(); }
-    req->send(200, "text/plain", "ok");
+    // The button sends ?epoch=... in the query string of a POST, so check the URL
+    // param (getParam(,true) is POST-body only, which param() uses).
+    String s;
+    if (req->hasParam("epoch", true))       s = req->getParam("epoch", true)->value();
+    else if (req->hasParam("epoch", false)) s = req->getParam("epoch", false)->value();
+    uint32_t e = (uint32_t)strtoul(s.c_str(), nullptr, 10);
+    bool ok = e > 1700000000;
+    if (ok) { gManualEpoch = e; gManualMillis = millis(); }
+    req->send(200, "text/plain", ok ? "ok" : "bad");
 }
 
 static void handleBind(AsyncWebServerRequest* req) {
