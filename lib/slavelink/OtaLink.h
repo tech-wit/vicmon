@@ -167,6 +167,13 @@ class OtaEngine {
 
   // ---- drive everything; call every loop (both roles). Non-blocking. ----
   void service() {
+    // Finished receiving: the DONE ack has had a moment to leave — reboot into the
+    // new image now. Handled here (not in serviceReceive) because phase_ is DONE by
+    // this point, so the phase switch below would never call serviceReceive again.
+    if (rebooting_) {
+      if (millis() - rebootMs_ > 400) { delay(50); ESP.restart(); }
+      return;
+    }
     // Periodic version beacon (both roles) so the paired peer's version is known at
     // rest — skipped mid-transfer to keep the air clear.
     if (!busy() && localId_ && millis() - lastHelloMs_ >= kHelloMs) { lastHelloMs_ = millis(); sendHello(); }
@@ -184,7 +191,10 @@ class OtaEngine {
   Phase phase() const { return phase_; }
   bool offering() const { return phase_ == OFFERING; }
   // Transfer engaged — the loop should suspend BLE/other heavy work while true.
-  bool busy() const { return phase_ == SENDING || phase_ == RECEIVING; }
+  // Includes the brief post-completion reboot wait so the loop keeps calling
+  // service() tightly until ESP.restart() fires (instead of dropping into a 2 s
+  // BLE scan and stranding the pending reboot).
+  bool busy() const { return phase_ == SENDING || phase_ == RECEIVING || rebooting_; }
   uint8_t percent() const {
     if (phase_ == SENDING && chunkTotal_) return (uint8_t)((uint32_t)srcSeq_ * 100 / chunkTotal_);
     if (phase_ == RECEIVING && tgtTotal_) return (uint8_t)((uint32_t)tgtExpect_ * 100 / tgtTotal_);
@@ -309,10 +319,6 @@ class OtaEngine {
   // ---- target ----
   void serviceReceive() {
     uint32_t now = millis();
-    if (rebooting_) {  // sent DONE — give the ack a moment to leave, then reboot
-      if (now - rebootMs_ > 400) { delay(50); ESP.restart(); }
-      return;
-    }
     if (haveData_) {
       uint16_t seq = dataSeq_, len = dataLen_;
       if (seq == tgtExpect_) {
