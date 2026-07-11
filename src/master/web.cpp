@@ -1081,7 +1081,7 @@ static String systemCard() {
     h += "<script>"
          "function otaPoll(){fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
-         "var v=document.getElementById('otaVer');if(v&&s.version)v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built;"
+         "var v=document.getElementById('otaVer');if(v&&s.version){var pt=s.peerKnown?(' \\u00b7 paired: '+s.peer+' ('+s.peerRel+')'):' \\u00b7 paired: not heard yet';v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built+pt;}"
          "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
          "}).catch(()=>{});}"
          "function otaPush(){if(!confirm('Push this firmware to the paired device? It reboots when done.'))return;"
@@ -1139,6 +1139,10 @@ void setupServer() {
         j += ",\"percent\":" + String(gOta.percent());
         j += ",\"version\":\"" + jsonEsc(String(gOta.localVersion())) + "\"";
         j += ",\"built\":\"" + jsonEsc(String(gOta.builtStr())) + "\"";
+        j += ",\"peerKnown\":";
+        j += gOta.peerKnown() ? "true" : "false";
+        j += ",\"peer\":\"" + jsonEsc(String(gOta.peerVersion())) + "\"";
+        j += ",\"peerRel\":\"" + jsonEsc(String(gOta.peerRel())) + "\"";
         j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"}";
         req->send(200, "application/json", j);
     });

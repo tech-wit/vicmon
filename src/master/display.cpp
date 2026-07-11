@@ -186,6 +186,16 @@ static void fillOtaDash(guition::DashData& d) {
     d.otaStatus[sizeof(d.otaStatus) - 1] = '\0';
     d.otaPct = gOta.percent();
     d.otaBusy = gOta.busy();
+    d.otaPeerKnown = gOta.peerKnown();
+    if (d.otaPeerKnown) {
+        strncpy(d.otaPeerVer, gOta.peerVersion(), sizeof(d.otaPeerVer) - 1);
+        d.otaPeerVer[sizeof(d.otaPeerVer) - 1] = '\0';
+        strncpy(d.otaPeerRel, gOta.peerRel(), sizeof(d.otaPeerRel) - 1);
+        d.otaPeerRel[sizeof(d.otaPeerRel) - 1] = '\0';
+    } else {
+        d.otaPeerVer[0] = '\0';
+        d.otaPeerRel[0] = '\0';
+    }
 }
 
 static void collectDash(guition::DashData& d) {

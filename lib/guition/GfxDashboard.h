@@ -129,6 +129,9 @@ struct DashData {
   char     otaStatus[48] = "";     // firmware-clone (OTA) status line
   uint8_t  otaPct = 0;             // OTA transfer progress 0..100
   bool     otaBusy = false;        // OTA transfer engaged
+  char     otaPeerVer[16] = "";    // paired device's firmware version (via version beacon)
+  char     otaPeerRel[8] = "";     // "newer" / "older" / "same" vs this unit
+  bool     otaPeerKnown = false;   // the paired device's version was heard recently
   bool     linkLive = false;       // slave: receiving frames from our master
   bool     linkStale = false;      // slave: link dropped but showing last-known values
   uint32_t linkDrops = 0;          // slave: sequence gaps observed

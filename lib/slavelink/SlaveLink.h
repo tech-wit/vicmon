@@ -180,6 +180,7 @@ static const uint8_t kOtaAcceptMagic1 = 'O';    // target -> source unicast: sen
 static const uint8_t kOtaDataMagic1 = 'D';      // source -> target unicast: one chunk
 static const uint8_t kOtaCtrlMagic1 = 'K';      // target -> source unicast: ack / done / fail
 static const uint8_t kOtaPullMagic1 = 'P';      // requester -> broadcast: update me if you're newer
+static const uint8_t kOtaHelloMagic1 = 'H';     // periodic version beacon (both roles broadcast)
 static const uint16_t kOtaChunk = 200;          // payload bytes per OtaData (last may be smaller)
 static const uint8_t kOtaVerLen = 12;           // version string field length (announce/accept)
 
@@ -226,6 +227,16 @@ struct OtaPull {
     uint8_t magic0, magic1, otaProto, role;  // 'V','P'
     uint32_t masterId;
     uint32_t buildSerial;                    // the requester's current build — peer serves only if newer
+};
+// Version beacon: each unit broadcasts this a few times a minute so the paired
+// peer always knows its firmware version + build age, even with no transfer in
+// progress (for the "this vs paired" display). Independent of the telemetry
+// kVersion — gated on kOtaProto so it survives telemetry-format bumps.
+struct OtaHello {
+    uint8_t magic0, magic1, otaProto, role;  // 'V','H'
+    uint32_t masterId;
+    uint32_t buildSerial;
+    char ver[kOtaVerLen];
 };
 #pragma pack(pop)
 

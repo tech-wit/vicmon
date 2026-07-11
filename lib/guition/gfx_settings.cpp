@@ -370,14 +370,22 @@ static void renderDiagLink(Arduino_GFX* c, const DashData& d) {  // slave role
 static void renderDiagFw(Arduino_GFX* c, const DashData& d) {
   char buf[64];
   gtext(c, &FreeSansBold18pt7b, 12, 28, "Firmware", kText);
-  snprintf(buf, sizeof(buf), "Version %s", d.version[0] ? d.version : "--");
-  gtext(c, &FreeSansBold12pt7b, 12, 62, buf, kText);
+  // This unit's version + the paired device's (from the version beacon).
+  snprintf(buf, sizeof(buf), "This unit: %s", d.version[0] ? d.version : "--");
+  gtext(c, &FreeSansBold12pt7b, 12, 58, buf, kText);
+  if (d.otaPeerKnown) {
+    uint16_t rc = !strcmp(d.otaPeerRel, "newer") ? kGreen
+                : (!strcmp(d.otaPeerRel, "older") ? kAmber : kMuted);
+    gtext(c, &FreeSansBold12pt7b, 12, 84, "Paired:", kText, L);
+    snprintf(buf, sizeof(buf), "%s (%s)", d.otaPeerVer[0] ? d.otaPeerVer : "?", d.otaPeerRel);
+    gtext(c, &FreeSansBold12pt7b, 92, 84, buf, rc, L);
+  } else {
+    gtext(c, &FreeSans9pt7b, 12, 84, "Paired: not heard yet", kMuted);
+  }
   if (d.otaStatus[0]) {
     if (d.otaBusy) snprintf(buf, sizeof(buf), "%s %u%%", d.otaStatus, d.otaPct);
     else           snprintf(buf, sizeof(buf), "%s", d.otaStatus);
-    gtext(c, &FreeSans9pt7b, 12, 94, buf, d.otaBusy ? kBlue : kMuted);
-  } else {
-    gtext(c, &FreeSans9pt7b, 12, 94, "Clone firmware over the wireless link.", kMuted);
+    gtext(c, &FreeSans9pt7b, 12, 110, buf, d.otaBusy ? kBlue : kMuted);
   }
   diagBtn(c, DCTL_X, DFW_PUSH_Y, DCTL_W, DFW_BTN_H, "Send to paired device", kBlue, kBg);
   diagBtn(c, DCTL_X, DFW_PULL_Y, DCTL_W, DFW_BTN_H, "Update from paired device", kGrey, kText);

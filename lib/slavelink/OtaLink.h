@@ -60,6 +60,8 @@ class OtaEngine {
     if (peerSerial_ == 0) return "";
     return peerSerial_ > buildSerial_ ? "newer" : (peerSerial_ < buildSerial_ ? "older" : "same");
   }
+  // The paired peer's version was heard recently (version beacon or a transfer).
+  bool peerKnown() const { return peerHeardMs_ != 0 && (millis() - peerHeardMs_) < kPeerStaleMs; }
 
   // ---- user trigger (source) ----
   // Begin offering our running firmware to the paired peer. Computes the image
@@ -117,8 +119,7 @@ class OtaEngine {
       OtaAccept a; memcpy(&a, data, sizeof(a));
       if (phase_ == OFFERING && a.masterId == localId_ && mac && !acceptPending_) {
         memcpy(pendingMac_, mac, 6);
-        peerSerial_ = a.buildSerial;
-        memcpy(peerVer_, a.ver, kOtaVerLen); peerVer_[kOtaVerLen - 1] = 0;
+        notePeer(a.buildSerial, a.ver);
         acceptPending_ = true;
       }
       return true;
@@ -152,11 +153,19 @@ class OtaEngine {
         pullServeReq_ = true;  // service() calls startPush() (does flash reads on the loop)
       return true;
     }
+    if (len == (int)sizeof(OtaHello) && validOta(data, kOtaHelloMagic1)) {
+      OtaHello hlo; memcpy(&hlo, data, sizeof(hlo));
+      if (hlo.masterId == localId_) notePeer(hlo.buildSerial, hlo.ver);  // learn the peer's version at rest
+      return true;
+    }
     return false;
   }
 
   // ---- drive everything; call every loop (both roles). Non-blocking. ----
   void service() {
+    // Periodic version beacon (both roles) so the paired peer's version is known at
+    // rest — skipped mid-transfer to keep the air clear.
+    if (!busy() && localId_ && millis() - lastHelloMs_ >= kHelloMs) { lastHelloMs_ = millis(); sendHello(); }
     if (pullServeReq_) { pullServeReq_ = false; startPush(); }  // a newer unit answering a pull
     if (announceRx_) { onAcceptAnnounce(); return; }  // a heard offer -> open RECEIVING
     switch (phase_) {
@@ -188,6 +197,8 @@ class OtaEngine {
   static const uint32_t kFinalWaitMs = 12000;  // await target's DONE after the last chunk
   static const uint32_t kRecvTimeoutMs = 15000;// abort a receive stalled this long
   static const uint32_t kPullWindowMs = 30000; // how long a pull request keeps asking
+  static const uint32_t kHelloMs = 10000;      // version-beacon broadcast interval
+  static const uint32_t kPeerStaleMs = 40000;  // peer version considered stale after this
 
   void fail(const char* why) {
     phase_ = FAILED;
@@ -202,8 +213,7 @@ class OtaEngine {
     if (a.imageSize == 0 || a.chunkTotal == 0 || announceRx_) return;
     memcpy(pendingMac_, mac, 6);
     memcpy(annSha8_, a.sha8, 8);  // build-skip check deferred to the loop (flash read)
-    peerSerial_ = a.buildSerial;
-    memcpy(peerVer_, a.ver, kOtaVerLen); peerVer_[kOtaVerLen - 1] = 0;
+    notePeer(a.buildSerial, a.ver);
     tgtSize_ = a.imageSize;
     tgtTotal_ = a.chunkTotal;
     tgtSrcRole_ = a.srcRole;
@@ -344,6 +354,23 @@ class OtaEngine {
     ensurePeer(bcast);
     esp_now_send(bcast, (const uint8_t*)&p, sizeof(p));
   }
+  void sendHello() {
+    OtaHello h = {};
+    h.magic0 = kMagic0; h.magic1 = kOtaHelloMagic1; h.otaProto = kOtaProto;
+    h.role = role_;
+    h.masterId = localId_;
+    h.buildSerial = buildSerial_;
+    strncpy(h.ver, localVer_, kOtaVerLen);
+    static const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    ensurePeer(bcast);
+    esp_now_send(bcast, (const uint8_t*)&h, sizeof(h));
+  }
+  // Record the paired peer's version/build (from a beacon, announce or accept).
+  void notePeer(uint32_t serial, const char* ver) {
+    peerSerial_ = serial;
+    memcpy(peerVer_, ver, kOtaVerLen); peerVer_[kOtaVerLen - 1] = 0;
+    peerHeardMs_ = millis();
+  }
 
   // Open a receive in response to a heard announce (loop task: does Update.begin).
   void onAcceptAnnounce() {
@@ -462,6 +489,8 @@ class OtaEngine {
   char builtStr_[24] = {0};
   uint32_t peerSerial_ = 0;
   char peerVer_[kOtaVerLen] = {0};
+  uint32_t peerHeardMs_ = 0;
+  uint32_t lastHelloMs_ = 0;
 
   // source
   const esp_partition_t* runPart_ = nullptr;
