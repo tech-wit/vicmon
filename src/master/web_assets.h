@@ -254,7 +254,14 @@ static const char kStatsPage[] = R"HTML(
 <div class=card>
  <div class=erow>
   <div><h3 style="margin:0 0 .15em">Energy</h3><div id=daynote class=muted style="font-size:.82em">--</div></div>
-  <button class=setbtn id=setTime title="Set the clock from this device so days roll at midnight">Set time</button>
+  <div style="display:flex;gap:.35em;align-items:center;flex-wrap:wrap">
+   <input id=th type=number min=1 max=12 placeholder=h style="width:3.4em;text-align:center">
+   <span style="color:var(--muted)">:</span>
+   <input id=tm type=number min=0 max=59 placeholder=m style="width:3.4em;text-align:center">
+   <select id=tap style="padding:.4em"><option>AM</option><option>PM</option></select>
+   <button class=setbtn id=setManual>Set</button>
+   <button class=setbtn id=setTime title="use this device's clock">Now</button>
+  </div>
  </div>
  <canvas id="dayChart" width="760" height="180" style="width:100%;height:180px;margin-top:.7em"></canvas>
  <div class="legend" style="margin-top:.3em">
@@ -318,9 +325,16 @@ function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getConte
   ctx.fillStyle='#f87171';var yo=Y(d.o);ctx.fillRect(xo,yo,bw,base-yo);}
   ctx.fillStyle=d.now?'#e6edf3':'#7d8da1';ctx.fillText(lbl(d),cx,H-5);});
 }
-document.getElementById('setTime').addEventListener('click',function(){var btn=this;btn.textContent='Setting…';
+document.getElementById('setTime').addEventListener('click',function(){var btn=this;btn.textContent='…';
  fetch('/api/time?epoch='+Math.floor(Date.now()/1000),{method:'POST'}).then(function(r){return r.text();}).then(function(){
-  btn.textContent='Time set ✓';setTimeout(function(){btn.textContent='Set time';},1600);load();}).catch(function(){btn.textContent='Set time';});});
+  btn.textContent='✓';setTimeout(function(){btn.textContent='Now';},1600);load();}).catch(function(){btn.textContent='Now';});});
+document.getElementById('setManual').addEventListener('click',function(){var btn=this;
+ var h=parseInt(document.getElementById('th').value),m=parseInt(document.getElementById('tm').value)||0;
+ if(isNaN(h)||h<1||h>12||m<0||m>59){btn.textContent='h:m?';setTimeout(function(){btn.textContent='Set';},1500);return;}
+ if(h==12)h=0; if(document.getElementById('tap').value=='PM')h+=12;
+ btn.textContent='…';
+ fetch('/api/time?h='+h+'&m='+m,{method:'POST'}).then(function(r){return r.text();}).then(function(){
+  btn.textContent='✓';setTimeout(function(){btn.textContent='Set';},1600);load();}).catch(function(){btn.textContent='Set';});});
 async function load(){try{data=await(await fetch('/api/stats')).json();}catch(e){return;}render();drawDays();}
 meters();load();setInterval(load,5000);
 </script>

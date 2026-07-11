@@ -490,12 +490,27 @@ static void handleStatsReset(AsyncWebServerRequest* req) {
 // Manually set the clock (UTC epoch from the browser). Lets the day rollover use
 // a real calendar without NTP; RAM-only, so lost on reboot (run-days take over).
 static void handleTime(AsyncWebServerRequest* req) {
-    // The button sends ?epoch=... in the query string of a POST, so check the URL
-    // param (getParam(,true) is POST-body only, which param() uses).
-    String s;
-    if (req->hasParam("epoch", true))       s = req->getParam("epoch", true)->value();
-    else if (req->hasParam("epoch", false)) s = req->getParam("epoch", false)->value();
-    uint32_t e = (uint32_t)strtoul(s.c_str(), nullptr, 10);
+    auto pv = [&](const char* k) -> String {
+        if (req->hasParam(k, true)) return req->getParam(k, true)->value();   // POST body
+        if (req->hasParam(k, false)) return req->getParam(k, false)->value(); // query string
+        return String();
+    };
+    // Manual entry: h (0-23) + m — the date doesn't matter, only the time-of-day
+    // (drives the midnight rollover). Anchor to a fixed UTC-midnight date and back
+    // out the TZ so currentLocalEpoch() reports exactly the entered local time.
+    String hh = pv("h");
+    if (hh.length()) {
+        int h = hh.toInt(), m = pv("m").toInt();
+        if (h < 0 || h > 23 || m < 0 || m > 59) { req->send(200, "text/plain", "bad"); return; }
+        const uint32_t base = 1735689600u;  // 2025-01-01 00:00 UTC
+        int64_t v = (int64_t)base + h * 3600 + m * 60 - (int64_t)gTzOffsetMin * 60;
+        gManualEpoch = (uint32_t)v;
+        gManualMillis = millis();
+        req->send(200, "text/plain", "ok");
+        return;
+    }
+    // Or a full UTC epoch straight from the browser clock ("Now").
+    uint32_t e = (uint32_t)strtoul(pv("epoch").c_str(), nullptr, 10);
     bool ok = e > 1700000000;
     if (ok) { gManualEpoch = e; gManualMillis = millis(); }
     req->send(200, "text/plain", ok ? "ok" : "bad");
