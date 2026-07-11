@@ -222,6 +222,7 @@ static constexpr int DM_TOP = 52, DM_RH = 42, DM_GAP = 8, DM_X = 8, DM_W = W - 1
 static constexpr int DBACK_H = 34, DBACK_Y = TAB_Y - DBACK_H - 6, DBACK_X = 8, DBACK_W = W - 16;
 static constexpr int DCTL_Y = 52, DCTL_H = 42, DCTL_X = 8, DCTL_W = W - 16;
 static constexpr int DROLE_BTN_Y = 116, DROLE_BTN_H = 46;
+static constexpr int DRESTART_Y = 248, DRESTART_H = 30;  // Diag menu: bottom Restart button
 static constexpr int DLINK_UNPAIR_Y = 196;  // slave Link screen: Unpair button
 
 static void diagBtn(Arduino_GFX* c, int x, int y, int w, int h, const char* label,
@@ -267,6 +268,7 @@ static void renderDiagMenu(Arduino_GFX* c, const DashData& d) {
     gtext(c, &FreeSansBold12pt7b, DM_X + 18, y + DM_RH / 2 + 7, buf, kText, L);
     gtext(c, &FreeSansBold18pt7b, DM_X + DM_W - 18, y + DM_RH / 2 + 9, ">", kMuted, R);
   }
+  diagBtn(c, DM_X, DRESTART_Y, DM_W, DRESTART_H, "Restart device", kGrey, kText);
 }
 
 static void renderDiagMon(Arduino_GFX* c, const DashData& d) {
@@ -372,6 +374,8 @@ static void renderDiag(Arduino_GFX* c, const DashData& d) {
 
 int diagHit(int x, int y, int role, int screen) {
   if (screen == DS_MENU) {
+    if (y >= DRESTART_Y && y < DRESTART_Y + DRESTART_H && x >= DM_X && x < DM_X + DM_W)
+      return DIAG_RESTART;
     for (int i = 0; i < diagMenuCount(role); ++i) {
       int ry = DM_TOP + i * (DM_RH + DM_GAP);
       if (y >= ry && y < ry + DM_RH && x >= DM_X && x < DM_X + DM_W) return diagMenuAction(role, i);

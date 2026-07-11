@@ -69,6 +69,7 @@ struct DashData {
   int      dayCount = 0;
   uint32_t dayNow = 0;             // current day key (run-index or yyyymmdd) for axis labels
   bool     clockOk = false;        // a real/manual clock is set (date labels vs "Day N")
+  uint32_t nowEpoch = 0;           // current LOCAL epoch secs (0 = no clock) — for the on-screen time
 
   // Net-in / net-out (Ah) meters. inAh = charged into battery, outAh = discharged.
   struct StatMeter { float inAh, outAh, solarAh, dcdcAh, chargerAh, loadAh; uint32_t durSecs; };
@@ -189,7 +190,7 @@ enum DiagScreen : uint8_t {
 enum DiagAction : uint8_t {
   DIAG_NONE = 0, DIAG_BACK,
   DIAG_OPEN_MON, DIAG_OPEN_DISC, DIAG_OPEN_DEBUG, DIAG_OPEN_ROLE, DIAG_OPEN_LINK,
-  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR
+  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR, DIAG_RESTART
 };
 
 // Hit-test the Diagnostics sub-view given the current screen + role. Returns a

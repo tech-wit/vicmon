@@ -48,6 +48,11 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
   gtext(c, &FreeSansBold18pt7b, bx + 16, by + 162, buf, kText);
   numOr(buf, sizeof(buf), d.battValid, d.a, 1, "A");
   gtext(c, &FreeSansBold18pt7b, bx + bw - 16, by + 162, buf, d.a >= 0 ? kGreen : kCyan, R);
+  // Battery power (V x A, signed) between the V and A readouts.
+  if (d.battValid) snprintf(buf, sizeof(buf), "%.0fW", d.v * d.a);
+  else             snprintf(buf, sizeof(buf), "--W");
+  gtext(c, &FreeSansBold12pt7b, bx + bw / 2, by + 161, buf,
+        d.battValid ? (d.a >= 0 ? kGreen : kCyan) : kMuted, C);
 
   // Remaining / capacity Ah (rem = capacity x SoC), matching the AP mimic.
   if (d.battCapAh > 0 && d.battValid) {

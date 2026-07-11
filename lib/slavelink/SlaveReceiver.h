@@ -178,7 +178,10 @@ class Receiver {
     heardFlags_ = s.flags;
     lastAnyMs_ = now;
     bool invite = (s.flags & F_PAIRING) != 0;
-    if (adopting_ && paired_ == 0 && invite) adoptId_ = s.masterId;
+    // Adopt while the user's window is open and a master is inviting. Allow this
+    // even when already paired, so hitting Pair re-homes to a NEW master without a
+    // manual Unpair first; skip our current master so we don't needlessly re-adopt.
+    if (adopting_ && invite && s.masterId != paired_) adoptId_ = s.masterId;
     if (paired_ != 0 && s.masterId == paired_) {
       if (haveFrame_) {
         uint16_t expected = (uint16_t)(lastSeq_ + 1);
@@ -201,9 +204,15 @@ class Receiver {
     fineTotal_ = c.fineTotal;      // learn BOTH totals from any chunk, so a completed
     coarseTotal_ = c.coarseTotal;  // fine ring doesn't prematurely mark us "ready"
     if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
+    uint16_t idx = c.offset / kHistChunkPts;
+    bool isNew = !got[idx];
     memcpy(&dst[c.offset], c.pts, c.count * sizeof(HistPointW));
-    got[c.offset / kHistChunkPts] = 1;
+    got[idx] = 1;
     lastChunkMs_ = millis();
+    // Forward progress (a chunk we didn't have) refreshes the give-up budget, so a
+    // weak-but-alive link that keeps trickling in new chunks never exhausts its
+    // retries and resets to zero — the cap only trips on a genuinely stalled link.
+    if (isNew) histAttempts_ = 0;
     recomputeHistReady();
   }
 
@@ -294,7 +303,11 @@ class Receiver {
       adoptId_ = 0;
       save(adopt);
       adopting_ = false;
-      haveFrame_ = false;  // fresh seq/staleness for the new master
+      haveFrame_ = false;      // fresh seq/staleness for the new master
+      drops_ = 0;
+      haveMasterMac_ = false;  // re-learn the new master's MAC before any history pull
+      histActive_ = false;     // drop any in-flight/complete pull from the old master
+      histReady_ = false;
     }
   }
 

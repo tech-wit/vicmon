@@ -104,7 +104,8 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   gtext(c, &FreeSansBold18pt7b, batx + batw / 2, baty + 30, v, socColor, C);
   numOr(v, sizeof(v), d.battValid, d.v, 2, "V");
   gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 52, v, kText, C);
-  numOr(v, sizeof(v), d.battValid, d.a, 1, "A");
+  if (d.battValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.a, d.v * d.a);  // current + power
+  else             numOr(v, sizeof(v), d.battValid, d.a, 1, "A");
   gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 70, v, d.a >= 0 ? kGreen : kCyan, C);
   if (d.battCapAh > 0 && d.battValid)  // remaining / capacity Ah
     snprintf(v, sizeof(v), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);

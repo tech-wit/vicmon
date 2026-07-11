@@ -942,6 +942,16 @@ static void slaveLoop() {
 
     static bool gHistApplied = false;
     static uint32_t gLiveSince = 0;
+    // Re-homed to a different master (via Pair without unpair)? Re-pull its backlog
+    // instead of keeping the old master's history.
+    static uint32_t gLastPaired = 0;
+    if (gRx.pairedMaster() != gLastPaired) {
+        gLastPaired = gRx.pairedMaster();
+        gHistApplied = false;
+        gLiveSince = 0;
+        gFine.clear();
+        gCoarse.clear();
+    }
     if (gRx.live() && gRx.haveMasterMac()) {
         if (gLiveSince == 0) gLiveSince = millis();
         // Wait until the link has been solidly live for a few seconds (first

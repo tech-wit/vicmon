@@ -87,6 +87,12 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
   char b[28];
   gtext(c, &FreeSansBold18pt7b, 12, 26, "Energy", kText);
   gtext(c, &FreeSans9pt7b, W - 8, 24, "hold = reset", kMuted, R);  // hint above the cards
+  // Current time (HH:MM, local) centred in the top bar when a clock is set.
+  if (d.nowEpoch) {
+    uint32_t secs = d.nowEpoch % 86400;
+    snprintf(b, sizeof(b), "%02u:%02u", (unsigned)(secs / 3600), (unsigned)((secs % 3600) / 60));
+    gtext(c, &FreeSansBold12pt7b, W / 2, 25, b, kText, C);
+  }
 
   // ---- Right rail: three resettable meters ----
   const int gap = 8, ch = (WK_BOT - WK_TOP - 2 * gap) / 3;

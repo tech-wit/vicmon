@@ -190,7 +190,8 @@ static void collectDash(guition::DashData& d) {
     fillM(d.statTrip,  gStats.bucket(stats::TRIP));
     fillM(d.statTotal, gStats.bucket(stats::TOTAL));
     d.dayNow = gStats.bucket(stats::TODAY).dayStamp;  // current day key (axis labels)
-    d.clockOk = (currentLocalEpoch() != 0);
+    d.nowEpoch = currentLocalEpoch();
+    d.clockOk = (d.nowEpoch != 0);
     int dc = (int)gStats.dayCount();
     int start = dc > guition::DashData::DAYS_N ? dc - guition::DashData::DAYS_N : 0;
     int out = 0;
@@ -349,14 +350,19 @@ static void collectSlaveDash(guition::DashData& d) {
     if (gRx.everStats()) {
         const slavelink::StatsFrame& f = gRx.stats();
         d.clockOk = f.clockOk != 0;
-        // Take the time from the master (the master owns + persists the clock). Adopt
-        // it as our local clock base so this slave's own currentLocalEpoch()/AP page
-        // agree; re-sync only on >5s drift so we don't reset the base every frame.
-        if (f.utcNow > 1700000000u) {
-            uint32_t mine = currentUtcEpoch();
-            uint32_t diff = mine > f.utcNow ? mine - f.utcNow : f.utcNow - mine;
-            if (!mine || diff > 5) { gManualEpoch = f.utcNow; gManualMillis = millis(); }
+        // Take the time from the master (the master owns + persists the clock).
+        // f.utcNow is the master's time when the frame was SENT — a snapshot that
+        // only advances when a new (low-rate) StatsFrame arrives. Re-anchor our
+        // clock base ONCE per fresh frame, then let currentUtcEpoch() free-run from
+        // it between frames. (Adopting every call would keep snapping us back to the
+        // stale snapshot, freezing the clock a few seconds behind the master.)
+        static uint32_t lastAdoptedUtc = 0;
+        if (f.utcNow > 1700000000u && f.utcNow != lastAdoptedUtc) {
+            lastAdoptedUtc = f.utcNow;
+            gManualEpoch = f.utcNow;
+            gManualMillis = millis();
         }
+        d.nowEpoch = currentLocalEpoch();  // free-runs from the adopted base (for the on-screen time)
         auto fillM = [](guition::DashData::StatMeter& m, const slavelink::StatMeterW& w) {
             m.inAh = w.inAh;       m.outAh = w.outAh;
             m.solarAh = w.solarAh; m.dcdcAh = w.dcdcAh;
@@ -592,6 +598,7 @@ static void displayTask(void*) {
                             case guition::DIAG_BACK:       gDiagScreen = guition::DS_MENU;  redraw = true; break;
                             case guition::DIAG_DEBUG_TOGGLE: gDebugCapture = !gDebugCapture; redraw = true; break;
                             case guition::DIAG_ROLE_TOGGLE: gRoleReq = true; break;
+                            case guition::DIAG_RESTART: gRebootReq = true; break;  // loop applies (serviceRole)
                             case guition::DIAG_UNPAIR: gRx.unpair(); redraw = true; break;
                             default: break;
                         }

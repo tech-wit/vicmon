@@ -66,9 +66,10 @@ static const char kMimicPage[] = R"HTML(
   <text id="loadTxt" x="172" y="314" text-anchor="start" font-size="13">Load --</text>
   <text id="dV" x="222" y="170" text-anchor="start" font-size="13">--</text>
   <text id="dA" x="222" y="188" text-anchor="start" font-size="13">--</text>
-  <text id="dAh" x="222" y="206" text-anchor="start" font-size="13" class="muted">--</text>
-  <text id="dStarter" x="222" y="224" text-anchor="start" font-size="13" class="muted">--</text>
-  <text id="dTTG" x="222" y="242" text-anchor="start" font-size="13" class="muted">--</text>
+  <text id="dW" x="222" y="206" text-anchor="start" font-size="13">--</text>
+  <text id="dAh" x="222" y="224" text-anchor="start" font-size="13" class="muted">--</text>
+  <text id="dStarter" x="222" y="242" text-anchor="start" font-size="13" class="muted">--</text>
+  <text id="dTTG" x="222" y="260" text-anchor="start" font-size="13" class="muted">--</text>
 </svg>
 <div id="modeBanner" class="banner">--</div>
 </div>
@@ -89,6 +90,7 @@ static const char kMimicPage[] = R"HTML(
 <script>
 function set(id,t){document.getElementById(id).textContent=t;}
 function setNode(id,valid,a){set(id,valid?a.toFixed(1)+'A':'--');}
+function setNodeW(id,valid,a,w){set(id,valid?a.toFixed(1)+'A'+(w!=null?' '+w.toFixed(0)+'W':''):'--');}
 function setLine(id,mode,col){var e=document.getElementById(id);e.classList.remove('flow','flowrev');
  if(!mode){e.setAttribute('stroke','#2c3a4a');return;}e.setAttribute('stroke',col);
  e.classList.add(mode==1?'flow':'flowrev');}
@@ -109,6 +111,7 @@ async function tick(){
  set('soc',b.valid?Math.round(soc)+'%':'--');
  set('dV',b.valid?b.v.toFixed(2)+' V':'--');
  set('dA',b.valid?(b.a>=0?'+':'')+b.a.toFixed(1)+' A':'--');
+ set('dW',b.valid?(b.a>=0?'+':'')+(b.v*b.a).toFixed(0)+' W':'--');
  if(b.capacity>0&&b.valid){var rem=b.capacity*(b.soc/100);
   set('dAh',rem.toFixed(0)+' / '+b.capacity.toFixed(0)+' Ah');}
  else if(b.consumed_valid){set('dAh',Math.abs(b.consumed).toFixed(1)+' Ah used');}
@@ -128,12 +131,13 @@ async function tick(){
  var mb=document.getElementById('modeBanner');mb.textContent=p.mode.toUpperCase();
  mb.style.color=col;mb.style.borderColor=col;
  setLine('lineSolar',(p.solar.valid&&p.solar.a>0.05)?1:0,'#34d399');
- setNode('solarTxt',p.solar.valid,p.solar.a);
- set('solarSub',p.solar.valid?(p.solar.w.toFixed(0)+'W'+(p.solar.v_valid?' · '+p.solar.v.toFixed(1)+'V':'')):'');
+ setNodeW('solarTxt',p.solar.valid,p.solar.a,p.solar.valid?p.solar.w:null);  // solar W = real PV power
+ set('solarSub',p.solar.valid&&p.solar.v_valid?p.solar.v.toFixed(1)+'V':'');
  setLine('lineCharger',(p.charger.valid&&p.charger.a>0.05)?1:0,'#34d399');
- setNode('chargerTxt',p.charger.valid,p.charger.a);
+ // charger / DC-DC W = branch current x battery voltage (no per-branch V in the adverts)
+ setNodeW('chargerTxt',p.charger.valid,p.charger.a,(p.charger.valid&&b.valid)?p.charger.a*b.v:null);
  setLine('lineDcdc',(p.dcdc.valid&&p.dcdc.out_a>0.05)?1:0,'#34d399');
- setNode('dcdcTxt',p.dcdc.valid,p.dcdc.out_a);
+ setNodeW('dcdcTxt',p.dcdc.valid,p.dcdc.out_a,(p.dcdc.valid&&b.valid)?p.dcdc.out_a*b.v:null);
  set('dcdcSub',p.dcdc.in_v_valid?('in '+p.dcdc.in_v.toFixed(1)+'V'):'');
  // Load line is driven by the load signal itself: it flows DOWN to the load
  // (amber) whenever there is load, independent of battery charge/discharge.
