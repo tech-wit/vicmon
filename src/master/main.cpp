@@ -43,8 +43,8 @@
 // AP SSID is made unique per device at boot (Vicmon-<last 3 MAC bytes>) so
 // several masters in the same area don't collide — filled in setup() once the
 // master id is known; the default is only a placeholder before then.
-char kApSsid[24] = "Vicmon";
-const char* kApPass = "vicmon1234";  // >= 8 chars; change before the field
+char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
+char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
 const char* kFwVersion = "0.3.0";    // shown on the display Settings page
 
 DeviceConfig gConfig;
@@ -88,6 +88,7 @@ int pairSecsLeft() {
 // via gRx and renders it on the same display.
 uint8_t gRole = ROLE_MASTER;             // ROLE_MASTER / ROLE_SLAVE (enum in app.h)
 volatile bool gRoleReq = false;          // display/loop request: toggle role + reboot
+volatile bool gRebootReq = false;        // request: reboot (e.g. after an AP-name change)
 slavelink::Receiver gRx;                 // ESP-NOW receiver, used only in slave role
 
 static void loadRole() {
@@ -110,6 +111,27 @@ static void applyRoleToggle() {
 // Consume a role-toggle request (raised by the Diag tab). Called from both loops.
 void serviceRole() {
     if (gRoleReq) { gRoleReq = false; applyRoleToggle(); }
+    if (gRebootReq) { Serial.println("[cfg] rebooting to apply..."); delay(300); ESP.restart(); }
+}
+
+// Custom SoftAP name/password (device-wide, NVS ns "vicap"). Empty = use the
+// auto-generated Vicmon-<mac3> / default password. Loaded at boot after the
+// default SSID is computed, so a saved value overrides it.
+void loadApCfg() {
+    Preferences p;
+    p.begin("vicap", true);
+    String s = p.getString("ssid", ""), pw = p.getString("pass", "");
+    p.end();
+    if (s.length()) { strncpy(kApSsid, s.c_str(), sizeof(kApSsid) - 1); kApSsid[sizeof(kApSsid) - 1] = 0; }
+    if (pw.length() >= 8) { strncpy(kApPass, pw.c_str(), sizeof(kApPass) - 1); kApPass[sizeof(kApPass) - 1] = 0; }
+}
+void saveApCfg(const String& ssid, const String& pass) {
+    Preferences p;
+    p.begin("vicap", false);
+    p.putString("ssid", ssid);            // "" clears -> reverts to the default at next boot
+    if (pass.length() >= 8) p.putString("pass", pass);
+    else if (pass.length() == 0) p.putString("pass", "");
+    p.end();
 }
 
 // Serial console commands (handy on a headless board / for testing): `pair`
@@ -879,6 +901,7 @@ void setup() {
     // needs no init, so it's available before WiFi/ESP-NOW come up.
     gMasterId = (uint32_t)ESP.getEfuseMac();
     snprintf(kApSsid, sizeof(kApSsid), "Vicmon-%06X", (unsigned)(gMasterId & 0xFFFFFF));
+    loadApCfg();  // apply a custom AP name/password if one was saved
     Serial.printf("[boot] master id %08X, AP '%s'\n", gMasterId, kApSsid);
 
     // Registry mutex: created before the server/tasks so RegLock is live the

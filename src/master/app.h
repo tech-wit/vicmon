@@ -96,8 +96,8 @@ struct HistRing {
 
 // ---- shared globals (defined in main.cpp) ----------------------------------
 
-extern char kApSsid[24];        // Vicmon-<mac3>, filled at boot
-extern const char* kApPass;
+extern char kApSsid[24];        // Vicmon-<mac3> (or custom), filled at boot
+extern char kApPass[24];        // default vicmon1234 (or custom)
 extern const char* kFwVersion;
 
 // Guards structural mutation of the device registry (gConfig add/remove/clear,
@@ -148,6 +148,7 @@ extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
 extern uint32_t gManualEpoch, gManualMillis;  // AP-set clock (see currentLocalEpoch)
+extern volatile bool gRebootReq;              // set to reboot from a web handler (loop applies)
 
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
 
@@ -170,6 +171,7 @@ void saveSettings(float capacity, float deadband, int tzMin);
 void saveAlertSettings(float socWarn, float socCrit, float vLow, float vHigh);
 void saveWifiCreds(const String& s, const String& pw);
 void loadWifi();
+void saveApCfg(const String& ssid, const String& pass);
 String settingsNs(int profile);
 void saveHistFile(int profile);
 void startPairing();

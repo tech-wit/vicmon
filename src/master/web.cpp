@@ -319,6 +319,7 @@ location.hash='#add';document.getElementById('addKey').focus();}</script>)JS";
     return h;
 }
 
+static String apCard();
 static String wifiCard();
 static String profilesCard();
 static String backupCard();
@@ -398,6 +399,7 @@ static String bindingsPage() {
          "A configured device that stops broadcasting also raises a warning.</p></div>";
 
     h += systemCard();
+    h += apCard();
     h += wifiCard();
     h += otaCard();
     h += backupCard();
@@ -532,6 +534,43 @@ static String wifiCard() {
            "<button>save &amp; connect</button></form>"
            "<form method=post action=/wifi style='margin-top:.6em'>"
            "<input type=hidden name=ssid value=''><button class=ghost>forget</button></form></div>";
+}
+
+static String apCard() {
+    return "<div class=card><h3>Access point</h3>"
+           "<p class=muted>This master's own WiFi hotspot. Saving reboots the device "
+           "&mdash; you'll need to reconnect your phone/laptop to the new network, then "
+           "open <b>http://192.168.4.1/</b>.</p>"
+           "<form class=inline method=post action=/apcfg>"
+           "<div><label>Name (SSID)</label><input name=ssid value='" + jsEsc(String(kApSsid)) +
+           "' maxlength=23 required></div>"
+           "<div><label>Password (8+ chars, blank = keep)</label>"
+           "<input name=pass type=password minlength=8 maxlength=23></div>"
+           "<button>save &amp; reboot</button></form>"
+           "<form method=post action=/apcfg style='margin-top:.6em'>"
+           "<input type=hidden name=reset value=1>"
+           "<button class=ghost>reset to default</button></form></div>";
+}
+
+static void handleApCfg(AsyncWebServerRequest* req) {
+    if (param(req, "reset") == "1") {
+        saveApCfg("", "");  // clear -> Vicmon-<mac3> / default password at next boot
+    } else {
+        String ssid = param(req, "ssid"), pass = param(req, "pass");
+        if (ssid.length() == 0) { req->redirect("/bindings"); return; }
+        if (pass.length() && pass.length() < 8) {
+            req->send(200, "text/html", "AP password must be at least 8 characters. "
+                                        "<a href=/bindings>back</a>");
+            return;
+        }
+        saveApCfg(ssid, pass.length() ? pass : String(kApPass));  // blank = keep current
+    }
+    gRebootReq = true;  // the loop reboots (don't restart from the async task)
+    req->send(200, "text/html",
+              "<meta charset=utf-8><body style='font-family:system-ui;background:#0f1720;"
+              "color:#e6edf3;padding:2em'><h3>Applying&hellip;</h3><p>The access point is "
+              "restarting. Reconnect to the new WiFi network, then open "
+              "<b>http://192.168.4.1/</b>.</p></body>");
 }
 
 static void handleWifi(AsyncWebServerRequest* req) {
@@ -1011,6 +1050,7 @@ void setupServer() {
     });
     gServer.on("/api/config/import", HTTP_POST, handleImport, nullptr, handleImportBody);
     gServer.on("/wifi", HTTP_POST, handleWifi);
+    gServer.on("/apcfg", HTTP_POST, handleApCfg);
     gServer.on("/profile/switch", HTTP_POST, handleProfileSwitch);
     gServer.on("/profile/new", HTTP_POST, handleProfileNew);
     gServer.on("/profile/rename", HTTP_POST, handleProfileRename);
