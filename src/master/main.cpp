@@ -900,6 +900,7 @@ static void setupSlave() {
     Serial.println(gRx.ok() ? "ESP-NOW receiver ready (ch1)" : "ESP-NOW receiver init FAILED");
     if (gRx.isPaired()) Serial.printf("Paired to master %08X\n", gRx.pairedMaster());
     else Serial.println("Unpaired — Pair from the AP page / Diag tab / button");
+    setupOta(ROLE_SLAVE);  // firmware clone: receive a push from (or push to) the master
 #ifdef VICMON_DISPLAY
     bringUpDisplay();
 #endif
@@ -933,6 +934,8 @@ static void slaveLoop() {
     gDns.processNextRequest();
     gRx.poll();
     serviceRole();  // "Switch to Master" (reboots)
+    serviceOta();   // firmware clone push/receive state machine
+    if (gOta.busy()) return;  // dedicate the loop to the transfer
 
     // Live trend ALWAYS runs, so the Graph populates from now immediately and is
     // never blocked on the backlog pull (a slow/stuck pull can't stall it). The
@@ -1084,6 +1087,7 @@ void setup() {
     }
 
     setupEspNow();  // live data broadcast to slaves
+    setupOta(ROLE_MASTER);  // firmware clone: push to (or receive from) a paired slave
 #endif
 
 #ifdef VICMON_SIM
@@ -1110,6 +1114,8 @@ void loop() {
     if (gRole == ROLE_SLAVE) { slaveLoop(); return; }
     serviceMasterSerial();  // `pair` / `role` console commands
     serviceRole();          // consume a serial/web role-toggle on headless masters
+    serviceOta();           // firmware clone push/receive state machine
+    if (gOta.busy()) return; // dedicate the loop to the transfer (skip the ~2s BLE scan)
 
 #ifndef GUITION_MINSYS
     gDns.processNextRequest();

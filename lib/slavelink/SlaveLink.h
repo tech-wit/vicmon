@@ -151,7 +151,74 @@ struct HistChunk {
     uint8_t pad_;
     HistPointW pts[kHistChunkPts];
 };
+
+// ---- Firmware clone over ESP-NOW (OTA push) --------------------------------
+// Either device clones its running app image to its paired peer: master->slave
+// or slave->master. The master and slave run the SAME universal `s3` binary, so
+// the transferred image boots on either board (the display path bails gracefully
+// where there's no panel). The source with the newer firmware pushes; the target
+// writes it into its OTA partition and reboots only if the whole image validates
+// (esp_ota_set_boot_partition checks the appended SHA-256), so a dropped transfer
+// is non-destructive.
+//
+// IMPORTANT: OTA frames carry their OWN protocol version (kOtaProto), NOT the
+// telemetry kVersion, and never gate on kVersion. That's what lets a new-firmware
+// source push to an old-firmware target across a future telemetry-format bump —
+// the whole point of remote update. Keep these four structs frozen; bump kOtaProto
+// only on an incompatible OTA-protocol change (which breaks cross-version OTA for
+// that one transition).
+//
+// Discovery is a broadcast announce (like the Snapshot): the source broadcasts
+// OtaAnnounce, a target that allows remote update replies unicast OtaAccept (so
+// each side learns the other's MAC with no pre-shared roster), then the source
+// streams OtaData stop-and-wait (one chunk outstanding, target ACKs each) and the
+// target finalizes with OtaCtrl DONE/FAIL. masterId filters to the paired peer in
+// both directions.
+static const uint8_t kOtaProto = 1;
+static const uint8_t kOtaAnnounceMagic1 = 'A';  // source -> broadcast: firmware on offer
+static const uint8_t kOtaAcceptMagic1 = 'O';    // target -> source unicast: send it to me
+static const uint8_t kOtaDataMagic1 = 'D';      // source -> target unicast: one chunk
+static const uint8_t kOtaCtrlMagic1 = 'K';      // target -> source unicast: ack / done / fail
+static const uint16_t kOtaChunk = 200;          // payload bytes per OtaData (last may be smaller)
+
+enum OtaCtrlKind : uint8_t {
+    OTA_ACK = 0,   // chunk `seq` written OK, send the next
+    OTA_DONE = 1,  // whole image received + validated; target is rebooting
+    OTA_FAIL = 2,  // validation/write failed; abort
+    OTA_BUSY = 3,  // target can't accept right now (already updating)
+};
+
+struct OtaAnnounce {
+    uint8_t magic0, magic1, otaProto, srcRole;  // 'V','A'; srcRole 0=master 1=slave (UI only)
+    uint32_t masterId;      // paired-peer filter (shared id, both directions)
+    uint32_t imageSize;     // exact app-image bytes to transfer
+    uint16_t chunkTotal;    // number of OtaData chunks (ceil(imageSize/kOtaChunk))
+    uint16_t chunkSize;     // == kOtaChunk (full chunk size; last chunk may be smaller)
+    uint8_t sha8[8];        // head of the source app_elf_sha256 — target skips if it matches (same build)
+};
+struct OtaAccept {
+    uint8_t magic0, magic1, otaProto, tgtRole;  // 'V','O'
+    uint32_t masterId;
+};
+struct OtaData {
+    uint8_t magic0, magic1, otaProto, pad_;  // 'V','D'
+    uint32_t masterId;
+    uint16_t seq;                            // 0-based chunk index
+    uint16_t len;                            // valid bytes in data[] (<= kOtaChunk)
+    uint8_t data[kOtaChunk];
+};
+struct OtaCtrl {
+    uint8_t magic0, magic1, otaProto, kind;  // 'V','K'; kind = OtaCtrlKind
+    uint32_t masterId;
+    uint16_t seq;                            // for OTA_ACK: which chunk was written
+    uint16_t pad_;
+};
 #pragma pack(pop)
+
+inline bool validOta(const void* p, uint8_t magic1) {
+    const uint8_t* b = (const uint8_t*)p;
+    return b[0] == kMagic0 && b[1] == magic1 && b[2] == kOtaProto;
+}
 
 inline void fillStatsHeader(StatsFrame& f) {
     f.magic0 = kMagic0;

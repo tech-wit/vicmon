@@ -51,7 +51,21 @@ favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
   **StatsFrame** (`V T`) carries the Today/Trip/Total energy meters + runtime-day
   bars for the slave's Week page **and the master's UTC clock** (`utcNow`, v5) so
   the slave shows real dates/time without its own clock; a **HistReq/HistChunk**
-  pair (`V Q` / `V C`) lets a slave *pull* the master's full trend rings on connect.
+  pair (`V Q` / `V C`) lets a slave *pull* the master's full trend rings on connect;
+  and an **OTA-clone** quartet (`V A`/`V O`/`V D`/`V K` — announce/accept/data/ctrl,
+  in `lib/slavelink/OtaLink.h`) pushes a firmware image master↔slave (see below).
+- **Firmware clone (OTA push):** either device can push its running app image to
+  the paired peer over ESP-NOW (Settings → System → *Send my firmware to the paired
+  device*, `POST /api/ota/push`). Discovery is a broadcast announce (so neither side
+  needs a pre-shared MAC roster); the target — if its *allow remote update* flag is
+  on and it isn't already running that build — replies unicast and the source streams
+  the image stop-and-wait (one chunk ACKed at a time, resend on timeout) into the
+  target's OTA partition. The target reboots only if the whole image validates
+  (`Update.end` → `esp_ota_set_boot_partition` checks the appended SHA-256), so a
+  dropped transfer is non-destructive. The OTA frames carry their **own** protocol
+  version (`kOtaProto`), independent of the telemetry `kVersion`, so a new-firmware
+  source can update an old-firmware target across a telemetry-format bump. Works
+  because the master and slave run the **same** universal `s3` binary.
 - **Channel:** the master AP is channel 1; a slave running a config AP is pinned
   to ch1 (a SoftAP can't channel-hop), which matches the offline/no-router setup.
 - **Slave UI (display + web):** a slave shows the **same** dashboard/web app as a
@@ -410,7 +424,8 @@ notes, pins, and gotchas. Summary:
   checks; optional buzzer.
 - **Config backup/restore** ✅ (export/import JSON of all profiles + keys).
 - **Mock/sim mode** ✅ (`atoms3-sim` env) for hardware-free UI development.
-- **OTA firmware updates** ✅ (web upload, `/api/ota`, Settings page).
+- **OTA firmware updates** ✅ (web upload, `/api/ota`, Settings page) **+ wireless
+  master↔slave clone over ESP-NOW** ✅ (`/api/ota/push`, `lib/slavelink/OtaLink.h`).
 - **mDNS** ✅ (`vicmon.local`).
 - **Diag / raw-decode page** ✅ (`/diag`) for parser bring-up.
 - **Real timestamps (NTP)** ✅ (daily-stats rollover) **+ persisted history**

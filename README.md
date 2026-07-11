@@ -29,7 +29,7 @@ WiFi access point.
 - **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance (smoothed "assume-zero-until-stable" so out-of-step device adverts don't flicker it).
 - **Profiles** — multiple independent setups (e.g. Home vs 4WD), switched instantly.
 - **Diagnostics** — `/diag` page shows each device's live decoded fields plus the raw decrypted advertisement bytes, for verifying parsers against VictronConnect.
-- **OTA updates** — flash a new `firmware.bin` over WiFi from the Settings page.
+- **OTA updates** — flash a new `firmware.bin` over WiFi from the Settings page, or **clone firmware wirelessly** between a master and its paired slave (Settings → System → *Send my firmware to the paired device*): the source pushes its running image over ESP-NOW and the target reboots into it only if the whole image validates, so an interrupted transfer is harmless. Guarded by a per-device *allow remote update* toggle.
 - **WiFi** — always runs its AP (name + password settable and persisted); can also join an existing network, reachable at `vicmon.local` (mDNS).
 - Config persists in NVS (survives reboot **and** reflash).
 

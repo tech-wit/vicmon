@@ -4,6 +4,7 @@
 // serializes and transmits it through the shared contract in app.h.
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <esp_now.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -11,6 +12,11 @@
 #include <cstring>
 
 #include "app.h"
+
+// The firmware-clone engine (master<->slave OTA push). Fed from the single
+// ESP-NOW recv callback (below for the master role; via gRx's frame hook for the
+// slave role), driven by serviceOta() from both loops. See lib/slavelink/OtaLink.h.
+slavelink::OtaEngine gOta;
 
 // ---- ESP-NOW broadcast to slaves -------------------------------------------
 // Broadcasts a packed snapshot to FF:FF:FF:FF:FF:FF ~1/s. Connectionless, so any
@@ -38,6 +44,7 @@ static uint16_t gHistOffset = 0;
 // Receive callback (master role). Only handles the tiny history request; the
 // bulky reply is sent from the loop so we never block the WiFi task.
 static void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
+    if (gOta.onFrame(mac, data, len)) return;  // OTA push frames (announce/accept/data/ctrl)
     if (len == (int)sizeof(slavelink::HistReq) && mac) {
         slavelink::HistReq r;
         memcpy(&r, data, sizeof(r));
@@ -270,4 +277,44 @@ void serviceHistSend() {
         uint16_t remain = (uint16_t)r.count - gHistOffset;
         gHistOffset += remain > slavelink::kHistChunkPts ? slavelink::kHistChunkPts : remain;
     }
+}
+
+// ---- firmware clone (OTA push) glue ----------------------------------------
+// In the slave role the single ESP-NOW recv callback belongs to gRx (Receiver);
+// this hook lets OTA frames reach the engine there. In the master role the frames
+// arrive via onEspNowRecv above. Either way everything funnels into gOta.
+static void otaFrameHook(const uint8_t* mac, const uint8_t* data, int len) {
+    gOta.onFrame(mac, data, len);
+}
+
+static bool loadOtaAllow() {
+    Preferences p;
+    p.begin("vicota", true);
+    bool a = p.getBool("allow", true);  // default on — a dropped transfer is non-destructive
+    p.end();
+    return a;
+}
+void saveOtaAllow(bool allow) {
+    Preferences p;
+    p.begin("vicota", false);
+    p.putBool("allow", allow);
+    p.end();
+    gOta.setAllowRemote(allow);
+}
+
+// Init the OTA engine for this boot's role. localId = the masterId that tags/filters
+// our OTA frames: the master uses its own id; a slave uses its paired master's id so
+// both ends share it. Both roles transmit over the SoftAP interface.
+void setupOta(uint8_t role) {
+    uint32_t localId = (role == ROLE_SLAVE) ? gRx.pairedMaster() : gMasterId;
+    gOta.begin(localId, role, WIFI_IF_AP);
+    gOta.setAllowRemote(loadOtaAllow());
+    if (role == ROLE_SLAVE) gRx.setFrameHook(&otaFrameHook);  // master funnels via onEspNowRecv
+}
+
+// Call each loop (both roles): keep a slave's filter id current (it can pair/unpair
+// at runtime) and pump the transfer state machine.
+void serviceOta() {
+    if (gRole == ROLE_SLAVE) gOta.setLocalId(gRx.pairedMaster());
+    gOta.service();
 }

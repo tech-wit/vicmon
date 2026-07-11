@@ -16,6 +16,7 @@
 #include "Profiles.h"
 #include "Registry.h"
 #include "Signals.h"
+#include "OtaLink.h"
 #include "SlaveLink.h"
 #include "SlaveReceiver.h"
 #include "Stats.h"
@@ -134,6 +135,7 @@ extern volatile uint16_t gSnapSeq;      // broadcast sequence counter (esp_timer
 extern uint8_t gRole;                   // ROLE_MASTER / ROLE_SLAVE
 extern volatile bool gRoleReq;          // request: toggle role + reboot
 extern slavelink::Receiver gRx;         // ESP-NOW receiver, used only in slave role
+extern slavelink::OtaEngine gOta;       // firmware-clone engine (master<->slave OTA push)
 
 extern int gScanVictron, gScanDecoded;  // per-scan diagnostics
 
@@ -192,6 +194,9 @@ void setupEspNow();
 void sendSlaveBroadcast();
 void sendStatsFrame();
 void serviceHistSend();  // master: paced reply to a slave's graph-history pull
+void setupOta(uint8_t role);  // init the OTA engine for this role (loads allow-remote NVS)
+void serviceOta();            // drive OTA + refresh the slave's paired-master id; call each loop
+void saveOtaAllow(bool allow);// persist the allow-remote-update flag (NVS ns "vicota")
 
 // Defined in web.cpp, called from main.cpp.
 String jsonEsc(const String& s);

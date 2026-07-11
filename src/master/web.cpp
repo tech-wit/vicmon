@@ -1062,6 +1062,28 @@ static String systemCard() {
         h += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
              "capture records raw bytes of unknown Victron devices. Switching role reboots.</p>";
     }
+    // Firmware clone (OTA push): either role can push its running image to the
+    // paired peer over ESP-NOW; the peer accepts only if it allows remote updates.
+    // A dropped transfer is non-destructive (the target keeps its current firmware).
+    h += "<p class=muted style='margin:.9em 0 .3em'>&mdash; Firmware clone (wireless) &mdash;</p>";
+    h += "<label style='font-weight:normal;display:block;margin-bottom:.4em'>"
+         "<input type=checkbox id=otaAllow onchange=\"fetch('/api/ota/allow?v='+(this.checked?1:0),{method:'POST'})\"> "
+         "Allow this device to be updated remotely</label>";
+    h += "<button onclick=\"otaPush()\">Send my firmware to the paired device</button> "
+         "<span id=otaStat class=muted></span>";
+    h += "<p class=muted>The paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
+         " must have “allow remote update” on. It reboots into the new firmware only if the "
+         "whole image validates, so an interrupted transfer is harmless.</p>";
+    h += "<script>"
+         "function otaPoll(){fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
+         "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
+         "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
+         "}).catch(()=>{});}"
+         "function otaPush(){if(!confirm('Push this firmware to the paired device? It reboots when done.'))return;"
+         "fetch('/api/ota/push',{method:'POST'}).then(r=>r.text()).then(t=>{"
+         "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
+         "otaPoll();setInterval(otaPoll,1500);"
+         "</script>";
     return h + "</div>";
 }
 
@@ -1085,6 +1107,26 @@ void setupServer() {
     gServer.on("/api/debug", HTTP_POST, [](AsyncWebServerRequest* req) {
         gDebugCapture = !gDebugCapture;
         req->send(200, "text/plain", gDebugCapture ? "on" : "off");
+    });
+    // Firmware clone (OTA push) — offer this device's running image to the paired
+    // peer, toggle whether we accept an incoming push, and report transfer status.
+    gServer.on("/api/ota/push", HTTP_POST, [](AsyncWebServerRequest* req) {
+        bool ok = gOta.startPush();
+        req->send(200, "text/plain", ok ? "offering firmware to the paired device…" : "busy");
+    });
+    gServer.on("/api/ota/allow", HTTP_POST, [](AsyncWebServerRequest* req) {
+        bool v = req->hasParam("v") ? req->getParam("v")->value().toInt() != 0 : true;
+        saveOtaAllow(v);
+        req->send(200, "text/plain", v ? "on" : "off");
+    });
+    gServer.on("/api/ota/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        String j = "{\"allow\":";
+        j += gOta.allowRemote() ? "true" : "false";
+        j += ",\"busy\":";
+        j += gOta.busy() ? "true" : "false";
+        j += ",\"percent\":" + String(gOta.percent());
+        j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"}";
+        req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());

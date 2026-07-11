@@ -58,6 +58,11 @@ class Receiver {
   void startAdopt() { startAdopt_ = true; }  // open the adopt window
   void unpair() { unpairReq_ = true; }       // forget the current master
 
+  // Optional peek at every received frame BEFORE the receiver's own dispatch, so
+  // the app can layer extra frame types (e.g. OTA) on the single ESP-NOW recv
+  // callback. Runs in the callback context — keep it minimal (stash + flag).
+  void setFrameHook(void (*fn)(const uint8_t*, const uint8_t*, int)) { frameHook_ = fn; }
+
   // ---- state for the UI ----
   bool ok() const { return ok_; }
   uint32_t pairedMaster() const { return paired_; }
@@ -150,6 +155,8 @@ class Receiver {
   // Minimal work in the callback: note the frame; accept data only from our
   // paired master; defer NVS writes to servicePairing() via adoptId_.
   void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
+    if (frameHook_) frameHook_(mac, data, len);  // app peek (OTA) — OTA frame sizes
+                                                  // don't match ours, so we still fall through
     // Low-rate 7-day stats frame (Week page) — separate type, our master only.
     if (len == (int)sizeof(StatsFrame)) {
       StatsFrame f;
@@ -312,6 +319,7 @@ class Receiver {
   }
 
   inline static Receiver* self_ = nullptr;
+  void (*frameHook_)(const uint8_t*, const uint8_t*, int) = nullptr;
   const char* ns_ = "vicslave";
   bool ok_ = false;
   bool manageWifi_ = true;
