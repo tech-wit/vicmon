@@ -19,7 +19,7 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
   char buf[24];
   // Top bar in two sections: a dark VICMON brand block on the left, and the
   // charge-status banner (mode colour, black text) filling the rest.
-  const int kBrandW = 140;
+  const int kBrandW = 156;
   c->fillRect(0, 0, kBrandW, 38, kBlack);
   c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
   gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
