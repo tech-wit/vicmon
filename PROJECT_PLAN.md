@@ -54,18 +54,26 @@ favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
   pair (`V Q` / `V C`) lets a slave *pull* the master's full trend rings on connect;
   and an **OTA-clone** quartet (`V A`/`V O`/`V D`/`V K` — announce/accept/data/ctrl,
   in `lib/slavelink/OtaLink.h`) pushes a firmware image master↔slave (see below).
-- **Firmware clone (OTA push):** either device can push its running app image to
-  the paired peer over ESP-NOW (Settings → System → *Send my firmware to the paired
-  device*, `POST /api/ota/push`). Discovery is a broadcast announce (so neither side
-  needs a pre-shared MAC roster); the target — if its *allow remote update* flag is
-  on and it isn't already running that build — replies unicast and the source streams
-  the image stop-and-wait (one chunk ACKed at a time, resend on timeout) into the
-  target's OTA partition. The target reboots only if the whole image validates
-  (`Update.end` → `esp_ota_set_boot_partition` checks the appended SHA-256), so a
-  dropped transfer is non-destructive. The OTA frames carry their **own** protocol
-  version (`kOtaProto`), independent of the telemetry `kVersion`, so a new-firmware
-  source can update an old-firmware target across a telemetry-format bump. Works
-  because the master and slave run the **same** universal `s3` binary.
+- **Firmware clone (OTA):** either device can clone its running app image to the
+  paired peer over ESP-NOW, in **either direction of initiation**:
+  - **Push** — from the unit that has the new firmware (Settings → System, LCD Diag →
+    Firmware, or `POST /api/ota/push`). Discovery is a broadcast announce (no
+    pre-shared MAC roster); the target — if its *allow remote update* flag is on and
+    it isn't already running that build — replies unicast.
+  - **Pull** — from the out-of-date unit (`POST /api/ota/pull`, same LCD screen). It
+    broadcasts its build serial and a paired peer answers **only if strictly newer**,
+    so a pull can never fetch a same/older image.
+  The source then streams the image stop-and-wait (one chunk ACKed at a time, resend
+  on timeout) into the target's OTA partition; the target reboots only if the whole
+  image validates (`Update.end` → `esp_ota_set_boot_partition` checks the appended
+  SHA-256), so a dropped transfer is non-destructive. **Version awareness:** each unit
+  derives a monotonic build serial from the app descriptor's embedded build date/time
+  (no manual bumping) plus the `kFwVersion` string; announce/accept carry both so each
+  end knows the other's version and relative age (shown in the transfer status, on the
+  web System card, and the LCD Firmware screen). The OTA frames carry their **own**
+  protocol version (`kOtaProto`), independent of the telemetry `kVersion`, so a
+  new-firmware source can update an old-firmware target across a telemetry-format bump.
+  Works because the master and slave run the **same** universal `s3` binary.
 - **Channel:** the master AP is channel 1; a slave running a config AP is pinned
   to ch1 (a SoftAP can't channel-hop), which matches the offline/no-router setup.
 - **Slave UI (display + web):** a slave shows the **same** dashboard/web app as a
