@@ -37,8 +37,10 @@ static int gMenuPage = 0;                // display-local: source-picker page
 static int gDiagScreen = 0;              // display-local: Diag sub-screen (guition::DiagScreen)
 static bool gDisplayFlip = false;        // display-local: panel rotated 180° (NVS-persisted)
 static volatile bool gFlipSaveReq = false;  // request: persist gDisplayFlip on the loop task
+static volatile bool gBrightSaveReq = false; // request: persist current brightness on the loop task
 static uint8_t flipRotation();           // 1 normal / 3 flipped (defined near bringUpDisplay)
 static void saveDisplayFlip();           // defined near bringUpDisplay (NVS ns "vicdisp")
+static void saveDisplayBright();         // defined near bringUpDisplay (NVS ns "vicdisp")
 
 static_assert(guition::ROLE_N == static_cast<int>(sig::kRoleCount),
               "display ROLE_N must match sig::kRoleCount");
@@ -493,6 +495,10 @@ void serviceDashRequests() {
         gFlipSaveReq = false;
         saveDisplayFlip();  // gDisplayFlip already applied live by the display task
     }
+    if (gBrightSaveReq) {
+        gBrightSaveReq = false;
+        saveDisplayBright();  // current brightness already applied live by the display task
+    }
     if (gStatResetReq >= 0) {
         int scope = gStatResetReq;
         gStatResetReq = -1;
@@ -652,6 +658,7 @@ static void displayTask(void*) {
                                     int b = gDisplay.brightness() + dir * 10;
                                     if (b < 10) b = 10; if (b > 100) b = 100;
                                     gDisplay.setBrightness((uint8_t)b);
+                                    gBrightSaveReq = true;  // persist on the loop task
                                 } else if (gSetSel == guition::TUN_FLIP) {
                                     // Display-owned 180° flip: + = flipped, - = normal.
                                     // Applied live (canvas + touch), persisted by the loop.
@@ -752,6 +759,22 @@ static void saveDisplayFlip() {
     p.putBool("flip", gDisplayFlip);
     p.end();
 }
+// Backlight level (device-wide, NVS ns "vicdisp", 10..100 %). Applied after the
+// panel comes up; saved when the Settings brightness tunable is adjusted.
+static uint8_t loadDisplayBright() {
+    Preferences p;
+    p.begin("vicdisp", true);
+    uint8_t b = p.getUChar("bright", 100);
+    p.end();
+    if (b < 10) b = 10; if (b > 100) b = 100;
+    return b;
+}
+static void saveDisplayBright() {
+    Preferences p;
+    p.begin("vicdisp", false);
+    p.putUChar("bright", gDisplay.brightness());
+    p.end();
+}
 
 // Bring up the panel + touch + display task (shared by both roles). Seeds the
 // first snapshot for the active role so the task has something to draw.
@@ -767,6 +790,7 @@ void bringUpDisplay() {
         return;
     }
     Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
+    gDisplay.setBrightness(loadDisplayBright());  // restore the saved backlight level
     gTouch.begin(flipRotation());
     gDashMux = xSemaphoreCreateMutex();
     if (gRole == ROLE_SLAVE) publishSlaveDash(); else publishDash();  // seed
