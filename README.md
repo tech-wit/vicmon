@@ -68,10 +68,13 @@ from the *same* binary. Other envs: `atoms3-sim` (synthetic data, no hardware),
 Phase-1 scanner in `src/wroom/`, classic ESP32).
 
 **Slaves (ESP-NOW):** a slave receives the master's ~4/s broadcast and shows it on
-its screen (or serial, if headless) plus its own config AP. Pairing is two-sided:
-open the master's 60 s window (Diag/Tune *Pair*, or web/serial `pair`), then adopt
-on the slave (button / web / serial). A paired slave filters to its master's id,
-so several masters can coexist.
+its screen (or serial, if headless) plus its own config AP, which serves the **same
+web app** as a master (Mimic + Stats + trend), sourced from the received frame. The
+role-only surfaces are hidden: the nav drops Devices/Diag and the Settings page
+shows just the slave's own controls (pair / switch role, config AP, OTA). Pairing is
+two-sided: open the master's 60 s window (Diag/Tune *Pair*, or web/serial `pair`),
+then adopt on the slave (button / web / serial). A paired slave filters to its
+master's id, so several masters can coexist.
 
 ## Using it
 

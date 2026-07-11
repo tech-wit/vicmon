@@ -64,7 +64,10 @@ favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
   Master-only surfaces are hidden by role: on the LCD the Settings > Tune screen
   shows link status + AP details + brightness/timezone/screen-flip + Pair (no
   profiles / alert tunables), Bind is hidden, and Diag is Link + Switch-to-Master;
-  the web nav drops Devices/Diag. **Stats/Week is shown on the slave** (fed from the
+  the web nav drops Devices/Diag and the web Settings page shows only the cards a
+  slave owns — System (pair / unpair / switch role), its config AP, and OTA — hiding
+  profiles, panel-signal bindings, system tunables, alerts, WiFi-join and backup.
+  **Stats/Week is shown on the slave** (fed from the
   StatsFrame; its clock-set controls are hidden since the slave takes the master's
   time), and the slave mimic reads capacity from the snapshot so remaining-Ah +
   time-to-full/go match the master. Parity: pair / switch-role / debug are reachable

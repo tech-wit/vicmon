@@ -376,6 +376,18 @@ static String systemCard();
 
 static String bindingsPage() {
     String h = pageHead("/bindings");
+    // A slave owns no BLE devices/profiles/bindings/alerts of its own — it mirrors a
+    // master over ESP-NOW. Show only what it actually controls: pair/role (system),
+    // its config AP, and OTA. The master-only cards (profiles, panel signals, system
+    // tunables, alerts, WiFi-join, backup) would be empty or would break the link
+    // (joining a router moves the SoftAP off ch1), so they're hidden.
+    if (gRole == ROLE_SLAVE) {
+        h += systemCard();
+        h += apCard();
+        h += otaCard();
+        h += pageFoot();
+        return h;
+    }
     h += profilesCard();
     h += "<div class=card><h3>Panel signals</h3>"
          "<p class=muted>Tag which device field feeds each signal the mimic / "
