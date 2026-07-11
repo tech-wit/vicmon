@@ -18,24 +18,26 @@ WiFi access point.
 ## What works now
 
 - Decrypts & parses Victron advertisements (BMV/SmartShunt, Orion XS DC-DC and SmartSolar MPPT all verified vs VictronConnect; AC charger parser present but unverified).
-- **Mimic dashboard** — battery centre with SoC fill, solar/charger/DC-DC source nodes and a load, animated flow lines coloured by charge/discharge, battery detail (V, A, remaining Ah, starter V, time-to-go) and a mode banner.
-- **Trend chart** — server-logged history (continuous, survives client disconnects **and reboots** via LittleFS) with 1m/10m/1h/12h/24h windows and per-window scale marks (fine 5 s/1 h + coarse 60 s/24 h buffers). SoC is overlaid on a right-hand 0–100 % axis; click legend entries to show/hide each series.
+- **On-screen dashboard** (Guition touch master) — Dash, Flow (animated energy-flow mimic), Graph (trend), Week (energy meters) and Settings pages, driven directly with Arduino_GFX. Same look as the web app; a "VICMON" wordmark + charge-status banner tops the Dash/Flow.
+- **Web mimic dashboard** — battery centre with SoC fill, solar/charger/DC-DC source nodes and a load, animated flow lines coloured by charge/discharge, battery detail (V, A, remaining Ah, starter V) and a **time-to-go / time-to-full** readout (days/hours; the BMV's own filtered TTG or an instantaneous estimate).
+- **Trend chart** — server-logged history (continuous, survives client disconnects **and reboots** via LittleFS) with 1m/10m/1h/12h/24h windows and per-window scale marks (fine 5 s/1 h + coarse 60 s/24 h buffers). SoC overlaid on a right-hand 0–100 % axis; toggle each series in the legend. **On a slave** the trend is pulled from the master over ESP-NOW on connect (resumable, with a progress %) then extended live.
+- **Energy meters** — resettable **Today / Trip / Total** meters showing **net-in / net-out amp-hours**, per-source Ah and duration, plus a runtime-day energy bar chart. **No clock required** — "days" advance off a persisted run-time odometer; set the time on the AP (manual HH:MM/AM-PM or the browser clock) or via NTP to switch to calendar days. Reset per-meter (long-press a card on the TFT, or a button on the AP). Persisted in NVS.
 - **Alerts** — configurable low/critical SoC and low/high voltage thresholds plus device-offline detection; shown as a mimic banner and on the onboard RGB LED (red/amber/green).
 - **Config backup/restore** — download all profiles (devices, keys, bindings, settings) as JSON and restore from one; protects keys against erase/reflash and clones a second unit.
 - **Simulator build** (`atoms3-sim`) — synthetic battery/solar/DC-DC so the whole UI can be developed without any Victron device.
-- **Energy counters & trip stats** — Today / Trip / Total amp-hours & watt-hours per source (solar, DC-DC, charger) plus load and net battery, with min/max SoC & voltage, peak power and time charging/discharging. Today auto-resets at local midnight (NTP); Trip and Total reset on demand. Persisted in NVS, with a **last-7-days** energy bar chart.
 - **Devices** — add / edit / delete by AES key; live per-device summary; "Discovered nearby" list (with Bluetooth name, MAC, RSSI) to adopt new devices.
-- **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance.
+- **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance (smoothed "assume-zero-until-stable" so out-of-step device adverts don't flicker it).
 - **Profiles** — multiple independent setups (e.g. Home vs 4WD), switched instantly.
 - **Diagnostics** — `/diag` page shows each device's live decoded fields plus the raw decrypted advertisement bytes, for verifying parsers against VictronConnect.
 - **OTA updates** — flash a new `firmware.bin` over WiFi from the Settings page.
-- **WiFi** — always runs its AP; can also join an existing network, reachable at `vicmon.local` (mDNS).
+- **WiFi** — always runs its AP (name + password settable and persisted); can also join an existing network, reachable at `vicmon.local` (mDNS).
 - Config persists in NVS (survives reboot **and** reflash).
 
 ## Hardware
 
-- **Now:** M5Stack AtomS3 Lite (ESP32-S3, native USB) as the headless master.
-- **Coming:** Guition JC3248W535 (3.5" touch master display), LilyGo T-Display-S3 (slave).
+- **Master with display:** Guition JC3248W535 (3.5" 480×320 capacitive touch, ESP32-S3 + PSRAM).
+- **Slave / headless nodes:** any ESP32-S3 (bare dev board, M5Stack AtomS3, …) — the same firmware runs as a master (BLE + AP) or a screenless slave, chosen at runtime.
+- **Coming:** LilyGo T-Display-S3 display + button driver (builds headless for now).
 - Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect.
 
 ## Quick start
@@ -48,20 +50,21 @@ python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
 # host unit tests (decrypt/parse) — no hardware needed
 .piovenv/bin/pio test -e native
 
-# build + flash the headless master to the AtomS3 (native USB → /dev/ttyACM0)
-.piovenv/bin/pio run -e atoms3 -t upload --upload-port /dev/ttyACM0
+# build + flash the touch master to the Guition (or -e headless for a screenless S3)
+.piovenv/bin/pio run -e master -t upload --upload-port /dev/ttyACM0
 
 # read the serial log (pio's own monitor needs an interactive TTY)
-.piovenv/bin/python tools/monitor.py --seconds 20
+.piovenv/bin/python tools/monitor.py --port /dev/ttyACM0 --seconds 20
 ```
 
-One app (`src/master/`) builds for every board; the display driver is picked per
-board at build time, the **master/slave role at runtime** (NVS flag — switch it
-from the screen, the AP web page, or serial `role`). Build envs:
-`master` (Guition, touch display), `headless` (bare ESP32-S3, no display),
-`atoms3` (M5Stack AtomS3 headless), `lilygo` (T-Display-S3, display driver TBD —
-builds headless), `guition` (bench dashboard demo), `wroom` (Phase-1 scanner),
-`native` (host tests).
+One app (`src/master/`, split into `main`/`web`/`display`/`espnow`/`ble_ingest`
+behind `app.h`) builds for every board; the display driver is picked per board at
+build time, the **master/slave role at runtime** (NVS flag — switch it from the
+screen, the AP web page, or serial `role`). Build envs for the current app:
+`master` (Guition touch display), `headless` (bare ESP32-S3, no display),
+`lilygo` (T-Display-S3, driver TBD — builds headless), `guition` (bench dashboard
+demo), `atoms3-sim` (simulator), `native` (host tests). (`wroom`/`atoms3` build
+the earlier Phase-1/2 scanner in `src/wroom/`.)
 
 **Slaves (ESP-NOW):** a slave receives the master's ~4/s broadcast and shows it on
 its screen (or serial, if headless) plus its own config AP. Pairing is two-sided:
@@ -71,7 +74,7 @@ so several masters can coexist.
 
 ## Using it
 
-1. Power the master. It starts a WiFi AP **`Vicmon-Master`** (password `vicmon1234`).
+1. Power the master. It starts a WiFi AP **`Vicmon-<id>`** (e.g. `Vicmon-858428`; password `vicmon1234` — both changeable on the AP and persisted).
 2. Join that network and open **`http://192.168.4.1/`** (a captive-portal prompt usually pops up).
 3. Go to **Settings → Profiles**, create/name a profile (e.g. "4WD").
 4. Go to **Devices → Add device**: enter a name, type, and the 32-hex **encryption key**.

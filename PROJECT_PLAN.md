@@ -34,13 +34,21 @@ former standalone `src/slave` was folded in and deleted.
 - **Transmit:** a 250 ms `esp_timer` broadcasts a cached snapshot (~4/s) so the
   rate is independent of the loop's ~2 s BLE scan; the broadcast peer uses
   `ifidx = WIFI_IF_AP` (the master is AP-only — the original STA default sent
-  nothing). Wire format `lib/slavelink/SlaveLink.h` (v2), shared receiver
-  `lib/slavelink/SlaveReceiver.h`.
+  nothing). Wire format `lib/slavelink/SlaveLink.h` (v4; +solar W/V, dc-dc V,
+  consumed & capacity Ah), shared receiver `lib/slavelink/SlaveReceiver.h`.
+- **Extra frames** (same file, dispatched by length + magic): a low-rate
+  **StatsFrame** (`V T`) carries the Today/Trip/Total energy meters + runtime-day
+  bars for the slave's Week page; a **HistReq/HistChunk** pair (`V Q` / `V C`)
+  lets a slave *pull* the master's full trend rings on connect (see below).
 - **Channel:** the master AP is channel 1; a slave running a config AP is pinned
   to ch1 (a SoftAP can't channel-hop), which matches the offline/no-router setup.
 - **Slave UI (display + web):** a slave shows the **same** dashboard/web app as a
-  master, sourced from the received frame — the mimic + a Graph it builds by
-  recording each received frame into its history ring (RAM-only, fills from now).
+  master, sourced from the received frame — the mimic + a Graph. The Graph builds
+  live from received frames *and* **pulls the master's full history rings** once
+  the link is up (unicast HistReq → paced HistChunk reply, resumable via a
+  per-chunk bitmap, ~10 s, with a "syncing NN%" overlay). When the link goes
+  stale the slave keeps the **last-known** values (banner shows "STALE") rather
+  than blanking. Weekly meters come from the StatsFrame.
   Master-only surfaces are hidden by role: on the LCD the Settings > Tune screen
   shows link status + AP details + brightness/timezone + Pair (no profiles / alert
   tunables), Bind is hidden, and Diag is Link + Switch-to-Master; the web nav drops
@@ -77,7 +85,7 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 
 ```
 vicmon/
-├── platformio.ini          # envs: wroom, atoms3(-sim), master, guition, gfxref, lvglref, slave, native
+├── platformio.ini          # envs: wroom, atoms3(-sim), master, headless, lilygo, guition, gfxref, lvglref, native
 ├── README.md               # usage / quick start
 ├── PROJECT_SPEC.md         # original brief
 ├── PROJECT_PLAN.md         # this file
@@ -88,21 +96,31 @@ vicmon/
 │   ├── VictronParser.*     # record parsers (battery / dcdc / solar / ac-charger)
 │   └── VictronTypes.h      # decoded structs + Record/AuxMode enums
 ├── lib/slavelink/          # SHARED master<->slave ESP-NOW code
-│   ├── SlaveLink.h         # versioned packed Snapshot (masterId + flags) + enc/dec
-│   └── SlaveReceiver.h     # ESP-NOW rx + channel acquisition + pairing state machine
+│   ├── SlaveLink.h         # packed wire formats: Snapshot(v4) + StatsFrame + HistReq/HistChunk
+│   └── SlaveReceiver.h     # ESP-NOW rx + acquisition + pairing + history-pull state machine
 ├── src/
-│   ├── wroom/main.cpp      # Phase-1 reference scanner (Serial output)
+│   ├── wroom/main.cpp      # Phase-1/2 reference scanner (Serial output; wroom/atoms3 envs)
 │   ├── master/             # THE app — master OR slave at runtime; display per board flag
-│   │   ├── main.cpp        # role branch, BLE ingest, resolver, history, web app, ESP-NOW, display task
+│   │   ├── app.h           # shared contract: board seam, shared types, extern state, prototypes
+│   │   ├── main.cpp        # setup/loop, role branch, signal resolver, history, stats, alerts, slave role
+│   │   ├── web.cpp         # WiFi-AP web app: pages, JSON, handlers, setupServer (+ registry mutex)
+│   │   ├── web_assets.h    # embedded HTML/CSS/JS (mimic / energy / diag pages)
+│   │   ├── display.cpp     # Guition dashboard glue: display task, DashData collection, touch (VICMON_DISPLAY)
+│   │   ├── espnow.cpp      # ESP-NOW broadcaster + StatsFrame + history-pull responder
+│   │   ├── ble_ingest.cpp  # BLE scan → decrypt/parse → registry (loop task, under the registry mutex)
 │   │   ├── Registry.h      # DeviceSlot (key, type, latest values, mac, staleness)
 │   │   ├── DeviceConfig.*  # NVS-backed device list (per profile)
 │   │   ├── Signals.*       # signal roles, fields, resolver, NVS bindings
-│   │   ├── Stats.*         # energy counters / trip stats (Today/Trip/Total)
+│   │   ├── Stats.*         # energy meters (Today/Trip/Total) + run-time odometer / day records
 │   │   └── Profiles.*      # ProfileManager (NVS, up to 4 profiles)
 │   ├── guition/main.cpp    # standalone GFX dashboard demo (synthetic data, no WiFi/BLE)
 │   ├── gfxref/main.cpp     # known-good AXS15231B reference baseline
 │   └── lvglref/main.cpp    # LVGL 9 reference/fallback on the real panel (not shipped)
-├── lib/guition/            # master display driver: GuitionDisplay/Touch + GfxDashboard (5 pages)
+├── lib/guition/            # master display driver: GuitionDisplay/Touch + the split dashboard
+│   ├── GfxDashboard.{h,cpp} # public API + tab bar + page-descriptor registry / dispatch
+│   ├── gfx_internal.h      # shared palette / layout / primitives + per-page render decls
+│   ├── gfx_common.cpp      # shared primitives (gtext / numOr / modeColor / ttgLabel)
+│   └── gfx_{dash,flow,graph,week,settings}.cpp  # one file per page
 ├── test/test_victron/      # native unit tests (pio test -e native)
 ├── test/test_slavelink/    # native wire-format round-trip tests
 └── tools/monitor.py        # TTY-less serial reader (pio monitor needs a TTY)
@@ -141,8 +159,9 @@ profile *N*≥1 appends the id):
 - devices: `vicmon` / `vicmon<N>`
 - bindings: `vicsig2` / `vicsig2_<N>`  (the `2` was a one-time bump when the role enum changed)
 - settings: `vicset` / `vicset<N>`  (battery capacity, idle deadband, TZ offset, alert thresholds)
-- energy stats: `vicstat` / `vicstat<N>`  (Today/Trip/Total bucket blob)
-- profiles index: `vicprof`  ·  WiFi STA creds: `vicwifi` (global, shared across profiles)
+- energy stats: `vicstat` / `vicstat<N>`  (Today/Trip/Total buckets + day records + run-seconds odometer)
+- profiles index: `vicprof`  ·  WiFi STA creds: `vicwifi`  (global)
+- device role: `vicrole`  ·  slave's paired master id: `vicslave`  ·  custom AP name/pass: `vicap`  (all global)
 - history (LittleFS, not NVS): `/hist<N>.bin` per profile
 
 **History.** A `HistRing` struct (buffer + cap + head/count + interval) with two
@@ -183,24 +202,30 @@ developed and demoed on the bench with no Victron device in range.
 Ah/Wh (`A·dt`, `A·V·dt` with battery V as the watt-hour reference) and tracks
 extremes (min/max SoC & V, peak solar/load W, peak charge/discharge A, time
 charging/discharging) over three scopes:
-- **Today** — auto-resets at local midnight via NTP; falls back to "since boot"
-  when offline. Rollover keyed off a `yyyymmdd` stamp.
+- **Today** — resets at the day rollover (see below); user-resettable too.
 - **Trip** — user-resettable journey/camp meter.
 - **Total** — lifetime; reset only on explicit confirm.
 
 Per source it logs solar / DC-DC / charger harvest plus load consumption and net
 battery charged/discharged. Buckets are a per-profile NVS blob (`vicstat*`),
 written at most every 5 min and on any reset (dt clamped to 30 s to drop the gap
-after a stall/clock-jump). NTP is started when WiFi STA is configured; the TZ
-offset (settings, minutes from UTC, default +600 = AEST) only shifts the daily
-rollover. `GET /api/stats`; `POST /stats/reset?scope=today|trip|total`; the
-**Stats** web page renders the three scopes with a toggle + reset.
+after a stall/clock-jump).
 
-At each midnight rollover the finished Today bucket is archived into a 14-day
-ring of `DayRecord`s (solar/dcdc/charger/load/discharged Wh + SoC min/max), also
-in the NVS blob. `/api/stats` returns a `days[]` array and the Stats page draws
-a **last-7-days** bar chart (stacked Wh-in by source vs. Wh-out). Needs the NTP
-clock — no clock ⇒ no rollover ⇒ no day records.
+**Day rollover — no clock required.** A persisted **run-seconds odometer** rolls
+Today over every 24 h of run-time (dayStamp = a run-day index), so the history
+works with no clock at all. If a clock *is* set — NTP (WiFi STA) or a **manual
+time** entered on the AP (HH:MM/AM-PM, or the browser clock; date doesn't matter)
+— it rolls at local midnight instead and labels become dates. `currentLocalEpoch`
+prefers NTP, then the manual clock, else 0 → run-days. TZ offset shifts the
+calendar rollover only.
+
+Each rollover archives the finished Today bucket into a 14-day ring of
+`DayRecord`s (per-source **Ah** + SoC min/max). The **Energy** view (web + TFT
+Week tab) shows resettable **Today / Trip / Total** cards — big **net-in / net-out
+Ah**, source split, duration — plus a runtime-day Ah bar chart (always a 7-day
+frame). Reset per-meter: long-press a card on the TFT, or a button on the AP.
+`GET /api/stats` (`run_day`, buckets, `days[]`); `POST /stats/reset?scope=`;
+`POST /api/time` (epoch or `h`/`m`).
 
 **Web app** (dark theme, served from flash):
 - `/` **Mimic** — SVG energy-flow diagram (solar/charger/dcdc → battery → load,
