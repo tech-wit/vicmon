@@ -307,6 +307,7 @@ void saveOtaAllow(bool allow) {
 // both ends share it. Both roles transmit over the SoftAP interface.
 void setupOta(uint8_t role) {
     uint32_t localId = (role == ROLE_SLAVE) ? gRx.pairedMaster() : gMasterId;
+    gOta.setVersion(kFwVersion);  // before begin() so it isn't overwritten by the app-desc version
     gOta.begin(localId, role, WIFI_IF_AP);
     gOta.setAllowRemote(loadOtaAllow());
     if (role == ROLE_SLAVE) gRx.setFrameHook(&otaFrameHook);  // master funnels via onEspNowRecv

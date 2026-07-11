@@ -174,12 +174,14 @@ struct HistChunk {
 // streams OtaData stop-and-wait (one chunk outstanding, target ACKs each) and the
 // target finalizes with OtaCtrl DONE/FAIL. masterId filters to the paired peer in
 // both directions.
-static const uint8_t kOtaProto = 1;
+static const uint8_t kOtaProto = 2;  // v2: announce/accept carry version + buildSerial (newness)
 static const uint8_t kOtaAnnounceMagic1 = 'A';  // source -> broadcast: firmware on offer
 static const uint8_t kOtaAcceptMagic1 = 'O';    // target -> source unicast: send it to me
 static const uint8_t kOtaDataMagic1 = 'D';      // source -> target unicast: one chunk
 static const uint8_t kOtaCtrlMagic1 = 'K';      // target -> source unicast: ack / done / fail
+static const uint8_t kOtaPullMagic1 = 'P';      // requester -> broadcast: update me if you're newer
 static const uint16_t kOtaChunk = 200;          // payload bytes per OtaData (last may be smaller)
+static const uint8_t kOtaVerLen = 12;           // version string field length (announce/accept)
 
 enum OtaCtrlKind : uint8_t {
     OTA_ACK = 0,   // chunk `seq` written OK, send the next
@@ -195,10 +197,14 @@ struct OtaAnnounce {
     uint16_t chunkTotal;    // number of OtaData chunks (ceil(imageSize/kOtaChunk))
     uint16_t chunkSize;     // == kOtaChunk (full chunk size; last chunk may be smaller)
     uint8_t sha8[8];        // head of the source app_elf_sha256 — target skips if it matches (same build)
+    uint32_t buildSerial;   // monotonic build timestamp (from esp_app_desc date/time) — newness
+    char ver[kOtaVerLen];   // firmware version string (kFwVersion), NUL-padded
 };
 struct OtaAccept {
     uint8_t magic0, magic1, otaProto, tgtRole;  // 'V','O'
     uint32_t masterId;
+    uint32_t buildSerial;   // the target's current build — lets the source show "vX -> vY"
+    char ver[kOtaVerLen];   // the target's current version string
 };
 struct OtaData {
     uint8_t magic0, magic1, otaProto, pad_;  // 'V','D'
@@ -212,6 +218,14 @@ struct OtaCtrl {
     uint32_t masterId;
     uint16_t seq;                            // for OTA_ACK: which chunk was written
     uint16_t pad_;
+};
+// Pull request: an out-of-date unit asks its paired peer to push firmware, but
+// only if the peer is genuinely newer (peer buildSerial > buildSerial). Lets you
+// trigger the update from the OLD unit instead of the new one.
+struct OtaPull {
+    uint8_t magic0, magic1, otaProto, role;  // 'V','P'
+    uint32_t masterId;
+    uint32_t buildSerial;                    // the requester's current build — peer serves only if newer
 };
 #pragma pack(pop)
 

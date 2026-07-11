@@ -25,6 +25,7 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_app_format.h>
+#include <cstdlib>
 #include <cstring>
 
 namespace slavelink {
@@ -40,10 +41,25 @@ class OtaEngine {
     localId_ = localId;
     role_ = role;
     ifidx_ = ifidx;
+    computeBuild();  // our version + monotonic build serial (for the newness comparison)
   }
   void setLocalId(uint32_t id) { localId_ = id; }
   void setAllowRemote(bool a) { allowRemote_ = a; }
   bool allowRemote() const { return allowRemote_; }
+  // App-supplied version string (kFwVersion); call before begin() so it isn't
+  // overwritten by the app-descriptor version.
+  void setVersion(const char* v) { strncpy(localVer_, v ? v : "", kOtaVerLen - 1); localVer_[kOtaVerLen - 1] = 0; }
+
+  // ---- build identity (for the UI + newness comparison) ----
+  uint32_t buildSerial() const { return buildSerial_; }
+  const char* localVersion() const { return localVer_; }
+  const char* builtStr() const { return builtStr_; }        // "Mmm dd HH:MM"
+  const char* peerVersion() const { return peerVer_; }      // the other unit's version, once known
+  // "newer" / "older" / "same" of the peer relative to us (empty until a peer is known).
+  const char* peerRel() const {
+    if (peerSerial_ == 0) return "";
+    return peerSerial_ > buildSerial_ ? "newer" : (peerSerial_ < buildSerial_ ? "older" : "same");
+  }
 
   // ---- user trigger (source) ----
   // Begin offering our running firmware to the paired peer. Computes the image
@@ -69,7 +85,23 @@ class OtaEngine {
   void cancel() {
     if (phase_ == RECEIVING) Update.abort();
     phase_ = IDLE;
+    pullActive_ = false;
     snprintf(status_, sizeof(status_), "cancelled");
+  }
+
+  // ---- user trigger (target/pull) ----
+  // Ask the paired peer to update us — used from the OUT-OF-DATE unit. Broadcasts
+  // our build serial; a peer that is genuinely newer responds by pushing (see the
+  // OtaPull handler). While the window is open we accept that push even if the
+  // "allow remote update" toggle is off, since the user explicitly asked for it.
+  bool startPull() {
+    if (phase_ == OFFERING || phase_ == SENDING || phase_ == RECEIVING) return false;
+    pullActive_ = true;
+    pullUntilMs_ = millis() + kPullWindowMs;
+    lastPullMs_ = 0;
+    phase_ = IDLE;
+    snprintf(status_, sizeof(status_), "requesting update from the paired device…");
+    return true;
   }
 
   // ---- feed frames from the single ESP-NOW recv callback (both roles) ----
@@ -85,6 +117,8 @@ class OtaEngine {
       OtaAccept a; memcpy(&a, data, sizeof(a));
       if (phase_ == OFFERING && a.masterId == localId_ && mac && !acceptPending_) {
         memcpy(pendingMac_, mac, 6);
+        peerSerial_ = a.buildSerial;
+        memcpy(peerVer_, a.ver, kOtaVerLen); peerVer_[kOtaVerLen - 1] = 0;
         acceptPending_ = true;
       }
       return true;
@@ -109,17 +143,27 @@ class OtaEngine {
       }
       return true;
     }
+    if (len == (int)sizeof(OtaPull) && validOta(data, kOtaPullMagic1)) {
+      OtaPull p; memcpy(&p, data, sizeof(p));
+      // Serve the pull only from an idle unit that is genuinely newer than the
+      // requester (strictly greater build serial) — never push same/older.
+      if ((phase_ == IDLE || phase_ == DONE || phase_ == FAILED) &&
+          p.masterId == localId_ && buildSerial_ > p.buildSerial)
+        pullServeReq_ = true;  // service() calls startPush() (does flash reads on the loop)
+      return true;
+    }
     return false;
   }
 
   // ---- drive everything; call every loop (both roles). Non-blocking. ----
   void service() {
+    if (pullServeReq_) { pullServeReq_ = false; startPush(); }  // a newer unit answering a pull
     if (announceRx_) { onAcceptAnnounce(); return; }  // a heard offer -> open RECEIVING
     switch (phase_) {
       case OFFERING:   serviceOffer();   break;
       case SENDING:    serviceSend();    break;
       case RECEIVING:  serviceReceive(); break;
-      default: break;
+      default: if (pullActive_) servicePull(); break;  // waiting for a newer peer to answer
     }
   }
 
@@ -143,6 +187,7 @@ class OtaEngine {
   static const uint8_t kMaxRetry = 40;         // per-chunk resend cap before giving up
   static const uint32_t kFinalWaitMs = 12000;  // await target's DONE after the last chunk
   static const uint32_t kRecvTimeoutMs = 15000;// abort a receive stalled this long
+  static const uint32_t kPullWindowMs = 30000; // how long a pull request keeps asking
 
   void fail(const char* why) {
     phase_ = FAILED;
@@ -152,10 +197,13 @@ class OtaEngine {
   // ---- target: an offer was heard (callback context — stash only, no flash) ----
   void onAnnounce(const uint8_t* mac, const OtaAnnounce& a) {
     if (phase_ != IDLE && phase_ != DONE && phase_ != FAILED) return;  // busy — ignore
-    if (!allowRemote_ || a.masterId != localId_ || !mac) return;
+    // Accept a push if we allow remote updates, OR if we explicitly asked (pull).
+    if ((!allowRemote_ && !pullActive_) || a.masterId != localId_ || !mac) return;
     if (a.imageSize == 0 || a.chunkTotal == 0 || announceRx_) return;
     memcpy(pendingMac_, mac, 6);
     memcpy(annSha8_, a.sha8, 8);  // build-skip check deferred to the loop (flash read)
+    peerSerial_ = a.buildSerial;
+    memcpy(peerVer_, a.ver, kOtaVerLen); peerVer_[kOtaVerLen - 1] = 0;
     tgtSize_ = a.imageSize;
     tgtTotal_ = a.chunkTotal;
     tgtSrcRole_ = a.srcRole;
@@ -172,7 +220,8 @@ class OtaEngine {
       srcSeq_ = 0; srcWaiting_ = false; srcRetry_ = 0;
       ackFlag_ = false; ctrlDone_ = false; ctrlFail_ = false;
       phase_ = SENDING;
-      snprintf(status_, sizeof(status_), "sending 0/%u", chunkTotal_);
+      snprintf(status_, sizeof(status_), "sending to %s (%s) 0/%u",
+               peerVer_[0] ? peerVer_ : "peer", peerRel(), chunkTotal_);
       return;
     }
     if (now - offerStartMs_ > kOfferMs) { phase_ = IDLE; snprintf(status_, sizeof(status_), "no taker"); return; }
@@ -191,6 +240,8 @@ class OtaEngine {
     a.chunkTotal = chunkTotal_;
     a.chunkSize = kOtaChunk;
     memcpy(a.sha8, sha8_, 8);
+    a.buildSerial = buildSerial_;
+    strncpy(a.ver, localVer_, kOtaVerLen);
     static const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     ensurePeer(bcast);  // a slave source has no broadcast peer registered otherwise
     esp_now_send(bcast, (const uint8_t*)&a, sizeof(a));
@@ -277,9 +328,27 @@ class OtaEngine {
     if (now - tgtLastMs_ > kRecvTimeoutMs) { Update.abort(); fail("stalled"); }
   }
 
+  // Broadcast our pull request until a newer peer answers or the window lapses.
+  void servicePull() {
+    uint32_t now = millis();
+    if (now > pullUntilMs_) { pullActive_ = false; snprintf(status_, sizeof(status_), "no newer firmware offered"); return; }
+    if (now - lastPullMs_ >= kAnnounceMs) { lastPullMs_ = now; sendPull(); }
+  }
+  void sendPull() {
+    OtaPull p = {};
+    p.magic0 = kMagic0; p.magic1 = kOtaPullMagic1; p.otaProto = kOtaProto;
+    p.role = role_;
+    p.masterId = localId_;
+    p.buildSerial = buildSerial_;
+    static const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    ensurePeer(bcast);
+    esp_now_send(bcast, (const uint8_t*)&p, sizeof(p));
+  }
+
   // Open a receive in response to a heard announce (loop task: does Update.begin).
   void onAcceptAnnounce() {
     announceRx_ = false;
+    pullActive_ = false;  // our pull was answered — stop requesting
     // Already running this exact build? Ignore silently (no reflash). Done here on
     // the loop task, not the recv callback, since it reads the app desc from flash.
     uint8_t mine[8];
@@ -290,7 +359,8 @@ class OtaEngine {
     tgtExpect_ = 0; tgtBytes_ = 0; tgtLastMs_ = millis();
     haveData_ = false; rebooting_ = false;
     phase_ = RECEIVING;
-    snprintf(status_, sizeof(status_), "receiving 0/%u", tgtTotal_);
+    snprintf(status_, sizeof(status_), "receiving %s (%s) 0/%u",
+             peerVer_[0] ? peerVer_ : "peer", peerRel(), tgtTotal_);
     sendAccept();  // tell the source to start streaming
   }
 
@@ -299,6 +369,8 @@ class OtaEngine {
     a.magic0 = kMagic0; a.magic1 = kOtaAcceptMagic1; a.otaProto = kOtaProto;
     a.tgtRole = role_;
     a.masterId = localId_;
+    a.buildSerial = buildSerial_;
+    strncpy(a.ver, localVer_, kOtaVerLen);
     esp_now_send(peerMac_, (const uint8_t*)&a, sizeof(a));
   }
 
@@ -326,6 +398,30 @@ class OtaEngine {
   // be larger than the image). Standard esp_image layout: header, then N segments
   // (each an 8-byte header + data), a 1-byte checksum padded to 16, and an
   // optional 32-byte SHA-256 when hash_appended.
+  // Our version string + a monotonic build serial, from the running app's
+  // descriptor (the toolchain embeds __DATE__/__TIME__ there every build, so no
+  // manual bumping is needed for the newness comparison).
+  void computeBuild() {
+    esp_app_desc_t d;
+    if (esp_ota_get_partition_description(esp_ota_get_running_partition(), &d) != ESP_OK) return;
+    buildSerial_ = parseBuildSerial(d.date, d.time);
+    snprintf(builtStr_, sizeof(builtStr_), "%.11s %.5s", d.date, d.time);  // "Mmm dd HH:MM"
+    if (localVer_[0] == 0) { strncpy(localVer_, d.version, kOtaVerLen - 1); localVer_[kOtaVerLen - 1] = 0; }
+  }
+  // Fold the compile date "Mmm dd yyyy" + time "hh:mm:ss" into a strictly
+  // increasing 32-bit serial (approx seconds since 2020) — comparable, not a true
+  // epoch. Later build => larger value, which is all the newness check needs.
+  static uint32_t parseBuildSerial(const char* date, const char* time) {
+    static const char* kMon = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    int mon = 0;
+    for (int i = 0; i < 12; ++i) if (strncmp(date, kMon + i * 3, 3) == 0) { mon = i + 1; break; }
+    int day = atoi(date + 4), year = atoi(date + 7);
+    int hh = atoi(time), mm = atoi(time + 3), ss = atoi(time + 6);
+    if (year < 2020) year = 2020;
+    uint32_t days = (uint32_t)(year - 2020) * 372 + (uint32_t)(mon > 0 ? mon - 1 : 0) * 31 + (uint32_t)(day > 0 ? day - 1 : 0);
+    return days * 86400u + (uint32_t)hh * 3600u + (uint32_t)mm * 60u + (uint32_t)ss;
+  }
+
   // Head of the running app's ELF SHA-256 (build fingerprint) — used to skip a
   // push of the identical build. esp_ota_get_partition_description is available
   // across arduino-esp32 versions (unlike esp_app_get_description).
@@ -358,7 +454,14 @@ class OtaEngine {
   wifi_interface_t ifidx_ = WIFI_IF_AP;
   bool allowRemote_ = true;
   volatile Phase phase_ = IDLE;
-  char status_[40] = "idle";
+  char status_[48] = "idle";
+
+  // build identity
+  uint32_t buildSerial_ = 0;
+  char localVer_[kOtaVerLen] = {0};
+  char builtStr_[24] = {0};
+  uint32_t peerSerial_ = 0;
+  char peerVer_[kOtaVerLen] = {0};
 
   // source
   const esp_partition_t* runPart_ = nullptr;
@@ -389,6 +492,11 @@ class OtaEngine {
   uint8_t dataBuf_[kOtaChunk];
   bool rebooting_ = false;
   uint32_t rebootMs_ = 0;
+
+  // pull (target-initiated)
+  volatile bool pullActive_ = false;   // we're asking a newer peer to update us
+  volatile bool pullServeReq_ = false; // we're newer and a peer asked — start a push
+  uint32_t pullUntilMs_ = 0, lastPullMs_ = 0;
 };
 
 }  // namespace slavelink

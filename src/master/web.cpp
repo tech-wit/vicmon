@@ -1066,21 +1066,29 @@ static String systemCard() {
     // paired peer over ESP-NOW; the peer accepts only if it allows remote updates.
     // A dropped transfer is non-destructive (the target keeps its current firmware).
     h += "<p class=muted style='margin:.9em 0 .3em'>&mdash; Firmware clone (wireless) &mdash;</p>";
+    h += "<p class=muted id=otaVer style='margin:.1em 0 .5em'>This unit: firmware " +
+         String(kFwVersion) + " &middot; built " + String(gOta.builtStr()) + "</p>";
     h += "<label style='font-weight:normal;display:block;margin-bottom:.4em'>"
          "<input type=checkbox id=otaAllow onchange=\"fetch('/api/ota/allow?v='+(this.checked?1:0),{method:'POST'})\"> "
          "Allow this device to be updated remotely</label>";
     h += "<button onclick=\"otaPush()\">Send my firmware to the paired device</button> "
+         "<button class=ghost onclick=\"otaPull()\">Update this device from the paired device</button> "
          "<span id=otaStat class=muted></span>";
-    h += "<p class=muted>The paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
-         " must have “allow remote update” on. It reboots into the new firmware only if the "
-         "whole image validates, so an interrupted transfer is harmless.</p>";
+    h += "<p class=muted>Push: the paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
+         " must have “allow remote update” on. Pull: asks the paired device to update <i>this</i> one, "
+         "and it answers only if its firmware is newer. Either way the target reboots into the new "
+         "firmware only if the whole image validates, so an interrupted transfer is harmless.</p>";
     h += "<script>"
          "function otaPoll(){fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
+         "var v=document.getElementById('otaVer');if(v&&s.version)v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built;"
          "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
          "}).catch(()=>{});}"
          "function otaPush(){if(!confirm('Push this firmware to the paired device? It reboots when done.'))return;"
          "fetch('/api/ota/push',{method:'POST'}).then(r=>r.text()).then(t=>{"
+         "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
+         "function otaPull(){if(!confirm('Ask the paired device to update this one? This device reboots when done.'))return;"
+         "fetch('/api/ota/pull',{method:'POST'}).then(r=>r.text()).then(t=>{"
          "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
          "otaPoll();setInterval(otaPoll,1500);"
          "</script>";
@@ -1114,6 +1122,10 @@ void setupServer() {
         bool ok = gOta.startPush();
         req->send(200, "text/plain", ok ? "offering firmware to the paired device…" : "busy");
     });
+    gServer.on("/api/ota/pull", HTTP_POST, [](AsyncWebServerRequest* req) {
+        bool ok = gOta.startPull();
+        req->send(200, "text/plain", ok ? "requesting an update from the paired device…" : "busy");
+    });
     gServer.on("/api/ota/allow", HTTP_POST, [](AsyncWebServerRequest* req) {
         bool v = req->hasParam("v") ? req->getParam("v")->value().toInt() != 0 : true;
         saveOtaAllow(v);
@@ -1125,6 +1137,8 @@ void setupServer() {
         j += ",\"busy\":";
         j += gOta.busy() ? "true" : "false";
         j += ",\"percent\":" + String(gOta.percent());
+        j += ",\"version\":\"" + jsonEsc(String(gOta.localVersion())) + "\"";
+        j += ",\"built\":\"" + jsonEsc(String(gOta.builtStr())) + "\"";
         j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"}";
         req->send(200, "application/json", j);
     });
