@@ -54,23 +54,27 @@ favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
   pair (`V Q` / `V C`) lets a slave *pull* the master's full trend rings on connect;
   and an **OTA-clone** quartet (`V A`/`V O`/`V D`/`V K` — announce/accept/data/ctrl,
   in `lib/slavelink/OtaLink.h`) pushes a firmware image master↔slave (see below).
-- **Firmware clone (OTA):** either device can clone its running app image to the
-  paired peer over ESP-NOW, in **either direction of initiation**:
+- **Firmware clone (OTA) — verified on hardware (2026-07-11):** either device can
+  clone its running app image to the paired peer over ESP-NOW, in **either direction
+  of initiation**:
   - **Push** — from the unit that has the new firmware (Settings → System, LCD Diag →
     Firmware, or `POST /api/ota/push`). Discovery is a broadcast announce (no
     pre-shared MAC roster); the target — if its *allow remote update* flag is on and
     it isn't already running that build — replies unicast.
   - **Pull** — from the out-of-date unit (`POST /api/ota/pull`, same LCD screen). It
-    broadcasts its build serial and a paired peer answers **only if strictly newer**,
-    so a pull can never fetch a same/older image.
+    broadcasts its version and a paired peer answers **only if strictly newer**, so a
+    pull can never fetch a same/older image.
   The source then streams the image stop-and-wait (one chunk ACKed at a time, resend
-  on timeout) into the target's OTA partition; the target reboots only if the whole
-  image validates (`Update.end` → `esp_ota_set_boot_partition` checks the appended
-  SHA-256), so a dropped transfer is non-destructive. **Version awareness:** each unit
-  derives a monotonic build serial from the app descriptor's embedded build date/time
-  (no manual bumping) plus the `kFwVersion` string; announce/accept carry both so each
-  end knows the other's version and relative age (shown in the transfer status, on the
-  web System card, and the LCD Firmware screen). The OTA frames carry their **own**
+  on timeout) into the target's OTA partition; the target validates the whole image
+  (`Update.end` → `esp_ota_set_boot_partition` checks the appended SHA-256) and then
+  **auto-reboots** into it — a dropped transfer is non-destructive (it keeps the old
+  firmware). **Version awareness:** newness is compared by the `kFwVersion` string,
+  parsed numerically (so `0.4.10` > `0.4.2`) — NOT by build date/time, which
+  arduino-esp32 on PlatformIO ships frozen in the precompiled app descriptor
+  (identical across builds), so bumping `kFwVersion` is the sole "increment". Each
+  unit also broadcasts a periodic **version beacon** (~4 s), so the paired device's
+  version + relative age (newer/older/same) show at rest — in the transfer status, on
+  the web System card, and the LCD Firmware screen. The OTA frames carry their **own**
   protocol version (`kOtaProto`), independent of the telemetry `kVersion`, so a
   new-firmware source can update an old-firmware target across a telemetry-format bump.
   Works because the master and slave run the **same** universal `s3` binary.
@@ -433,7 +437,8 @@ notes, pins, and gotchas. Summary:
 - **Config backup/restore** ✅ (export/import JSON of all profiles + keys).
 - **Mock/sim mode** ✅ (`atoms3-sim` env) for hardware-free UI development.
 - **OTA firmware updates** ✅ (web upload, `/api/ota`, Settings page) **+ wireless
-  master↔slave clone over ESP-NOW** ✅ (`/api/ota/push`, `lib/slavelink/OtaLink.h`).
+  master↔slave clone over ESP-NOW** ✅ **hardware-verified** (push/pull, version-aware,
+  auto-reboot; `/api/ota/{push,pull}`, LCD Diag → Firmware, `lib/slavelink/OtaLink.h`).
 - **mDNS** ✅ (`vicmon.local`).
 - **Diag / raw-decode page** ✅ (`/diag`) for parser bring-up.
 - **Real timestamps (NTP)** ✅ (daily-stats rollover) **+ persisted history**
