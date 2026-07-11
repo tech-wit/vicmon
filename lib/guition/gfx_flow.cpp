@@ -14,7 +14,7 @@ static void node(Arduino_GFX* c, int x, int y, int w, int h, uint16_t accent,
   c->fillRoundRect(x, y, w, h, 8, kCard);
   c->drawRoundRect(x, y, w, h, 8, on ? accent : kGrey);
   gtext(c, &FreeSans9pt7b, x + w / 2, y + 20, title, on ? accent : kMuted, C);
-  gtext(c, &FreeSansBold12pt7b, x + w / 2, y + h - 12, value, on ? kText : kMuted, C);
+  gtext(c, &FreeSans9pt7b, x + w / 2, y + h - 11, value, on ? kText : kMuted, C);
 }
 
 // A 3px-thick dot, thickness perpendicular to the segment direction.
@@ -46,8 +46,9 @@ static void orthoFlow(Arduino_GFX* c, const int16_t pts[][2], int n, bool on, ui
 
 void renderFlow(Arduino_GFX* c, const DashData& d) {
   char v[28];
-  gtext(c, &FreeSansBold18pt7b, 12, 28, "Energy flow", kText);
-  gtext(c, &FreeSansBold18pt7b, W - 12, 28, d.mode, modeColor(d), R);
+  // Mode banner — same as the Dash: full-width coloured bar with black text.
+  c->fillRect(0, 0, W, 38, modeColor(d));
+  gtext(c, &FreeSansBold18pt7b, W / 2, 27, d.mode, kBlack, C);
 
   // Battery in the centre.
   const int batx = 190, baty = 96, batw = 108, bath = 100;
@@ -74,15 +75,21 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   orthoFlow(c, dcPts,    4, dcOn,    kFlowChg);
   orthoFlow(c, loadPts,  2, loadOn,  kFlowLoad);
 
-  // Source nodes (both numbers per source, matching the Dash tiles).
-  if (d.solarValid) snprintf(v, sizeof(v), "%.0fW %.1fA", d.solarW, d.solarA);
+  // Source nodes show amps + watts. Solar W is the real PV power from the
+  // charger; charger/DC-DC watts are the branch current x battery voltage (no
+  // per-branch voltage in the adverts). PV-array voltage isn't advertised, so
+  // it's not shown.
+  const bool bv = d.battValid;
+  if (d.solarValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.solarA, d.solarW);
   else              snprintf(v, sizeof(v), "--");
   node(c, sx, sy[0], sw, sh, kGold, "Solar", v, solarOn);
-  numOr(v, sizeof(v), d.chargerValid, d.chargerA, 1, "A");
+  if (d.chargerValid && bv) snprintf(v, sizeof(v), "%.1fA %.0fW", d.chargerA, d.chargerA * d.v);
+  else if (d.chargerValid)  snprintf(v, sizeof(v), "%.1fA", d.chargerA);
+  else                      snprintf(v, sizeof(v), "--");
   node(c, sx, sy[1], sw, sh, kGreen, "Charger", v, chgOn);
-  if (d.dcdcValid && d.dcdcInVValid) snprintf(v, sizeof(v), "%.1fA %.0fV", d.dcdcOutA, d.dcdcInV);
-  else if (d.dcdcValid)              snprintf(v, sizeof(v), "%.1fA", d.dcdcOutA);
-  else                               snprintf(v, sizeof(v), "--");
+  if (d.dcdcValid && bv) snprintf(v, sizeof(v), "%.1fA %.0fW", d.dcdcOutA, d.dcdcOutA * d.v);
+  else if (d.dcdcValid)  snprintf(v, sizeof(v), "%.1fA", d.dcdcOutA);
+  else                   snprintf(v, sizeof(v), "--");
   node(c, sx, sy[2], sw, sh, kBlue, "DC-DC", v, dcOn);
 
   // Battery node (bigger).
@@ -100,17 +107,17 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   else snprintf(v, sizeof(v), "-- Ah");
   gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 90, v, kMuted, C);
 
-  // Starter voltage + TTG stacked in the bottom-right corner, using the same
-  // font/treatment as the Dash battery-card footer (FreeSans9pt7b, muted) so the
-  // two pages read consistently.
+  // Bottom row, same FreeSans9pt7b muted treatment as the Dash battery-card
+  // footer: TTG on the bottom-left, starter voltage in the bottom-middle.
+  ttgLabel(v, sizeof(v), d);
+  gtext(c, &FreeSans9pt7b, 12, TAB_Y - 10, v, kMuted, L);
   if (d.starterValid) snprintf(v, sizeof(v), "Starter %.1fV", d.starterV);
   else                snprintf(v, sizeof(v), "Starter --");
-  gtext(c, &FreeSans9pt7b, W - 12, TAB_Y - 30, v, kMuted, R);
-  ttgLabel(v, sizeof(v), d);
-  gtext(c, &FreeSans9pt7b, W - 12, TAB_Y - 10, v, kMuted, R);
+  gtext(c, &FreeSans9pt7b, W / 2, TAB_Y - 10, v, kMuted, C);
 
-  // Load node.
-  numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
+  // Load node (amps + watts = load A x battery V).
+  if (d.loadValid && d.battValid) snprintf(v, sizeof(v), "%.1fA %.0fW", d.loadA, d.loadA * d.v);
+  else                            numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
   node(c, lx, ly, lw, lh, kRed, d.loadDerived ? "Load*" : "Load", v, loadOn);
 }
 
