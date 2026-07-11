@@ -52,8 +52,8 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
 
   ttgLabel(buf, sizeof(buf), d);  // "TTG 2d 4h" / "Full 1d 3h" / "TTG 45m"
   gtext(c, &FreeSans9pt7b, bx + 16, by + bh - 14, buf, kMuted);
-  if (d.starterValid) snprintf(buf, sizeof(buf), "Start %.1fV", d.starterV);
-  else                snprintf(buf, sizeof(buf), "Start --");
+  if (d.starterValid) snprintf(buf, sizeof(buf), "Starter %.1fV", d.starterV);
+  else                snprintf(buf, sizeof(buf), "Starter --");
   gtext(c, &FreeSans9pt7b, bx + bw - 16, by + bh - 14, buf, kMuted, R);
 
   // Source tiles (right)

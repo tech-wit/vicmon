@@ -100,14 +100,14 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   else snprintf(v, sizeof(v), "-- Ah");
   gtext(c, &FreeSans9pt7b, batx + batw / 2, baty + 90, v, kMuted, C);
 
-  // TTG (time-to-full when charging) + starter voltage, below the battery — so
-  // every number on the Dash page is also present here.
-  const int bcx = batx + batw / 2;  // 244, centred under the battery node
+  // Starter voltage + TTG stacked in the bottom-right corner, using the same
+  // font/treatment as the Dash battery-card footer (FreeSans9pt7b, muted) so the
+  // two pages read consistently.
+  if (d.starterValid) snprintf(v, sizeof(v), "Starter %.1fV", d.starterV);
+  else                snprintf(v, sizeof(v), "Starter --");
+  gtext(c, &FreeSans9pt7b, W - 12, TAB_Y - 30, v, kMuted, R);
   ttgLabel(v, sizeof(v), d);
-  gtext(c, &FreeSansBold12pt7b, bcx, baty + bath + 24, v, kText, C);
-  if (d.starterValid) snprintf(v, sizeof(v), "Start %.1fV", d.starterV);
-  else                snprintf(v, sizeof(v), "Start --");
-  gtext(c, &FreeSans9pt7b, bcx, baty + bath + 44, v, kMuted, C);
+  gtext(c, &FreeSans9pt7b, W - 12, TAB_Y - 10, v, kMuted, R);
 
   // Load node.
   numOr(v, sizeof(v), d.loadValid, d.loadA, 1, "A");
