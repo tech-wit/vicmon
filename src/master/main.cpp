@@ -45,7 +45,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.4.0";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.4.1";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
