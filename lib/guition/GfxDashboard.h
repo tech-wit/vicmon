@@ -124,6 +124,7 @@ struct DashData {
   bool     pairing = false;        // pairing window (master) / adopt window (slave) open
   int      pairSecLeft = 0;        // seconds left in that window
   bool     linkLive = false;       // slave: receiving frames from our master
+  bool     linkStale = false;      // slave: link dropped but showing last-known values
   uint32_t linkDrops = 0;          // slave: sequence gaps observed
   uint8_t  linkChannel = 0;        // slave: current listen channel
   bool     heardInvite = false;    // slave: a master is inviting pairing right now

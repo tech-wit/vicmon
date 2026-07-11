@@ -77,9 +77,11 @@ class Receiver {
   }
   bool anyMasterHeard() const { return lastAnyMs_ != 0 && (millis() - lastAnyMs_) < kStaleMs; }
   bool live() const { return haveFrame_ && (millis() - lastRxMs_) <= kStaleMs; }
+  bool haveSnapshot() const { return haveFrame_; }  // ever received (retain last-known when stale)
   const Snapshot& snapshot() const { return snap_; }
   // 7-day stats (Week page). Valid longer than the live window since it's low-rate.
   bool hasStats() const { return haveStats_ && (millis() - lastStatsMs_) < 30000; }
+  bool everStats() const { return haveStats_; }  // retain last-known when stale
   const StatsFrame& stats() const { return stats_; }
 
   // ---- Graph history pull ----

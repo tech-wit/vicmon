@@ -309,7 +309,11 @@ static void collectSlaveDash(guition::DashData& d) {
     d.linkChannel = gRx.channel();
     d.heardInvite = gRx.heardInvite();
 
-    if (!gRx.live()) { d.mode = "--"; d.battValid = false; return; }
+    // Keep showing the last-known values when the link goes stale (flag them
+    // stale) instead of blanking everything; only truly blank if we've never
+    // heard this master at all.
+    if (!gRx.haveSnapshot()) { d.mode = "--"; d.battValid = false; d.linkStale = false; return; }
+    d.linkStale = !gRx.live();
     const Snapshot& s = gRx.snapshot();
     auto has = [&](uint16_t f) { return (s.valid & f) != 0; };
     switch (s.mode) {
@@ -336,8 +340,8 @@ static void collectSlaveDash(guition::DashData& d) {
     collectHistory(d);  // Graph page: fill from the history built off received frames
     d.graphSyncing = gRx.histActive();  // show the "syncing" hint while pulling history
 
-    // Week page: from the low-rate stats frame (if we've received one).
-    if (gRx.hasStats()) {
+    // Week page: from the low-rate stats frame (retain the last one when stale).
+    if (gRx.everStats()) {
         const slavelink::StatsFrame& f = gRx.stats();
         d.clockOk = f.clockOk != 0;
         auto fillM = [](guition::DashData::StatMeter& m, const slavelink::StatMeterW& w) {

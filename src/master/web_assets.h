@@ -99,10 +99,12 @@ function ttgStr(m){
 async function tick(){
  let p; try{p=await(await fetch('/api/panel')).json();}catch(e){return;}
  var av=document.getElementById('alerts');
- if(p.alerts&&p.alerts.length){av.innerHTML=p.alerts.map(function(a){
+ var ah='';
+ if(p.stale)ah+='<div class=card style="border-color:#fbbf24;color:#fbbf24;padding:.6em 1em;margin-bottom:.6em;font-weight:600">&#9888; Link stale &mdash; showing last-known values</div>';
+ if(p.alerts&&p.alerts.length)ah+=p.alerts.map(function(a){
   var c=a.sev=='crit'?'#f87171':'#fbbf24';
-  return '<div class=card style="border-color:'+c+';color:'+c+';padding:.6em 1em;margin-bottom:.6em;font-weight:600">&#9888; '+a.msg+'</div>';}).join('');}
- else av.innerHTML='';
+  return '<div class=card style="border-color:'+c+';color:'+c+';padding:.6em 1em;margin-bottom:.6em;font-weight:600">&#9888; '+a.msg+'</div>';}).join('');
+ av.innerHTML=ah;
  var b=p.battery,soc=b.valid?b.soc:0;
  set('soc',b.valid?Math.round(soc)+'%':'--');
  set('dV',b.valid?b.v.toFixed(2)+' V':'--');

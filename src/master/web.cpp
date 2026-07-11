@@ -25,13 +25,17 @@ static String buildPanelJson() {
     if (gRole == ROLE_SLAVE) {
         using namespace slavelink;
         const Snapshot& s = gRx.snapshot();
-        bool live = gRx.live();
-        auto has = [&](uint16_t f) { return live && (s.valid & f) != 0; };
-        const char* mode = !live ? "unknown"
+        // Retain the last-known frame when the link is stale (flag it) instead of
+        // blanking the mimic; only blank if we've never heard the master.
+        bool have = gRx.haveSnapshot();
+        bool stale = !gRx.live();
+        auto has = [&](uint16_t f) { return have && (s.valid & f) != 0; };
+        const char* mode = !have ? "unknown"
             : (s.mode == M_CHARGING ? "charging"
              : s.mode == M_DISCHARGING ? "discharging"
              : s.mode == M_IDLE ? "idle" : "unknown");
         String j = "{";
+        j += "\"stale\":" + jbool(stale) + ",";
         j += "\"mode\":\"" + String(mode) + "\",";
         j += "\"battery\":{\"valid\":" + jbool(has(V_SOC) || has(V_BATTV) || has(V_BATTA)) +
              ",\"soc\":" + String(decDeci(s.soc_d), 1) +

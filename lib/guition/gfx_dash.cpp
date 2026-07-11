@@ -21,9 +21,10 @@ void renderDash(Arduino_GFX* c, const DashData& d) {
   // charge-status banner (mode colour, black text) filling the rest.
   const int kBrandW = 156;
   c->fillRect(0, 0, kBrandW, 38, kBlack);
-  c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
+  c->fillRect(kBrandW, 0, W - kBrandW, 38, d.linkStale ? kGrey : modeColor(d));
   gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
-  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, kBlack, C);
+  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, d.linkStale ? kMuted : kBlack, C);
+  if (d.linkStale) gtext(c, &FreeSansBold12pt7b, W - 10, 26, "STALE", kAmber, R);
 
   // Battery card (left)
   const int bx = 8, by = 44, bw = 288, bh = 232;

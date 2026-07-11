@@ -49,9 +49,10 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   // Top bar in two sections, same as the Dash: dark VICMON block + charge status.
   const int kBrandW = 156;
   c->fillRect(0, 0, kBrandW, 38, kBlack);
-  c->fillRect(kBrandW, 0, W - kBrandW, 38, modeColor(d));
+  c->fillRect(kBrandW, 0, W - kBrandW, 38, d.linkStale ? kGrey : modeColor(d));
   gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
-  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, kBlack, C);
+  gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, d.linkStale ? kMuted : kBlack, C);
+  if (d.linkStale) gtext(c, &FreeSansBold12pt7b, W - 10, 26, "STALE", kAmber, R);
 
   // Battery in the centre.
   const int batx = 190, baty = 96, batw = 108, bath = 100;
