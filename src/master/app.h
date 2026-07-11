@@ -147,6 +147,7 @@ extern float gSocCrit;        // % — critical at/below
 extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
+extern uint32_t gManualEpoch, gManualMillis;  // AP-set clock (see currentLocalEpoch)
 
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
 

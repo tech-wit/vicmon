@@ -36,16 +36,21 @@ struct Bucket {
 
 enum Scope { TODAY = 0, TRIP = 1, TOTAL = 2, COUNT = 3 };
 
-// A finished calendar day, archived from the TODAY bucket at the midnight
-// rollover, for the multi-day energy history. Requires an NTP clock (no clock =>
-// no rollover => no day records).
+// A finished "day", archived from the TODAY bucket at the rollover, for the
+// multi-day energy history. A day boundary is local midnight when a clock (NTP
+// or manually set) is available; otherwise it's every 24h of run-time, so the
+// history works with no clock at all.
 struct DayRecord {
-    uint32_t dayStamp = 0;  // yyyymmdd (0 = empty slot)
-    float solarWh = 0, dcdcWh = 0, chargerWh = 0;
-    float loadWh = 0, dischargedWh = 0;
+    uint32_t dayStamp = 0;  // yyyymmdd (clocked) or run-day index 1.. (no clock); 0 = empty
+    float solarAh = 0, dcdcAh = 0, chargerAh = 0;  // Ah in, by source
+    float loadAh = 0;                              // Ah out (load)
     float socMin = NAN, socMax = NAN;
 };
 static const int kDays = 14;  // ring capacity; the UI shows the last 7
+
+// dayStamp values below this are run-day indices (no clock); at/above are
+// yyyymmdd calendar stamps. (Smallest real yyyymmdd ~ 2020_01_01.)
+static const uint32_t kRunDayMax = 100000;
 
 // A snapshot of the readings to integrate for one step.
 struct Sample {
@@ -89,6 +94,11 @@ public:
         return days_[(start + i) % kDays];
     }
 
+    // Total run-time accumulated across reboots (the odometer that drives the
+    // no-clock day rollover), and the current run-day index (1-based).
+    uint32_t runSecs() const { return (uint32_t)runSecs_; }
+    uint32_t runDay() const { return (uint32_t)(runSecs_ / 86400.0) + 1; }
+
 private:
     void load();
     void save();
@@ -98,6 +108,7 @@ private:
     Bucket b_[COUNT];
     DayRecord days_[kDays];
     size_t dayCount_ = 0, dayHead_ = 0;
+    double runSecs_ = 0;  // persisted run-time odometer (no-clock day boundary)
     int profile_ = 0;
     uint32_t lastMs_ = 0;
     uint32_t lastSaveMs_ = 0;

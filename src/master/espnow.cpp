@@ -148,10 +148,18 @@ void sendSlaveBroadcast() {
     portEXIT_CRITICAL(&gSnapMux);
 }
 
-// Low-rate 7-day energy frame for a slave's Week page (see StatsFrame). Built on
-// the loop task (owns gStats) and sent directly — it changes only at the daily
-// rollover, so a few sends a minute is plenty.
-static uint16_t whU16(float x) { return x <= 0 ? 0 : (x >= 65535 ? 65535 : (uint16_t)(x + 0.5f)); }
+// Low-rate energy frame for a slave's Week page (see StatsFrame): the three
+// resettable meters + the last-7 day Ah bars. Built on the loop task (owns
+// gStats) and sent directly — it changes slowly, so a few sends a minute is fine.
+static uint16_t ahU16(double x) { return x <= 0 ? 0 : (x >= 65535 ? 65535 : (uint16_t)(x + 0.5)); }
+static uint32_t ahU32(double x) { return x <= 0 ? 0 : (uint32_t)(x + 0.5); }
+
+static void fillMeter(slavelink::StatMeterW& m, const stats::Bucket& b) {
+    m.inAh = ahU32(b.chargedAh);   m.outAh = ahU32(b.dischargedAh);
+    m.solarAh = ahU32(b.solarAh);  m.dcdcAh = ahU32(b.dcdcAh);
+    m.chargerAh = ahU32(b.chargerAh); m.loadAh = ahU32(b.loadAh);
+    m.durSecs = b.durationSecs;
+}
 
 void sendStatsFrame() {
     if (!gEspNowOk) return;
@@ -160,22 +168,20 @@ void sendStatsFrame() {
     fillStatsHeader(f);
     f.masterId = gMasterId;
     f.clockOk = currentLocalEpoch() != 0 ? 1 : 0;
+    fillMeter(f.today, gStats.bucket(stats::TODAY));
+    fillMeter(f.trip,  gStats.bucket(stats::TRIP));
+    fillMeter(f.total, gStats.bucket(stats::TOTAL));
     int dc = (int)gStats.dayCount();
     int start = dc > 7 ? dc - 7 : 0, out = 0;
     for (int i = start; i < dc && out < 7; ++i) {
         const stats::DayRecord& r = gStats.day(i);
-        f.daySolarWh[out] = whU16(r.solarWh);
-        f.dayDcdcWh[out] = whU16(r.dcdcWh);
-        f.dayChargerWh[out] = whU16(r.chargerWh);
-        f.dayLoadWh[out] = whU16(r.loadWh);
+        f.daySolarAh[out] = ahU16(r.solarAh);
+        f.dayDcdcAh[out] = ahU16(r.dcdcAh);
+        f.dayChargerAh[out] = ahU16(r.chargerAh);
+        f.dayLoadAh[out] = ahU16(r.loadAh);
         f.dayStamp[out] = r.dayStamp;
         ++out;
     }
     f.dayCount = (uint8_t)out;
-    const stats::Bucket& tb = gStats.bucket(stats::TODAY);
-    f.todaySolarWh = whU16(tb.solarWh);
-    f.todayDcdcWh = whU16(tb.dcdcWh);
-    f.todayChargerWh = whU16(tb.chargerWh);
-    f.todayLoadWh = whU16(tb.loadWh);
     esp_now_send(kBroadcastMac, (const uint8_t*)&f, sizeof(f));
 }

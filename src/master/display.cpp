@@ -28,6 +28,7 @@ static volatile int gSetAdjSteps = 0;    // accumulated signed steps to apply
 static volatile int gBindSetRole = -1;   // request: bind this role...
 static volatile int gBindSetIdx = -1;    // ...to this shared source index
 static volatile bool gPairReq = false;   // request: open the master pairing window
+static volatile int gStatResetReq = -1;  // request: reset stats scope (0 today/1 trip/2 total)
 static int gSetSel = 0;                  // display-local: selected tunable row
 static int gSetView = 0;                 // display-local: Settings sub-view (0 tune, 1 bind)
 static int gBindMenuRole = -1;           // display-local: open source-picker role (-1 = list)
@@ -173,7 +174,17 @@ static void collectDash(guition::DashData& d) {
     // Graph page.
     collectHistory(d);
 
-    // Week page: last-7-days energy + today's running totals.
+    // Week page: resettable meters + last-7 "day" Ah bars (a "day" = a calendar
+    // day when clocked, else 24h of run-time).
+    auto fillM = [](guition::DashData::StatMeter& m, const stats::Bucket& b) {
+        m.inAh = b.chargedAh;    m.outAh = b.dischargedAh;
+        m.solarAh = b.solarAh;   m.dcdcAh = b.dcdcAh;
+        m.chargerAh = b.chargerAh; m.loadAh = b.loadAh;
+        m.durSecs = b.durationSecs;
+    };
+    fillM(d.statToday, gStats.bucket(stats::TODAY));
+    fillM(d.statTrip,  gStats.bucket(stats::TRIP));
+    fillM(d.statTotal, gStats.bucket(stats::TOTAL));
     d.clockOk = (currentLocalEpoch() != 0);
     int dc = (int)gStats.dayCount();
     int start = dc > guition::DashData::DAYS_N ? dc - guition::DashData::DAYS_N : 0;
@@ -181,16 +192,13 @@ static void collectDash(guition::DashData& d) {
     for (int i = start; i < dc; ++i) {
         const stats::DayRecord& r = gStats.day(i);
         d.dayStamp[out]     = r.dayStamp;
-        d.daySolarWh[out]   = r.solarWh;
-        d.dayDcdcWh[out]    = r.dcdcWh;
-        d.dayChargerWh[out] = r.chargerWh;
-        d.dayLoadWh[out]    = r.loadWh;
+        d.daySolarAh[out]   = r.solarAh;
+        d.dayDcdcAh[out]    = r.dcdcAh;
+        d.dayChargerAh[out] = r.chargerAh;
+        d.dayLoadAh[out]    = r.loadAh;
         ++out;
     }
     d.dayCount = out;
-    const stats::Bucket& tb = gStats.bucket(stats::TODAY);
-    d.todaySolarWh = tb.solarWh; d.todayDcdcWh = tb.dcdcWh;
-    d.todayChargerWh = tb.chargerWh; d.todayLoadWh = tb.loadWh;
 
     // Settings page: profiles, status, tunables (brightness + selected row are
     // filled by the display task).
@@ -330,19 +338,25 @@ static void collectSlaveDash(guition::DashData& d) {
     if (gRx.hasStats()) {
         const slavelink::StatsFrame& f = gRx.stats();
         d.clockOk = f.clockOk != 0;
+        auto fillM = [](guition::DashData::StatMeter& m, const slavelink::StatMeterW& w) {
+            m.inAh = w.inAh;       m.outAh = w.outAh;
+            m.solarAh = w.solarAh; m.dcdcAh = w.dcdcAh;
+            m.chargerAh = w.chargerAh; m.loadAh = w.loadAh;
+            m.durSecs = w.durSecs;
+        };
+        fillM(d.statToday, f.today); fillM(d.statTrip, f.trip); fillM(d.statTotal, f.total);
         int n = f.dayCount > guition::DashData::DAYS_N ? guition::DashData::DAYS_N : f.dayCount;
         for (int i = 0; i < n; ++i) {
             d.dayStamp[i] = f.dayStamp[i];
-            d.daySolarWh[i] = f.daySolarWh[i];
-            d.dayDcdcWh[i] = f.dayDcdcWh[i];
-            d.dayChargerWh[i] = f.dayChargerWh[i];
-            d.dayLoadWh[i] = f.dayLoadWh[i];
+            d.daySolarAh[i] = f.daySolarAh[i];
+            d.dayDcdcAh[i] = f.dayDcdcAh[i];
+            d.dayChargerAh[i] = f.dayChargerAh[i];
+            d.dayLoadAh[i] = f.dayLoadAh[i];
         }
         d.dayCount = n;
-        d.todaySolarWh = f.todaySolarWh; d.todayDcdcWh = f.todayDcdcWh;
-        d.todayChargerWh = f.todayChargerWh; d.todayLoadWh = f.todayLoadWh;
     } else {
         d.dayCount = 0; d.clockOk = false;
+        d.statToday = d.statTrip = d.statTotal = guition::DashData::StatMeter{};
     }
 
     // Settings (Tune) fields relevant to a slave: its own config AP + display prefs.
@@ -429,6 +443,15 @@ void serviceDashRequests() {
         startPairing();
         Serial.printf("[display] pairing window open %ds\n", pairSecsLeft());
     }
+    if (gStatResetReq >= 0) {
+        int scope = gStatResetReq;
+        gStatResetReq = -1;
+        if (scope >= 0 && scope <= 2) {
+            gStats.reset((stats::Scope)scope);   // 0 today / 1 trip / 2 total
+            gStats.maybePersist(millis(), true);
+            Serial.printf("[display] reset stats scope %d\n", scope);
+        }
+    }
     serviceRole();  // role toggle (reboots) — no-op unless the Diag tab requested it
 }
 
@@ -478,8 +501,12 @@ static void displayTask(void*) {
     float optVal = 0;
     float tunShown[guition::TUNABLE_N] = {0};  // last displayed tunable values (adjust base)
     uint32_t lastTapMs = 0;     // debounce: ignore down-edges too close together
+    int holdCard = -1;          // Week card being long-pressed (-1 = none)
+    uint32_t holdStart = 0;
+    bool holdFired = false;     // reset already fired for this hold
     for (;;) {
         bool redraw = false;
+        int wkHold = -1; float wkFrac = 0;  // Week long-press feedback for this frame
         guition::TouchPoint tp;
         bool down = gTouch.read(tp);
         if (down && !wasDown && millis() - lastTapMs >= 150) {  // debounce: one action per tap
@@ -589,6 +616,21 @@ static void displayTask(void*) {
                 }
             }
         }
+        // Week page: hold a meter card ~2s to reset it (progress fills; release
+        // cancels). Tracked every poll, not just on the down-edge.
+        if (gPage == guition::PAGE_DAYS && down) {
+            int card = guition::weekCardAt(tp.x, tp.y);
+            if (card < 0 || card != holdCard) { holdCard = card; holdStart = millis(); holdFired = false; }
+            if (holdCard >= 0) {
+                wkHold = holdCard;
+                wkFrac = (millis() - holdStart) / 2000.0f;
+                if (wkFrac > 1) wkFrac = 1;
+                if (wkFrac >= 1 && !holdFired) { holdFired = true; gStatResetReq = holdCard; }
+                redraw = true;  // animate the fill
+            }
+        } else {
+            holdCard = -1;
+        }
         wasDown = down;
 
         uint32_t now = millis();
@@ -612,6 +654,7 @@ static void displayTask(void*) {
             d.menuPage = (uint8_t)gMenuPage;        // source-picker page (display-owned)
             d.diagScreen = (uint8_t)gDiagScreen;    // Diag sub-screen (display-owned)
             d.debugCapture = gDebugCapture;         // reflect the toggle instantly (display-owned)
+            d.weekHold = wkHold; d.weekHoldFrac = wkFrac;  // Week long-press feedback (display-owned)
             // Optimistic tunable: show the adjusted number now; clear once the loop
             // has applied it and the snapshot caught up.
             if (optWhich >= 0) {

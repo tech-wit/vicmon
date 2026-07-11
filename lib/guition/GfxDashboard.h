@@ -58,13 +58,23 @@ struct DashData {
   uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
   uint8_t  graphHidden = 0;        // bitfield: series hidden via the legend (bit 0=batt..5=soc)
 
-  // Week page: last-7-days energy (Wh) + today's running totals.
+  // Week page: last-7-"day" energy in Ah (a "day" = a calendar day when a clock
+  // is set, else 24h of run-time) + three resettable meters. Filled from gStats
+  // (master) or the ESP-NOW StatsFrame (slave).
   static const int DAYS_N = 7;
-  uint32_t dayStamp[DAYS_N];       // yyyymmdd
-  float    daySolarWh[DAYS_N], dayDcdcWh[DAYS_N], dayChargerWh[DAYS_N], dayLoadWh[DAYS_N];
+  uint32_t dayStamp[DAYS_N];       // yyyymmdd (clocked) or run-day index (no clock)
+  float    daySolarAh[DAYS_N], dayDcdcAh[DAYS_N], dayChargerAh[DAYS_N], dayLoadAh[DAYS_N];
   int      dayCount = 0;
-  bool     clockOk = false;        // NTP synced (needed for daily rollover)
-  float    todaySolarWh = 0, todayDcdcWh = 0, todayChargerWh = 0, todayLoadWh = 0;
+  bool     clockOk = false;        // a real/manual clock is set (date labels vs "Day N")
+
+  // Net-in / net-out (Ah) meters. inAh = charged into battery, outAh = discharged.
+  struct StatMeter { float inAh, outAh, solarAh, dcdcAh, chargerAh, loadAh; uint32_t durSecs; };
+  StatMeter statToday, statTrip, statTotal;
+
+  // Week long-press-to-reset feedback (display-owned): which card (0..2) is held
+  // and how far through the ~2s hold (0..1); -1 = none.
+  int      weekHold = -1;
+  float    weekHoldFrac = 0;
 
   // Settings page: status.
   int      profileId = 0;          // active profile
@@ -208,6 +218,10 @@ int graphHitTest(int tx, int ty);
 // If (tx,ty) hit a Graph legend slot, return the series index 0..5 (batt/solar/
 // charger/dcdc/load/soc) to toggle on/off; otherwise -1.
 int graphLegendHit(int tx, int ty);
+
+// If (tx,ty) is inside one of the Week-page meter cards, return its index
+// (0 Today / 1 Trip / 2 Total) for the long-press-to-reset; otherwise -1.
+int weekCardAt(int tx, int ty);
 
 // Back-compat: renders PAGE_DASH.
 void renderDashboard(Arduino_GFX* c, const DashData& d);

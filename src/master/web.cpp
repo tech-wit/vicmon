@@ -138,7 +138,10 @@ static String bucketJson(const stats::Bucket& b) {
 static String buildStatsJson() {
     uint32_t epoch = currentLocalEpoch();
     String j = "{";
-    j += "\"clock\":" + jbool(epoch != 0) + ",\"now_epoch\":" + String(epoch) + ",";
+    // clock=true when a real/manual clock is set (day labels are dates); otherwise
+    // days come from the run-time odometer and run_day is the current index.
+    j += "\"clock\":" + jbool(epoch != 0) + ",\"now_epoch\":" + String(epoch) +
+         ",\"run_day\":" + String(gStats.runDay()) + ",";
     j += "\"today\":" + bucketJson(gStats.bucket(stats::TODAY)) + ",";
     j += "\"trip\":" + bucketJson(gStats.bucket(stats::TRIP)) + ",";
     j += "\"total\":" + bucketJson(gStats.bucket(stats::TOTAL)) + ",";
@@ -146,12 +149,11 @@ static String buildStatsJson() {
     for (size_t i = 0; i < gStats.dayCount(); ++i) {
         const stats::DayRecord& d = gStats.day(i);
         if (i) j += ",";
-        j += "{\"date\":" + String(d.dayStamp) +
-             ",\"solar_wh\":" + String(d.solarWh, 0) +
-             ",\"dcdc_wh\":" + String(d.dcdcWh, 0) +
-             ",\"charger_wh\":" + String(d.chargerWh, 0) +
-             ",\"load_wh\":" + String(d.loadWh, 0) +
-             ",\"discharged_wh\":" + String(d.dischargedWh, 0) +
+        j += "{\"stamp\":" + String(d.dayStamp) +
+             ",\"solar_ah\":" + String(d.solarAh, 1) +
+             ",\"dcdc_ah\":" + String(d.dcdcAh, 1) +
+             ",\"charger_ah\":" + String(d.chargerAh, 1) +
+             ",\"load_ah\":" + String(d.loadAh, 1) +
              ",\"soc_min\":" + jopt(d.socMin) + ",\"soc_max\":" + jopt(d.socMax) + "}";
     }
     j += "]}";
@@ -477,6 +479,14 @@ static void handleStatsReset(AsyncWebServerRequest* req) {
     gStats.reset(sc);
     gStats.maybePersist(millis(), /*force=*/true);
     req->redirect("/stats");
+}
+
+// Manually set the clock (UTC epoch from the browser). Lets the day rollover use
+// a real calendar without NTP; RAM-only, so lost on reboot (run-days take over).
+static void handleTime(AsyncWebServerRequest* req) {
+    uint32_t e = (uint32_t)strtoul(param(req, "epoch").c_str(), nullptr, 10);
+    if (e > 1700000000) { gManualEpoch = e; gManualMillis = millis(); }
+    req->send(200, "text/plain", "ok");
 }
 
 static void handleBind(AsyncWebServerRequest* req) {
@@ -976,6 +986,7 @@ void setupServer() {
     gServer.on("/api/panel", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildPanelJson());
     });
+    gServer.on("/api/time", HTTP_POST, handleTime);
     gServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildStatsJson());
     });

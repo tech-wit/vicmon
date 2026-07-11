@@ -24,6 +24,7 @@ void Stats::begin(int profile) {
     for (int i = 0; i < kDays; ++i) days_[i] = DayRecord();
     dayCount_ = 0;
     dayHead_ = 0;
+    runSecs_ = 0;
     lastMs_ = 0;
     lastSaveMs_ = 0;
     dirty_ = false;
@@ -49,6 +50,7 @@ void Stats::load() {
         if (dayCount_ > kDays) dayCount_ = kDays;
         if (dayHead_ >= kDays) dayHead_ = 0;
     }
+    runSecs_ = p.getDouble("runsec", 0);  // run-time odometer (no-clock day boundary)
     p.end();
 }
 
@@ -60,19 +62,19 @@ void Stats::save() {
     p.putBytes("days", days_, sizeof(days_));
     p.putUInt("dayn", dayCount_);
     p.putUInt("dayh", dayHead_);
+    p.putDouble("runsec", runSecs_);
     p.end();
     dirty_ = false;
 }
 
 void Stats::captureDay(const Bucket& f) {
-    if (f.dayStamp == 0) return;  // only archive real, clock-stamped days
+    if (f.dayStamp == 0) return;  // don't archive an un-stamped bucket
     DayRecord d;
     d.dayStamp = f.dayStamp;
-    d.solarWh = f.solarWh;
-    d.dcdcWh = f.dcdcWh;
-    d.chargerWh = f.chargerWh;
-    d.loadWh = f.loadWh;
-    d.dischargedWh = f.dischargedWh;
+    d.solarAh = f.solarAh;
+    d.dcdcAh = f.dcdcAh;
+    d.chargerAh = f.chargerAh;
+    d.loadAh = f.loadAh;
     d.socMin = f.socMin;
     d.socMax = f.socMax;
     days_[dayHead_] = d;
@@ -110,34 +112,37 @@ void Stats::reset(Scope sc) {
 }
 
 void Stats::update(const Sample& s, uint32_t nowMs, uint32_t localEpoch) {
+    // The current day key: a yyyymmdd calendar stamp when a clock (NTP/manual) is
+    // available, otherwise the run-time day index (every 24h of running).
+    auto dayKey = [&]() -> uint32_t { return localEpoch ? dayOf(localEpoch) : runDay(); };
+
     // Establish the time base on the first call (no integration yet).
     if (lastMs_ == 0) {
         lastMs_ = nowMs;
         for (int i = 0; i < COUNT; ++i)
             if (b_[i].startEpoch == 0) b_[i].startEpoch = localEpoch;
-        b_[TODAY].dayStamp = dayOf(localEpoch);
+        b_[TODAY].dayStamp = dayKey();
         return;
-    }
-
-    // Daily rollover: when the clock is available and the date has ticked over,
-    // start a fresh TODAY bucket aligned to local midnight.
-    uint32_t today = dayOf(localEpoch);
-    if (today != 0) {
-        if (b_[TODAY].dayStamp == 0) {
-            b_[TODAY].dayStamp = today;
-        } else if (today != b_[TODAY].dayStamp) {
-            captureDay(b_[TODAY]);  // archive the finished day for the 7-day view
-            b_[TODAY] = Bucket();
-            b_[TODAY].dayStamp = today;
-            dirty_ = true;
-        }
     }
 
     float dt = (nowMs - lastMs_) / 1000.0f;
     lastMs_ = nowMs;
     if (dt <= 0) return;
     if (dt > kMaxStepSecs) dt = kMaxStepSecs;  // ignore the gap after a long stall
+    runSecs_ += dt;                            // odometer drives the no-clock rollover
     float h = dt / 3600.0f;
+
+    // Day rollover: archive the finished day and start a fresh TODAY when the day
+    // key ticks over — calendar midnight if clocked, else a 24h run-time boundary.
+    uint32_t dk = dayKey();
+    if (b_[TODAY].dayStamp == 0) {
+        b_[TODAY].dayStamp = dk;
+    } else if (dk != b_[TODAY].dayStamp) {
+        captureDay(b_[TODAY]);
+        b_[TODAY] = Bucket();
+        b_[TODAY].dayStamp = dk;
+        dirty_ = true;
+    }
 
     // Voltage reference for the watt-hour integrals (Wh = A * V * h).
     float vref = s.battVValid ? s.battV : 12.8f;

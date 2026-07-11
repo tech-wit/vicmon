@@ -526,10 +526,19 @@ void saveAlertSettings(float socWarn, float socCrit, float vLow, float vHigh) {
 
 // Local unix seconds (TZ offset already applied) once NTP has synced, else 0.
 // Used only for the daily-stats midnight rollover and "since" labels.
+// Manually-set clock (from the AP "Set time"): the UTC epoch supplied and the
+// millis() at which it was set. RAM-only, so it's lost on reboot (the run-time
+// day odometer takes over until it's set again). 0 = not set.
+uint32_t gManualEpoch = 0;
+uint32_t gManualMillis = 0;
+
+// Local (TZ-adjusted) unix seconds, or 0 if no clock at all. Prefers a real NTP
+// fix, else the manually-set clock; 0 tells Stats to fall back to run-time days.
 uint32_t currentLocalEpoch() {
     time_t t = time(nullptr);
-    if (t < 1700000000) return 0;  // ~2023-11; NTP not synced yet
-    return static_cast<uint32_t>(t) + gTzOffsetMin * 60;
+    if (t >= 1700000000) return static_cast<uint32_t>(t) + gTzOffsetMin * 60;  // NTP
+    if (gManualEpoch) return gManualEpoch + (millis() - gManualMillis) / 1000 + gTzOffsetMin * 60;
+    return 0;  // no clock -> run-time day boundaries
 }
 
 // Loads a profile's config/signals/settings and clears runtime caches so the

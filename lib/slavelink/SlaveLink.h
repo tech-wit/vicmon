@@ -100,17 +100,24 @@ struct Snapshot {
 // snapshot ('V','S'); the receiver dispatches on length + magic. Broadcast a few
 // times a minute — the data changes only at the daily rollover.
 static const uint8_t kStatsMagic1 = 'T';
+// One resettable energy meter, in whole Ah (integers only — this struct is sent
+// packed and float would risk unaligned loads on the receiver).
+struct StatMeterW {
+    uint32_t inAh, outAh;                        // charged into / discharged from battery
+    uint32_t solarAh, dcdcAh, chargerAh, loadAh; // source breakdown + load
+    uint32_t durSecs;                            // wall-time accumulating
+};
 struct StatsFrame {
     uint8_t magic0;       // 'V'
     uint8_t magic1;       // 'T'
     uint8_t version;      // kVersion
-    uint8_t clockOk;      // NTP synced (day rollover works) — else no day buckets
+    uint8_t clockOk;      // a clock (NTP/manual) is set — date labels vs run-days
     uint32_t masterId;    // filter to our paired master
     uint8_t dayCount;     // number of valid past-day entries (0..7)
-    uint8_t pad_;
-    uint16_t daySolarWh[7], dayDcdcWh[7], dayChargerWh[7], dayLoadWh[7];  // whole Wh
-    uint32_t dayStamp[7]; // yyyymmdd per past-day entry
-    uint16_t todaySolarWh, todayDcdcWh, todayChargerWh, todayLoadWh;      // running today
+    uint8_t pad_[3];
+    StatMeterW today, trip, total;                                       // resettable meters
+    uint16_t daySolarAh[7], dayDcdcAh[7], dayChargerAh[7], dayLoadAh[7]; // whole Ah per day
+    uint32_t dayStamp[7]; // yyyymmdd (clocked) or run-day index per past-day entry
 };
 #pragma pack(pop)
 

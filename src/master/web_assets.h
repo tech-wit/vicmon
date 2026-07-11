@@ -229,127 +229,95 @@ setInterval(loadChart,5000);
 )HTML";
 
 static const char kStatsPage[] = R"HTML(
+<style>
+ .erow{display:flex;align-items:flex-start;justify-content:space-between;gap:.6em;flex-wrap:wrap}
+ .setbtn{font:inherit;font-size:.82em;color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:8px;padding:.35em .8em;cursor:pointer}
+ .setbtn:hover{color:var(--fg);border-color:var(--accent)}
+ .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+ .meter .mh{display:flex;justify-content:space-between;align-items:center;margin-bottom:.4em}
+ .meter .mh b{font-size:.72em;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+ .io{display:flex;gap:1em}
+ .io>div{flex:1}
+ .lab{font-size:.66em;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+ .big{font-size:1.7em;font-weight:650;letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:var(--fg)}
+ .big small{font-size:.45em;color:var(--muted);font-weight:500;margin-left:.15em}
+ .in .big,.in .lab{color:var(--green)}.out .big,.out .lab{color:var(--red)}
+ .split{height:7px;border-radius:4px;background:#0d1626;display:flex;overflow:hidden;margin:.75em 0 .55em}
+ .split i{height:100%}
+ .brk{display:flex;justify-content:space-between;font-size:.76em;color:var(--muted);flex-wrap:wrap;gap:.35em}
+ .brk b{color:var(--fg)}
+ .mfoot{display:flex;justify-content:space-between;align-items:center;margin-top:.7em;font-size:.76em}
+ .mfoot form{margin:0}
+</style>
 <div class=card>
-  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5em">
-    <div id="scopebtns">
-      <button class="winbtn ghost" data-s="today">Today</button>
-      <button class="winbtn ghost" data-s="trip">Trip</button>
-      <button class="winbtn ghost" data-s="total">Total</button>
-    </div>
-    <form id="resetForm" method=post action=/stats/reset style="margin:0">
-      <input type=hidden name=scope id=resetScope value=trip>
-      <button class=ghost id=resetBtn>reset</button>
-    </form>
-  </div>
-  <div id="since" class="muted" style="font-size:.82em;margin-top:.5em">--</div>
+ <div class=erow>
+  <div><h3 style="margin:0 0 .15em">Energy</h3><div id=daynote class=muted style="font-size:.82em">--</div></div>
+  <button class=setbtn id=setTime title="Set the clock from this device so days roll at midnight">Set time</button>
+ </div>
+ <canvas id="dayChart" width="760" height="180" style="width:100%;height:180px;margin-top:.7em"></canvas>
+ <div class="legend" style="margin-top:.3em">
+  <span style="color:#facc15">&#9632; Solar</span>
+  <span style="color:#a78bfa">&#9632; DC-DC</span>
+  <span style="color:#60a5fa">&#9632; Charger</span>
+  <span style="color:#f87171">&#9632; Load out</span>
+  <span class=muted>Ah in (stacked) vs out, per day</span>
+ </div>
+ <div id="dayEmpty" class="muted" style="font-size:.82em"></div>
 </div>
-<div class=card>
-  <h3>Energy in</h3>
-  <table>
-    <tr><th>Source</th><th style="text-align:right">Ah</th><th style="text-align:right">Wh</th></tr>
-    <tr><td>&#9728;&#65039; Solar</td><td id="s_solar_ah" style="text-align:right">--</td><td id="s_solar_wh" style="text-align:right">--</td></tr>
-    <tr><td>&#9889; DC-DC</td><td id="s_dcdc_ah" style="text-align:right">--</td><td id="s_dcdc_wh" style="text-align:right">--</td></tr>
-    <tr><td>&#128268; Charger</td><td id="s_charger_ah" style="text-align:right">--</td><td id="s_charger_wh" style="text-align:right">--</td></tr>
-    <tr><td><b>Into battery</b></td><td id="s_charged_ah" style="text-align:right"><b>--</b></td><td id="s_charged_wh" style="text-align:right"><b>--</b></td></tr>
-  </table>
-</div>
-<div class=card>
-  <h3>Energy out</h3>
-  <table>
-    <tr><th>&nbsp;</th><th style="text-align:right">Ah</th><th style="text-align:right">Wh</th></tr>
-    <tr><td>&#128161; Load</td><td id="s_load_ah" style="text-align:right">--</td><td id="s_load_wh" style="text-align:right">--</td></tr>
-    <tr><td><b>From battery</b></td><td id="s_discharged_ah" style="text-align:right"><b>--</b></td><td id="s_discharged_wh" style="text-align:right"><b>--</b></td></tr>
-  </table>
-  <div id="net" class="muted" style="font-size:.82em;margin-top:.5em">--</div>
-</div>
-<div class=card>
-  <h3>Extremes</h3>
-  <table>
-    <tr><td>State of charge</td><td id="s_soc" style="text-align:right">--</td></tr>
-    <tr><td>Voltage</td><td id="s_v" style="text-align:right">--</td></tr>
-    <tr><td>Peak solar</td><td id="s_psolar" style="text-align:right">--</td></tr>
-    <tr><td>Peak load</td><td id="s_pload" style="text-align:right">--</td></tr>
-    <tr><td>Peak charge / discharge</td><td id="s_pcur" style="text-align:right">--</td></tr>
-    <tr><td>Time charging / discharging</td><td id="s_time" style="text-align:right">--</td></tr>
-  </table>
-</div>
-<div class=card>
-  <h3>Last 7 days</h3>
-  <canvas id="dayChart" width="700" height="170" style="width:100%;height:170px"></canvas>
-  <div class="legend" style="margin-top:.4em">
-    <span style="color:#facc15">&#9632; Solar</span>
-    <span style="color:#a78bfa">&#9632; DC-DC</span>
-    <span style="color:#60a5fa">&#9632; Charger</span>
-    <span style="color:#f87171">&#9632; Load</span>
-    <span class=muted>Wh in (stacked) vs out</span>
-  </div>
-  <div id="dayEmpty" class="muted" style="font-size:.82em"></div>
-</div>
+<div class=mgrid id=meters></div>
 <script>
-function ss(id,t){document.getElementById(id).textContent=t;}
-function durStr(s){s=Math.round(s);var d=Math.floor(s/86400);s-=d*86400;
- var h=Math.floor(s/3600);s-=h*3600;var m=Math.floor(s/60);
- if(d>0)return d+'d '+h+'h';if(h>0)return h+'h '+m+'m';return m+'m';}
-function dt2(e){var d=new Date(e*1000);return d.toISOString().slice(0,16).replace('T',' ');}
-function fmtDay(ymd){var s=''+ymd;return s.slice(4,6)+'/'+s.slice(6,8);}
-function drawDays(){
- var c=document.getElementById('dayChart');if(!c||!c.getContext)return;
- var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=38,padR=8,padT=8,padB=18;
+var SC=[['today','Today'],['trip','Trip'],['total','Total']];
+var COL={solar:'#facc15',dcdc:'#a78bfa',charger:'#60a5fa'};
+var data=null;
+function ah(v){v=Math.abs(v);return v>=10000?(v/1000).toFixed(1)+'k':v.toFixed(0);}
+function durStr(s){s=Math.round(s);var d=Math.floor(s/86400);s-=d*86400;var h=Math.floor(s/3600);s-=h*3600;var m=Math.floor(s/60);if(d>0)return d+'d '+h+'h';if(h>0)return h+'h '+m+'m';return m+'m';}
+function set(id,html){var e=document.getElementById(id);if(e)e.innerHTML=html;}
+function rst(k){return k!='total'||confirm('Reset lifetime totals? This cannot be undone.');}
+function meters(){document.getElementById('meters').innerHTML=SC.map(function(sc){var k=sc[0];
+ return '<div class="card meter"><div class=mh><b>'+sc[1]+'</b><span class=muted id=dur_'+k+'></span></div>'+
+  '<div class=io><div class=in><div class=lab>Net in</div><div class=big id=in_'+k+'>--</div></div>'+
+  '<div class=out><div class=lab>Net out</div><div class=big id=out_'+k+'>--</div></div></div>'+
+  '<div class=split id=split_'+k+'></div><div class=brk id=brk_'+k+'></div>'+
+  '<div class=mfoot><span class=muted id=soc_'+k+'></span>'+
+  '<form method=post action=/stats/reset onsubmit="return rst(\''+k+'\')"><input type=hidden name=scope value='+k+'>'+
+  '<button class=ghost>Reset</button></form></div></div>';}).join('');}
+function render(){if(!data)return;
+ SC.forEach(function(sc){var k=sc[0],b=data[k];if(!b)return;
+  set('in_'+k,'+'+ah(b.charged_ah)+'<small>Ah</small>');
+  set('out_'+k,'&minus;'+ah(b.discharged_ah)+'<small>Ah</small>');
+  set('dur_'+k,durStr(b.duration_secs));
+  var tot=b.solar_ah+b.dcdc_ah+b.charger_ah||1;
+  set('split_'+k,'<i style="width:'+(100*b.solar_ah/tot)+'%;background:'+COL.solar+'"></i>'+
+   '<i style="width:'+(100*b.dcdc_ah/tot)+'%;background:'+COL.dcdc+'"></i>'+
+   '<i style="width:'+(100*b.charger_ah/tot)+'%;background:'+COL.charger+'"></i>');
+  set('brk_'+k,'<span>Solar <b>'+b.solar_ah.toFixed(0)+'</b></span><span>DC-DC <b>'+b.dcdc_ah.toFixed(0)+
+   '</b></span><span>Chg <b>'+b.charger_ah.toFixed(0)+'</b></span><span>Load <b>'+b.load_ah.toFixed(0)+'</b></span>');
+  set('soc_'+k,b.soc_min==null?'':'SoC '+b.soc_min.toFixed(0)+'&ndash;'+b.soc_max.toFixed(0)+'%');});
+ set('daynote',data.clock?'Calendar days &middot; clock set':'Run-day '+data.run_day+' &middot; no clock, days count run-time');
+}
+function lbl(d){if(d.now)return 'now';var s=''+d.stamp;return (data.clock&&d.stamp>=20000000)?(s.slice(4,6)+'/'+s.slice(6,8)):('d'+d.stamp);}
+function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getContext)return;
+ var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=32,padR=8,padT=8,padB=18;
  ctx.clearRect(0,0,W,H);
- var days=(data&&data.days)?data.days.slice(-7):[];
+ var days=(data&&data.days)?data.days.slice(-7).map(function(d){return{stamp:d.stamp,s:d.solar_ah,d:d.dcdc_ah,c:d.charger_ah,o:d.load_ah};}):[];
+ if(data&&data.today){var t=data.today;days.push({now:1,s:t.solar_ah,d:t.dcdc_ah,c:t.charger_ah,o:t.discharged_ah});}
  var em=document.getElementById('dayEmpty');
- if(!days.length){em.textContent=(data&&data.clock)?
-  'No completed days yet — check back after midnight.':
-  'Needs an NTP clock (configure WiFi) to track daily history.';return;}
- em.textContent='';
- var mx=1;days.forEach(function(d){var i=d.solar_wh+d.dcdc_wh+d.charger_wh;
-  if(i>mx)mx=i;if(d.load_wh>mx)mx=d.load_wh;});
+ em.textContent=days.length<=1?'Day 1 accruing &mdash; bars fill in as days roll over.':'';
+ var mx=1;days.forEach(function(d){var i=d.s+d.d+d.c;if(i>mx)mx=i;if(d.o>mx)mx=d.o;});
  function Y(v){return padT+(H-padT-padB)*(1-v/mx);}
  ctx.fillStyle='#7d8da1';ctx.font='9px system-ui';ctx.textAlign='right';
- [mx,mx/2,0].forEach(function(v){var y=Y(v);ctx.strokeStyle='#1f2c3a';
-  ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
-  ctx.fillText(v.toFixed(0),padL-4,y+3);});
+ [mx,mx/2,0].forEach(function(v){var y=Y(v);ctx.strokeStyle='#1f2c3a';ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(v.toFixed(0),padL-4,y+3);});
  var n=days.length,slot=(W-padL-padR)/n,bw=slot*0.30,base=Y(0);
  ctx.textAlign='center';
  days.forEach(function(d,i){var cx=padL+slot*(i+0.5),xi=cx-bw-1,xo=cx+1,acc=0;
-  [['solar_wh','#facc15'],['dcdc_wh','#a78bfa'],['charger_wh','#60a5fa']].forEach(function(p){
-   var v=d[p[0]]||0;if(v<=0)return;var y0=Y(acc),y1=Y(acc+v);
-   ctx.fillStyle=p[1];ctx.fillRect(xi,y1,bw,y0-y1);acc+=v;});
-  ctx.fillStyle='#f87171';var yo=Y(d.load_wh);ctx.fillRect(xo,yo,bw,base-yo);
-  ctx.fillStyle='#7d8da1';ctx.fillText(fmtDay(d.date),cx,H-5);});
+  [['s',COL.solar],['d',COL.dcdc],['c',COL.charger]].forEach(function(p){var v=d[p[0]]||0;if(v<=0)return;var y0=Y(acc),y1=Y(acc+v);ctx.fillStyle=p[1];ctx.fillRect(xi,y1,bw,y0-y1);acc+=v;});
+  ctx.fillStyle='#f87171';var yo=Y(d.o);ctx.fillRect(xo,yo,bw,base-yo);
+  ctx.fillStyle=d.now?'#e6edf3':'#7d8da1';ctx.fillText(lbl(d),cx,H-5);});
 }
-var scope='trip',data=null;
-function setScope(s){scope=s;document.getElementById('resetScope').value=s;
- var bs=document.querySelectorAll('.winbtn');for(var i=0;i<bs.length;i++)
-  bs[i].classList.toggle('active',bs[i].dataset.s===s);render();}
+document.getElementById('setTime').addEventListener('click',function(){
+ fetch('/api/time?epoch='+Math.floor(Date.now()/1000),{method:'POST'}).then(function(){setTimeout(load,300);});});
 async function load(){try{data=await(await fetch('/api/stats')).json();}catch(e){return;}render();drawDays();}
-function render(){
- if(!data)return;var b=data[scope];if(!b)return;
- ss('s_solar_ah',b.solar_ah.toFixed(1));ss('s_solar_wh',b.solar_wh.toFixed(0));
- ss('s_dcdc_ah',b.dcdc_ah.toFixed(1));ss('s_dcdc_wh',b.dcdc_wh.toFixed(0));
- ss('s_charger_ah',b.charger_ah.toFixed(1));ss('s_charger_wh',b.charger_wh.toFixed(0));
- ss('s_charged_ah',b.charged_ah.toFixed(1));ss('s_charged_wh',b.charged_wh.toFixed(0));
- ss('s_load_ah',b.load_ah.toFixed(1));ss('s_load_wh',b.load_wh.toFixed(0));
- ss('s_discharged_ah',b.discharged_ah.toFixed(1));ss('s_discharged_wh',b.discharged_wh.toFixed(0));
- var net=b.charged_ah-b.discharged_ah;
- ss('net','Net battery balance: '+(net>=0?'+':'')+net.toFixed(1)+' Ah ('+(net>=0?'+':'')+(b.charged_wh-b.discharged_wh).toFixed(0)+' Wh)');
- ss('s_soc',b.soc_min==null?'--':b.soc_min.toFixed(0)+'% .. '+b.soc_max.toFixed(0)+'%');
- ss('s_v',b.v_min==null?'--':b.v_min.toFixed(2)+' .. '+b.v_max.toFixed(2)+' V');
- ss('s_psolar',b.peak_solar_w.toFixed(0)+' W');
- ss('s_pload',b.peak_load_w.toFixed(0)+' W');
- ss('s_pcur',b.peak_charge_a.toFixed(1)+' / '+b.peak_discharge_a.toFixed(1)+' A');
- ss('s_time',durStr(b.charge_secs)+' / '+durStr(b.discharge_secs));
- var since='Accumulated over '+durStr(b.duration_secs);
- if(data.clock&&b.start_epoch>0)since+=' &middot; since '+dt2(b.start_epoch);
- else if(scope=='today')since+=' (no clock yet — “since boot”; set WiFi for NTP)';
- document.getElementById('since').innerHTML=since;
- document.getElementById('resetBtn').textContent=scope=='total'?'reset lifetime':'reset '+scope;
-}
-document.getElementById('resetForm').addEventListener('submit',function(e){
- if(scope=='total'&&!confirm('Reset lifetime totals? This cannot be undone.'))e.preventDefault();});
-var sb=document.querySelectorAll('.winbtn');
-for(var i=0;i<sb.length;i++)sb[i].addEventListener('click',function(){setScope(this.dataset.s);});
-setScope('trip');load();setInterval(load,5000);
+meters();load();setInterval(load,5000);
 </script>
 )HTML";
 
