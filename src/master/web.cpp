@@ -1021,8 +1021,8 @@ static void handleOtaDone(AsyncWebServerRequest* req) {
 static String otaCard() {
     return F(
         "<div class=card><h3>Firmware update (OTA)</h3>"
-        "<p class=muted>Upload a compiled <code>firmware.bin</code> (the atoms3 build, at "
-        "<code>.pio/build/atoms3/firmware.bin</code>) to flash over WiFi. The device "
+        "<p class=muted>Upload a compiled <code>firmware.bin</code> (the universal build, at "
+        "<code>.pio/build/s3/firmware.bin</code>) to flash over WiFi. The device "
         "reboots when done &mdash; wait ~10 s then reload.</p>"
         "<input type=file id=fw accept=.bin>"
         "<button type=button id=fwb class=ghost>Upload &amp; flash</button>"
