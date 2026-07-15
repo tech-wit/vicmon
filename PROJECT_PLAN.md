@@ -12,7 +12,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 1 | BLE advertisement decryption core | ✅ done, verified on hardware |
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
-| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); LilyGo display driver still TBD |
+| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 6-page renderer, 2-button nav, one universal image w/ runtime board-detect) |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
 **One app, one codebase (2026-07-08).** `src/master/` is *the* application, and the
@@ -412,11 +412,24 @@ former standalone `src/slave` was folded into the master app and deleted; all S3
 boards build the one universal `s3` image. `test/test_slavelink` covers the wire
 format on the host.
 
-**Remaining (needs the LilyGo T-Display-S3 on the bench):**
-- **LilyGo display + button-nav driver (P3):** an ST7789 320×170 `IDisplay` +
-  two-button `IInput` implementation (the dashboard/render layer is already display-
-  agnostic behind `DashData`; `BOARD_LILYGO` currently builds headless). Hardware-
-  blocked — everything else in Phase 4 is done.
+**LilyGo T-Display-S3 display (P3): ✅ done + hardware-verified 2026-07-15.**
+- **Panel bring-up.** ST7789 320×170 on the S3 LCD_CAM 8-bit parallel bus + backlight
+  + both buttons proven via the standalone `lilygoref` env (`src/lilygoref/`). Verified
+  pins: POWER_ON=15, BL=38, DC=7 CS=6 WR=8 RD=9, D0..D7=39,40,41,42,45,46,47,48, RST=5,
+  buttons BOOT=0/KEY=14. Panel: `Arduino_ST7789(bus,5,rot,IPS,170,320,35,0,35,0)` over
+  `Arduino_ESP32LCD8`; landscape rot=3.
+- **Driver in the app** (`lib/lilygo/`, `src/master/display_lilygo.cpp`). A canvas-buffered
+  compact renderer with page parity to the Guition build — Dashboard, Power Flow, Graph,
+  Week, Status, Settings — fed from the same per-role `collectDashForRole()`. Two-button
+  nav (A next/prev via short/long, B page-action/secondary) polled in a dedicated 60Hz
+  task so it stays responsive under BLE load. FreeSans/FreeSansBold fonts; charge green /
+  discharge red state colouring; shared `ttgLabel`. Settings tab cycles items (B) with
+  press-and-hold to select (brightness, 180° flip, pair, role toggle, restart).
+- **One universal image + runtime board-detect.** The `s3` env compiles BOTH backends
+  (`BOARD_GUITION` + `BOARD_LILYGO`); `detectBoard()` picks the panel at boot by the DC
+  level on GPIO4 (Guition I²C-SDA pull-up ~3.3V vs LilyGo battery divider ~2.3V, threshold
+  2800mV; NVS "vicboard" override). Keeps OTA-clone working across board types — a cloned
+  image drives whichever panel it lands on.
 
 ### Phase 5 — Vehicle integration (+ optional GATT)
 - Mounting, 12/24V→5V supply, vibration test, final polish.

@@ -22,20 +22,40 @@
 #include "Stats.h"
 #include "VictronTypes.h"
 
-// Board selection: the display DRIVER is chosen at build time per board model,
-// while the master/slave ROLE is chosen at runtime (NVS flag). This one app runs
-// on every board — BOARD_GUITION selects the AXS15231B QSPI driver; BOARD_LILYGO
-// is reserved for the T-Display-S3 (ST7789 + buttons, driver TBD, builds headless
-// for now); no board flag = headless (no screen, e.g. the bare S3 / AtomS3). A
-// selected display board defines VICMON_DISPLAY, which guards all rendering.
+// Board selection: the master/slave ROLE is chosen at runtime (NVS flag), and so
+// now is the DISPLAY hardware. The universal `s3` image compiles BOTH display
+// backends in and picks the right one at boot (detectBoard(), below) so ONE image
+// — and the OTA firmware-clone that pushes it master->slave — serves every board:
+//   • Guition JC3248W535 — AXS15231B QSPI panel + I2C touch
+//   • LilyGo T-Display-S3 — ST7789 8-bit-parallel panel + two buttons
+// Legacy single-backend flags still work for the standalone reference envs:
+// BOARD_GUITION / BOARD_LILYGO compile just one. Any compiled backend defines
+// VICMON_DISPLAY, which guards all rendering; none = headless (bare S3 / AtomS3).
 #if defined(BOARD_GUITION)
+  #define VICMON_HAS_GUITION 1
+#endif
+#if defined(BOARD_LILYGO)
+  #define VICMON_HAS_LILYGO 1
+#endif
+#if defined(VICMON_HAS_GUITION) || defined(VICMON_HAS_LILYGO)
   #define VICMON_DISPLAY 1
+#endif
+#ifdef VICMON_HAS_GUITION
   #include <GuitionDisplay.h>
   #include <GuitionTouch.h>
   #include <GfxDashboard.h>
-#elif defined(BOARD_LILYGO)
-  #warning "BOARD_LILYGO: display driver not implemented yet — building headless on the LilyGo"
 #endif
+#ifdef VICMON_HAS_LILYGO
+  #include <LilygoDisplay.h>
+#endif
+
+// Runtime-detected display hardware, set by detectBoard() in setup() BEFORE the
+// role branch (so both master and slave bring-ups see it). The universal image
+// probes for the Guition's I2C touch controller to tell the two boards apart; a
+// single-backend build resolves at compile time. Overridable via NVS ("vicboard").
+enum HwBoard : uint8_t { HW_HEADLESS = 0, HW_GUITION = 1, HW_LILYGO = 2 };
+extern uint8_t gHwBoard;
+void detectBoard();
 
 // ---- device role (Master / Slave) ------------------------------------------
 enum { ROLE_MASTER = 0, ROLE_SLAVE = 1 };
@@ -203,10 +223,24 @@ String jsonEsc(const String& s);
 void setupServer();
 
 #ifdef VICMON_DISPLAY
-// Defined in display.cpp, called from main.cpp (setup/loop/slaveLoop).
+// The four public display entry points (called from main.cpp setup/loop/slaveLoop)
+// live in display.cpp and dispatch on gHwBoard: the Guition path renders inline,
+// the LilyGo path forwards to display_lilygo.cpp.
 extern bool gDisplayOk;
 void bringUpDisplay();
 void publishDash();
 void publishSlaveDash();
 void serviceDashRequests();
+#endif
+
+#ifdef VICMON_HAS_LILYGO
+// LilyGo T-Display-S3 display path (display_lilygo.cpp), dispatched from the shared
+// entry points above when gHwBoard == HW_LILYGO.
+bool lilygoBringUp();   // power + panel init; sets gDisplayOk. Returns false on fail.
+void lilygoRender();    // redraw the current page from the live model (rate-limited)
+void lilygoService();   // poll the two buttons (short/long press) + apply their actions
+// Provided by display.cpp so the LilyGo renderer reuses the exact per-role data
+// assembly the Guition path uses (identical pages), plus the shared graph window.
+void collectDashForRole(guition::DashData& d);
+void setGraphWindowMinutes(int mins);
 #endif

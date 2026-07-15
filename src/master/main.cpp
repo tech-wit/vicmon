@@ -19,6 +19,8 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <Wire.h>
+#include <driver/gpio.h>
 #include <esp_now.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -45,7 +47,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.4.4";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.5.0";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -79,6 +81,50 @@ bool pairingActive() {
 }
 int pairSecsLeft() {
     return pairingActive() ? (int)((gPairUntilMs - millis()) / 1000) : 0;
+}
+
+// ---- display hardware detection (Guition vs LilyGo) ------------------------
+// The universal image compiles both display backends; pick the right one at boot
+// so one image + the OTA firmware-clone serve every board. The two boards are
+// told apart by the Guition's AXS15231B capacitive touch controller (I2C 0x3B on
+// SDA=4/SCL=8): it ACKs on the Guition and is absent on the LilyGo (buttons
+// variant). The probe runs before ANY panel init, so GPIO8 — the LilyGo's parallel
+// bus WR — is free to borrow as I2C SCL here; we release it (Wire.end + gpio
+// reset) so the LilyGo bus can claim it. An NVS override (ns "vicboard" key "hw":
+// 1=Guition 2=LilyGo 3=headless) wins if set, for a misdetect or bench forcing.
+uint8_t gHwBoard = HW_HEADLESS;
+void detectBoard() {
+#if defined(VICMON_HAS_GUITION) && defined(VICMON_HAS_LILYGO)
+    {
+        Preferences p;
+        p.begin("vicboard", true);
+        uint8_t f = p.getUChar("hw", 0);
+        p.end();
+        if (f == 1) { gHwBoard = HW_GUITION;  Serial.println("[board] forced GUITION");  return; }
+        if (f == 2) { gHwBoard = HW_LILYGO;   Serial.println("[board] forced LILYGO");   return; }
+        if (f == 3) { gHwBoard = HW_HEADLESS; Serial.println("[board] forced HEADLESS"); return; }
+    }
+    // Distinguish by the DC level on GPIO4 — a genuine hardware difference between
+    // the two boards, unlike an I2C probe (GPIO4 is the LilyGo's battery-ADC pin,
+    // which fakes ACKs and reads back as 0x00 just like an idle Guition touch):
+    //   • Guition: GPIO4 = touch I2C SDA, pulled up to ~3.3V   -> ~3300 mV
+    //   • LilyGo:  GPIO4 = VBAT/2 battery divider              -> ~1800..2200 mV
+    // Average a few ADC reads; > threshold => the pulled-up Guition line.
+    pinMode(4, INPUT);
+    uint32_t mv = 0;
+    for (int i = 0; i < 8; ++i) mv += analogReadMilliVolts(4);
+    mv /= 8;
+    bool guition = (mv > 2800);
+    gHwBoard = guition ? HW_GUITION : HW_LILYGO;
+    Serial.printf("[board] auto-detect: %s (GPIO4 = %lu mV)\n",
+                  guition ? "GUITION" : "LILYGO", (unsigned long)mv);
+#elif defined(VICMON_HAS_GUITION)
+    gHwBoard = HW_GUITION;  Serial.println("[board] compile-time: GUITION");
+#elif defined(VICMON_HAS_LILYGO)
+    gHwBoard = HW_LILYGO;   Serial.println("[board] compile-time: LILYGO");
+#else
+    gHwBoard = HW_HEADLESS;
+#endif
 }
 
 // ---- device role (Master / Slave) ------------------------------------------
@@ -1019,6 +1065,10 @@ void setup() {
     snprintf(kApSsid, sizeof(kApSsid), "Vicmon-%06X", (unsigned)(gMasterId & 0xFFFFFF));
     loadApCfg();  // apply a custom AP name/password if one was saved
     Serial.printf("[boot] master id %08X, AP '%s'\n", gMasterId, kApSsid);
+
+    // Which display is wired to this board? Probe before any panel/role init so
+    // both the master and slave bring-ups render on the right hardware.
+    detectBoard();
 
     // Registry mutex: created before the server/tasks so RegLock is live the
     // moment concurrent access becomes possible (it no-ops while null above).

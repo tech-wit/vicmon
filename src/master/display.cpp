@@ -332,6 +332,9 @@ static guition::Page gPage = guition::PAGE_DASH;
 // Publish the latest resolved signals for the display task. Runs on the loop
 // task (registry owner) so registry access stays single-threaded.
 void publishDash() {
+#ifdef VICMON_HAS_LILYGO
+    if (gHwBoard == HW_LILYGO) { lilygoRender(); return; }
+#endif
     if (!gDashMux) return;
     guition::DashData tmp;
     collectDash(tmp);
@@ -439,7 +442,21 @@ static void collectSlaveDash(guition::DashData& d) {
     fillOtaDash(d);
 }
 
+#ifdef VICMON_HAS_LILYGO
+// Shared DashData assembly for the LilyGo renderer (display_lilygo.cpp), which
+// reuses the exact same per-role collection as the Guition path so its pages show
+// identical data. Runs on the loop task (registry owner), like the collectors.
+void collectDashForRole(guition::DashData& d) {
+    if (gRole == ROLE_SLAVE) collectSlaveDash(d); else collectDash(d);
+}
+// Let the LilyGo Graph page drive the shared zoom window that collectHistory reads.
+void setGraphWindowMinutes(int mins) { gGraphWinMin = mins; }
+#endif
+
 void publishSlaveDash() {
+#ifdef VICMON_HAS_LILYGO
+    if (gHwBoard == HW_LILYGO) { lilygoRender(); return; }
+#endif
     if (!gDashMux) return;
     guition::DashData tmp;
     collectSlaveDash(tmp);
@@ -487,6 +504,9 @@ static void applyTunableAdjust(int which, int steps) {
 // Handle deferred requests from the display task (Settings page) — profile
 // switch and tunable adjust — on the loop task, which owns the registry / NVS.
 void serviceDashRequests() {
+#ifdef VICMON_HAS_LILYGO
+    if (gHwBoard == HW_LILYGO) { lilygoService(); return; }
+#endif
     if (gProfileReq >= 0) {
         int target = gProfileReq;
         gProfileReq = -1;
@@ -812,6 +832,9 @@ static void saveDisplayBright() {
 // Bring up the panel + touch + display task (shared by both roles). Seeds the
 // first snapshot for the active role so the task has something to draw.
 void bringUpDisplay() {
+#ifdef VICMON_HAS_LILYGO
+    if (gHwBoard == HW_LILYGO) { lilygoBringUp(); return; }
+#endif
     loadDisplayFlip();  // restore a saved 180° flip before the panel comes up
     // Universal image: the display driver is compiled in for every S3 board and
     // used only where the hardware is present. begin() needs PSRAM for the 300KB
