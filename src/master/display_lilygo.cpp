@@ -78,9 +78,21 @@ static volatile uint8_t gPage = LP_DASH;
 
 // Settings page: a list cycled with B (short), the highlighted item activated with
 // B (long / press-and-hold). Items act rather than edit — 2-button friendly.
-enum SetItem : uint8_t { SET_BRIGHT = 0, SET_FLIP, SET_PAIR, SET_ROLE, SET_RESTART, SET_N };
+enum SetItem : uint8_t { SET_BRIGHT = 0, SET_FLIP, SET_PAIR, SET_DIAG, SET_ROLE, SET_RESTART, SET_N };
 static volatile uint8_t gSetSel = 0;
 static volatile bool gFlip = false;      // 180° screen flip (rotation 3 normal / 1 flipped)
+
+// Nested navigation: top-level pages, or a Diagnostics menu / detail screen reached
+// by selecting "Diagnostics" in Settings. While in Diagnostics, A = back/up.
+enum NavMode : uint8_t { NAV_PAGES = 0, NAV_DIAG, NAV_DETAIL };
+static volatile uint8_t gNav = NAV_PAGES;
+enum DiagItem : uint8_t { DG_MON = 0, DG_DISC, DG_LINK, DG_FW, DG_DEBUG, DG_BACK, DG_N };
+static const char* kDiagName[DG_N] = {"Monitored devices", "Discovered Victron",
+                                      "ESP-NOW link", "Firmware clone", "Debug capture", "< Back"};
+static volatile uint8_t gDiagSel = 0;    // selected Diagnostics menu row
+static volatile uint8_t gDetail = 0;     // open detail screen (a DiagItem)
+static volatile uint8_t gFwSel = 0;      // Firmware detail: 0 = push, 1 = pull
+static volatile bool gOtaPushReqL = false, gOtaPullReqL = false;  // processed on the loop
 
 static const int kGraphWins[] = {1, 10, 60, 720, 1440};
 static const char* kGraphWinName[] = {"1m", "10m", "1h", "12h", "24h"};
@@ -332,31 +344,42 @@ static void pageGraph(const DashData& d) {
 // ---- Page: Week ------------------------------------------------------------
 static void pageWeek(const DashData& d) {
     Arduino_GFX* g = G();
-    int x0 = 6, top = 6, chartH = 66, midY = top + chartH / 2;
-    g->drawFastHLine(x0, midY, W - 12, RGB565(60, 60, 74));
+    int x0 = 22, top = 8, chartH = 62, midY = top + chartH / 2;  // x0=22 leaves an axis gutter
     float mx = 1.0f;
     for (int i = 0; i < d.dayCount; ++i) {
         float in = d.daySolarAh[i] + d.dayDcdcAh[i] + d.dayChargerAh[i];
         if (in > mx) mx = in;
         if (d.dayLoadAh[i] > mx) mx = d.dayLoadAh[i];
     }
-    int slot = (W - 12) / 7, bw = slot - 8;
+    // Value scale: +peak (in) at the top, -peak (out) at the bottom, 0 on the mid.
+    g->drawFastHLine(x0, midY, W - x0 - 6, RGB565(70, 70, 84));
+    g->drawFastHLine(x0, top, W - x0 - 6, RGB565(38, 38, 48));
+    g->drawFastHLine(x0, top + chartH, W - x0 - 6, RGB565(38, 38, 48));
+    TR(x0 - 3, top + 6, F_S, C_GREEN, "%.0f", mx);
+    T(2, midY + 4, F_S, C_DIM, "0");
+    TR(x0 - 3, top + chartH + 4, F_S, C_LOAD, "%.0f", mx);
+    T(W - 30, top - 1, F_S, C_DIM, "Ah");
+    int slot = (W - x0 - 6) / 7, bw = slot - 7;
     for (int i = 0; i < d.dayCount; ++i) {
-        int x = x0 + i * slot + 4;
+        int x = x0 + i * slot + 3;
         int inH = (int)((d.daySolarAh[i] + d.dayDcdcAh[i] + d.dayChargerAh[i]) / mx * (chartH / 2 - 2));
         int outH = (int)(d.dayLoadAh[i] / mx * (chartH / 2 - 2));
         if (inH > 0) g->fillRect(x, midY - inH, bw, inH, C_GREEN);
         if (outH > 0) g->fillRect(x, midY + 1, bw, outH, C_LOAD);
+        char dl[6];
+        if (i == d.dayCount - 1) strcpy(dl, "now");
+        else snprintf(dl, sizeof(dl), "-%d", d.dayCount - 1 - i);
+        T(x + bw / 2 - textW(F_S, dl) / 2, top + chartH + 15, F_S, C_DIM, dl);
     }
     // Scope meter.
     const DashData::StatMeter& m = gWeekScope == 0 ? d.statToday : gWeekScope == 1 ? d.statTrip : d.statTotal;
-    int sy = 92;
-    g->drawFastHLine(x0, sy - 4, W - 12, RGB565(45, 45, 56));
-    Tf(x0, sy + 14, F_M, kPageColor[LP_WEEK], "%s", kScopeName[gWeekScope]);
+    int mx0 = 6, sy = 92;
+    g->drawFastHLine(mx0, sy - 4, W - 12, RGB565(45, 45, 56));
+    Tf(mx0, sy + 14, F_M, kPageColor[LP_WEEK], "%s", kScopeName[gWeekScope]);
     int hh = (int)(m.durSecs / 3600), mm = (int)((m.durSecs % 3600) / 60);
     TR(W - 6, sy + 12, F_S, C_LBL, "%dh%02dm", hh, mm);
-    Tf(x0, sy + 34, F_S, C_GREEN, "In %.1f", m.inAh);
-    Tf(x0, sy + 50, F_S, C_LOAD, "Out %.1f", m.outAh);
+    Tf(mx0, sy + 34, F_S, C_GREEN, "In %.1f", m.inAh);
+    Tf(mx0, sy + 50, F_S, C_LOAD, "Out %.1f", m.outAh);
     Tf(118, sy + 34, F_S, C_SOLAR, "Sol %.1f", m.solarAh);
     Tf(118, sy + 50, F_S, C_ALT, "Alt %.1f", m.dcdcAh);
     Tf(224, sy + 34, F_S, C_CHG, "Chg %.1f", m.chargerAh);
@@ -405,15 +428,16 @@ static void pageInfo(const DashData& d) {
 // ---- Page: Settings --------------------------------------------------------
 static void pageSettings(const DashData& d) {
     Arduino_GFX* g = G();
-    const char* names[SET_N] = {"Brightness", "Flip 180", "Pair", "Role", "Restart"};
+    const char* names[SET_N] = {"Brightness", "Flip 180", "Pair", "Diagnostics", "Role", "Restart"};
     char val[SET_N][20];
     snprintf(val[SET_BRIGHT], 20, "%d%%", kBright[gBrightIdx]);
     snprintf(val[SET_FLIP], 20, "%s", gFlip ? "On" : "Off");
     if (d.pairing) snprintf(val[SET_PAIR], 20, "OPEN %ds", d.pairSecLeft);
     else snprintf(val[SET_PAIR], 20, "%s", gRole == ROLE_SLAVE ? "adopt" : "open");
+    snprintf(val[SET_DIAG], 20, "%s", ">");
     snprintf(val[SET_ROLE], 20, "%s", gRole == ROLE_SLAVE ? "-> Master" : "-> Slave");
     snprintf(val[SET_RESTART], 20, "reboot");
-    int y0 = 8, rh = 27;
+    int y0 = 6, rh = 23;
     for (int i = 0; i < SET_N; ++i) {
         int ry = y0 + i * rh;
         bool sel = (i == gSetSel);
@@ -421,16 +445,124 @@ static void pageSettings(const DashData& d) {
             g->fillRoundRect(4, ry, W - 8, rh - 3, 4, RGB565(38, 42, 54));
             g->drawRoundRect(4, ry, W - 8, rh - 3, 4, kPageColor[LP_SET]);
         }
-        T(12, ry + 18, F_M, sel ? C_TEXT : C_LBL, names[i]);
-        TR(W - 12, ry + 18, F_M, sel ? kPageColor[LP_SET] : C_LBL, "%s", val[i]);
+        T(12, ry + 16, F_M, sel ? C_TEXT : C_LBL, names[i]);
+        TR(W - 12, ry + 16, F_M, sel ? kPageColor[LP_SET] : C_LBL, "%s", val[i]);
     }
     drawFooter("B:next  hold:select");
+}
+
+// ---- Diagnostics: menu + detail screens (reached from Settings) ------------
+static void drawBar(const char* left, const char* right) {
+    Arduino_GFX* g = G();
+    g->fillRect(0, FOOT_Y, W, H - FOOT_Y, RGB565(22, 22, 28));
+    g->drawFastHLine(0, FOOT_Y, W, RGB565(55, 55, 68));
+    T(6, H - 5, F_S, RGB565(205, 205, 216), left);
+    if (right && *right) TR(W - 6, H - 5, F_S, C_LBL, "%s", right);
+}
+static void pageDiagMenu(const DashData& d) {
+    Arduino_GFX* g = G();
+    int y0 = 6, rh = 23;
+    for (int i = 0; i < DG_N; ++i) {
+        int ry = y0 + i * rh;
+        bool sel = (i == gDiagSel);
+        if (sel) {
+            g->fillRoundRect(4, ry, W - 8, rh - 3, 4, RGB565(38, 42, 54));
+            g->drawRoundRect(4, ry, W - 8, rh - 3, 4, kPageColor[LP_SET]);
+        }
+        T(12, ry + 16, F_M, sel ? C_TEXT : C_LBL, kDiagName[i]);
+        if (i == DG_DEBUG)
+            TR(W - 12, ry + 16, F_M, d.debugCapture ? C_GREEN : C_DIM, "%s", d.debugCapture ? "ON" : "off");
+        else if (i == DG_DISC) TR(W - 12, ry + 16, F_M, C_LBL, "%d", d.discCount);
+        else if (i == DG_MON) TR(W - 12, ry + 16, F_M, C_LBL, "%d", d.monCount);
+    }
+    drawBar("Diagnostics", "A:back  B:next  hold:open");
+}
+static void diagDetailMon(const DashData& d) {
+    T(6, 15, F_M, C_TEXT, "Monitored devices");
+    if (d.monCount == 0)
+        T(6, 40, F_S, C_LBL, gRole == ROLE_SLAVE ? "(slave has no BLE devices)" : "none configured");
+    for (int i = 0; i < d.monCount; ++i) {
+        int y = 34 + i * 18;
+        G()->fillCircle(9, y - 4, 3, d.monLive[i] ? C_GREEN : C_DIM);
+        T(18, y, F_S, C_TEXT, d.monName[i]);
+        TR(W - 6, y, F_S, C_LBL, "%s", d.monVal[i]);
+    }
+    drawBar("Monitored", "A:back");
+}
+static void diagDetailDisc(const DashData& d) {
+    T(6, 15, F_M, C_TEXT, "Discovered Victron");
+    if (d.discCount == 0)
+        T(6, 40, F_S, C_LBL, gRole == ROLE_SLAVE ? "(slave has no BLE)" : "none in range");
+    for (int i = 0; i < d.discCount; ++i) {
+        int y = 34 + i * 18;
+        const char* nm = d.discName[i][0] ? d.discName[i] : "(unnamed)";
+        T(6, y, F_S, C_SOLAR, nm);
+        T(150, y, F_S, C_DIM, d.discMac[i]);
+        TR(W - 6, y, F_S, C_LBL, "%ddBm", d.discRssi[i]);
+    }
+    drawBar("Discovered", "A:back");
+}
+static void diagDetailLink(const DashData& d) {
+    T(6, 15, F_M, C_TEXT, "ESP-NOW link");
+    char b[28];
+    int y = 36;
+    kv(6, y, "Radio", d.espNowOk ? "up" : "down", d.espNowOk ? C_GREEN : C_AMBER); y += 18;
+    if (gRole == ROLE_SLAVE) {
+        snprintf(b, sizeof(b), "%08lX", (unsigned long)d.masterId);
+        kv(6, y, "Master", d.masterId ? b : "unpaired", d.masterId ? C_TEXT : C_AMBER); y += 18;
+        kv(6, y, "State", d.linkLive ? "live" : d.linkStale ? "stale" : "--",
+           d.linkLive ? C_GREEN : C_AMBER); y += 18;
+        snprintf(b, sizeof(b), "ch%d   drops %lu", d.linkChannel, (unsigned long)d.linkDrops);
+        kv(6, y, "Signal", b, C_TEXT); y += 18;
+    } else {
+        snprintf(b, sizeof(b), "%08lX", (unsigned long)d.masterId);
+        kv(6, y, "My ID", b, C_TEXT); y += 18;
+        snprintf(b, sizeof(b), "ch%d   seq %u", d.linkChannel, d.snapSeq);
+        kv(6, y, "Broadcast", b, C_TEXT); y += 18;
+        kv(6, y, "Pairing", d.pairing ? "OPEN" : "idle", d.pairing ? C_GREEN : C_LBL); y += 18;
+    }
+    drawBar("Link", "A:back");
+}
+static void diagDetailFw(const DashData& d) {
+    Arduino_GFX* g = G();
+    T(6, 15, F_M, C_TEXT, "Firmware clone");
+    char b[40];
+    int y = 34;
+    kv(6, y, "Local", d.version, C_TEXT); y += 17;
+    if (d.otaPeerKnown) { snprintf(b, sizeof(b), "%s (%s)", d.otaPeerVer, d.otaPeerRel); kv(6, y, "Peer", b, C_BLUE); }
+    else kv(6, y, "Peer", "(unknown)", C_DIM);
+    y += 17;
+    kv(6, y, "Status", d.otaStatus[0] ? d.otaStatus : "idle", C_LBL); y += 16;
+    if (d.otaBusy) {
+        g->drawRect(6, y, W - 12, 9, C_DIM);
+        g->fillRect(7, y + 1, (W - 14) * d.otaPct / 100, 7, C_GREEN);
+    }
+    y = 118;
+    // Push / Pull selector — B toggles, hold executes.
+    const char* opt[2] = {"Push", "Pull"};
+    for (int i = 0; i < 2; ++i) {
+        int bx = 40 + i * 130, bw = 110;
+        bool sel = (gFwSel == i);
+        g->fillRoundRect(bx, y, bw, 24, 4, sel ? kPageColor[LP_SET] : RGB565(40, 40, 48));
+        T(bx + bw / 2 - textW(F_M, opt[i]) / 2, y + 17, F_M, sel ? BLACK : C_LBL, opt[i]);
+    }
+    drawBar("Firmware", "A:back  B:sel  hold:go");
+}
+static void pageDiagDetail(const DashData& d) {
+    switch (gDetail) {
+        case DG_MON:  diagDetailMon(d);  break;
+        case DG_DISC: diagDetailDisc(d); break;
+        case DG_LINK: diagDetailLink(d); break;
+        default:      diagDetailFw(d);   break;
+    }
 }
 
 // ---- frame render (display task side) --------------------------------------
 static void drawFrame(const DashData& d) {
     G()->fillScreen(C_BG);
-    G()->drawFastHLine(0, 0, W, kPageColor[gPage]);
+    G()->drawFastHLine(0, 0, W, kPageColor[gNav == NAV_PAGES ? gPage : LP_SET]);
+    if (gNav == NAV_DIAG) { pageDiagMenu(d); gLcd.flush(); return; }
+    if (gNav == NAV_DETAIL) { pageDiagDetail(d); gLcd.flush(); return; }
     switch (gPage) {
         case LP_DASH:  pageDash(d);  break;
         case LP_FLOW:  pageFlow(d);  break;
@@ -460,11 +592,26 @@ static void settingsActivate() {
             { Preferences p; p.begin("vicdisp", false); p.putBool("flip", gFlip); p.end(); }
             Serial.printf("[lilygo] flip %s\n", gFlip ? "on" : "off"); break;
         case SET_PAIR:    openPairWindow(); break;
+        case SET_DIAG:    gNav = NAV_DIAG; gDiagSel = 0; break;
         case SET_ROLE:    gRoleReq = true; Serial.println("[lilygo] role toggle requested (reboot)"); break;
         case SET_RESTART: gRebootReq = true; Serial.println("[lilygo] restart requested"); break;
     }
 }
+// Diagnostics menu item selected (B long).
+static void diagActivate() {
+    switch (gDiagSel) {
+        case DG_MON:  gNav = NAV_DETAIL; gDetail = DG_MON;  break;
+        case DG_DISC: gNav = NAV_DETAIL; gDetail = DG_DISC; break;
+        case DG_LINK: gNav = NAV_DETAIL; gDetail = DG_LINK; break;
+        case DG_FW:   gNav = NAV_DETAIL; gDetail = DG_FW; gFwSel = 0; break;
+        case DG_DEBUG: gDebugCapture = !gDebugCapture;
+            Serial.printf("[lilygo] debug capture %s\n", gDebugCapture ? "on" : "off"); break;
+        case DG_BACK: gNav = NAV_PAGES; gPage = LP_SET; break;
+    }
+}
 static void bShort() {
+    if (gNav == NAV_DIAG) { gDiagSel = (gDiagSel + 1) % DG_N; return; }
+    if (gNav == NAV_DETAIL) { if (gDetail == DG_FW) gFwSel ^= 1; return; }
     switch (gPage) {
         case LP_DASH:  gDashDetail = (gDashDetail + 1) % 3; break;
         case LP_FLOW:  gFlowWatts = !gFlowWatts; break;
@@ -475,12 +622,29 @@ static void bShort() {
     }
 }
 static void bLong() {
+    if (gNav == NAV_DIAG) { diagActivate(); return; }
+    if (gNav == NAV_DETAIL) {
+        if (gDetail == DG_FW) {  // execute Push / Pull (started on the loop task)
+            if (gFwSel == 0) gOtaPushReqL = true; else gOtaPullReqL = true;
+            Serial.printf("[lilygo] OTA %s requested\n", gFwSel == 0 ? "push" : "pull");
+        }
+        return;
+    }
     if (gPage == LP_GRAPH) gGraphHideSoc = !gGraphHideSoc;
     else if (gPage == LP_INFO) openPairWindow();
     else if (gPage == LP_SET) settingsActivate();
 }
-static void aShort() { gPage = (gPage + 1) % LP_COUNT; }
-static void aLong()  { gPage = (gPage + LP_COUNT - 1) % LP_COUNT; }
+// A = next page normally; back/up one level while inside Diagnostics.
+static void aShort() {
+    if (gNav == NAV_DETAIL) { gNav = NAV_DIAG; return; }
+    if (gNav == NAV_DIAG) { gNav = NAV_PAGES; gPage = LP_SET; return; }
+    gPage = (gPage + 1) % LP_COUNT;
+}
+static void aLong() {
+    if (gNav == NAV_DETAIL) { gNav = NAV_DIAG; return; }
+    if (gNav == NAV_DIAG) { gNav = NAV_PAGES; gPage = LP_SET; return; }
+    gPage = (gPage + LP_COUNT - 1) % LP_COUNT;
+}
 
 static void pollButton(bool downNow, bool& down, uint32_t& tDown, bool& longFired,
                        void (*onShort)(), void (*onLong)()) {
@@ -551,7 +715,11 @@ void lilygoRender() {
     }
 }
 
-// Buttons are polled by the display task, so nothing to do on the loop here.
-void lilygoService() {}
+// Loop side: start any OTA clone the Diagnostics screen requested (startPush/Pull
+// read flash, so they must run on the loop task, not the display task).
+void lilygoService() {
+    if (gOtaPushReqL) { gOtaPushReqL = false; gOta.startPush(); }
+    if (gOtaPullReqL) { gOtaPullReqL = false; gOta.startPull(); }
+}
 
 #endif  // VICMON_HAS_LILYGO

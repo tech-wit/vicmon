@@ -47,7 +47,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.5.0";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.5.1";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -114,6 +114,9 @@ void detectBoard() {
     uint32_t mv = 0;
     for (int i = 0; i < 8; ++i) mv += analogReadMilliVolts(4);
     mv /= 8;
+    // Release GPIO4 from the ADC so the Guition touch's Wire.begin(4,8) can claim it
+    // cleanly — without this the pin stays attached to ADC1 and I2C touch init fails.
+    gpio_reset_pin((gpio_num_t)4);
     bool guition = (mv > 2800);
     gHwBoard = guition ? HW_GUITION : HW_LILYGO;
     Serial.printf("[board] auto-detect: %s (GPIO4 = %lu mV)\n",
