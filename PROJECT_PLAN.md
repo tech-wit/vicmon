@@ -13,6 +13,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
 | 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 6-page renderer, 2-button nav, one universal image w/ runtime board-detect) |
+| — | **M5Stack M5Capsule** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm, microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
 **One app, one codebase (2026-07-08).** `src/master/` is *the* application, and the
@@ -30,7 +31,21 @@ every S3; a 16MB board uses its first 8MB), and NVS (config/keys/pairing) sits a
 fixed offset shared across partition tables, so it survives re-provisioning. This
 also makes an **ESP-NOW OTA "clone my image to any S3 slave"** path viable — the
 old per-board envs (`master`/`atoms3`/`headless`/`lilygo`) are retired in its
-favour. (`BOARD_GUITION` still gates the display code; `BOARD_LILYGO` reserved.)
+favour. The `s3` image compiles in every backend and picks one at boot from
+`detectBoard()`: `BOARD_GUITION` (AXS15231B panel), `BOARD_LILYGO` (ST7789 +
+buttons), and `BOARD_M5CAPSULE` (headless — RTC/buzzer/microSD peripherals,
+detected via its BM8563 RTC). Any other S3 runs headless.
+
+**Memory (no-PSRAM boards).** The M5Capsule (StampS3, no PSRAM) has ~58 KB free
+heap out of the box, which was too little to serve the large Settings/Devices
+pages. Fixed by streaming those pages as small chunked pieces (no big contiguous
+String, no `send()` copy) and by reclaiming static RAM — the slave-only
+history-pull staging (~26 KB) is now heap-allocated only in the slave role, the
+AsyncTCP task stack is trimmed 16→10 KB, mDNS is started only in STA mode
+(~6 KB), and NimBLE is configured scan-only. Net ≈ 40 KB reclaimed (≈58→96 KB
+free). The two remaining giants (WiFi ~55 KB, BLE controller ~48 KB) are fixed by
+the precompiled Arduino/IDF core. Live memory is on the web `/diag` page and via
+the `mem` / `tasks` serial commands.
 
 ### ESP-NOW master ↔ slave (Phase 4, verified)
 
@@ -121,8 +136,9 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 |---|---|---|
 | Dev master (current) | **M5Stack AtomS3 Lite** (ESP32-S3) | Native USB → `/dev/ttyACM0`, more reliable than the WROOM's CP210x. Runs the universal `s3` image (headless — no PSRAM). |
 | Original dev board | **ESP32 WROOM-32** | Used for Phase-1 bring-up; dropped off USB mid-session (CP210x). `wroom` env still builds the Phase-1 scanner. |
-| Master (ordered) | **Guition JC3248W535** | ESP32-S3, 16MB/8MB PSRAM, 3.5" 320×480 IPS, cap touch. Phase 3. |
-| Slave (ordered) | **LilyGo T-Display-S3** | ESP32-S3, 1.9" 320×170, two buttons. Phase 4. |
+| Master w/ display | **Guition JC3248W535** | ESP32-S3, 16MB/8MB PSRAM, 3.5" 320×480 IPS, cap touch. ✅ verified. |
+| Display w/ buttons | **LilyGo T-Display-S3** | ESP32-S3, 1.9" 320×170, two buttons. ✅ verified. |
+| Headless peripheral | **M5Stack M5Capsule** (StampS3) | ESP32-S3FN8, no PSRAM. BM8563 RTC (I2C 0x51 on SDA=8/SCL=10) as clock source, buzzer GPIO2, microSD SPI (SCK14/MOSI12/MISO39/CS11), power-hold GPIO46, WS2812 GPIO21. ✅ verified. |
 | Victron devices (test) | **BMV/SmartShunt** + **Orion XS 1400 DC-DC** + **SmartSolar MPPT** | BMV, Orion XS & solar decode verified vs VictronConnect. |
 
 ## Repository layout (actual)
@@ -150,6 +166,8 @@ vicmon/
 │   │   ├── web.cpp         # WiFi-AP web app: pages, JSON, handlers, setupServer (+ registry mutex)
 │   │   ├── web_assets.h    # embedded HTML/CSS/JS (mimic / energy / diag pages)
 │   │   ├── display.cpp     # Guition dashboard glue: display task, DashData collection, touch (VICMON_DISPLAY)
+│   │   ├── display_lilygo.cpp # LilyGo ST7789 6-page renderer + 2-button nav (VICMON_HAS_LILYGO)
+│   │   ├── capsule.cpp     # M5Capsule peripherals: BM8563 RTC, buzzer, microSD log, power-hold (VICMON_HAS_M5CAPSULE)
 │   │   ├── espnow.cpp      # ESP-NOW broadcaster + StatsFrame + history-pull responder
 │   │   ├── ble_ingest.cpp  # BLE scan → decrypt/parse → registry (loop task, under the registry mutex)
 │   │   ├── Registry.h      # DeviceSlot (key, type, latest values, mac, staleness)

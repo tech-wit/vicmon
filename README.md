@@ -21,23 +21,23 @@ WiFi access point.
 - **On-screen dashboard** (Guition touch master) — Dash, Mimic (animated energy-flow), Graph (trend), Week (energy meters) and Settings pages, driven directly with Arduino_GFX. Same look as the web app; a "VICMON" wordmark + charge-status banner tops the Dash/Mimic. Settings → Tune includes a **Screen flip** toggle (180° rotation for an upside-down/ceiling mount; applies live and persists).
 - **Web mimic dashboard** — battery centre with SoC fill, solar/charger/DC-DC source nodes and a load, animated flow lines coloured by charge/discharge, battery detail (V, A, remaining Ah, starter V) and a **time-to-go / time-to-full** readout (days/hours; the BMV's own filtered TTG or an instantaneous estimate).
 - **Trend chart** — server-logged history (continuous, survives client disconnects **and reboots** via LittleFS) with 1m/10m/1h/12h/24h windows and per-window scale marks (fine 5 s/1 h + coarse 60 s/24 h buffers). SoC overlaid on a right-hand 0–100 % axis; toggle each series in the legend. **On a slave** the trend is pulled from the master over ESP-NOW on connect (resumable, with a progress %) then extended live.
-- **Energy meters** — resettable **Today / Trip / Total** meters showing **net-in / net-out amp-hours**, per-source Ah and duration, plus a runtime-day energy bar chart. **No clock required** — "days" advance off a persisted run-time odometer; set the time on the AP (manual HH:MM/AM-PM or the browser clock) or via NTP to switch to calendar days. The master snapshots the clock to NVS every minute so a rough time survives reboots, and **broadcasts it to slaves** (a slave takes its time from the master). Reset per-meter (long-press a card on the TFT, or a button on the AP). Persisted in NVS.
-- **Alerts** — configurable low/critical SoC and low/high voltage thresholds plus device-offline detection; shown as a mimic banner and on the onboard RGB LED (red/amber/green).
+- **Energy meters** — resettable **Today / Trip / Total** meters showing **net-in / net-out amp-hours**, per-source Ah and duration, plus a runtime-day energy bar chart. **No clock required** — "days" advance off a persisted run-time odometer; set the clock in **Settings → Date & time** (full D/M/Y + H:M, or the browser's clock via **Now**) or via NTP to switch to calendar days. A **live clock shows in the web header** on every page. The master snapshots the clock to NVS every minute so a rough time survives reboots, and **broadcasts it to slaves**; on the **M5Capsule** it's kept in the RTC. Reset per-meter (long-press a card on the TFT, or a button on the AP). Persisted in NVS.
+- **Alerts** — configurable low/critical SoC and low/high voltage thresholds plus device-offline detection; shown as a mimic banner and on the onboard RGB LED (red/amber/green), plus a **buzzer on the M5Capsule** while SoC-critical.
 - **Config backup/restore** — download all profiles (devices, keys, bindings, settings) as JSON and restore from one; protects keys against erase/reflash and clones a second unit.
 - **Simulator build** (`atoms3-sim`) — synthetic battery/solar/DC-DC so the whole UI can be developed without any Victron device.
 - **Devices** — add / edit / delete by AES key; live per-device summary; "Discovered nearby" list (with Bluetooth name, MAC, RSSI) to adopt new devices.
 - **Signals** — bind logical panel signals (battery SoC/V/A, solar, charger, DC-DC, load) to device fields, including **derived** charge/load from the energy balance (smoothed "assume-zero-until-stable" so out-of-step device adverts don't flicker it).
 - **Profiles** — multiple independent setups (e.g. Home vs 4WD), switched instantly.
-- **Diagnostics** — `/diag` page shows each device's live decoded fields plus the raw decrypted advertisement bytes, for verifying parsers against VictronConnect.
+- **Diagnostics** — `/diag` page shows a live **System memory** card (free heap, largest block, min-ever low-water, uptime) plus each device's decoded fields and the raw decrypted advertisement bytes, for verifying parsers against VictronConnect. Serial console adds `mem` / `tasks` / `webtest` (and `cap` / `beep` / `sd` on the M5Capsule).
 - **OTA updates** — flash a new `firmware.bin` over WiFi from the Settings page, or **clone firmware wirelessly** between a master and its paired slave over ESP-NOW. Either **push** (from the unit that has the new firmware) or **pull** (from the out-of-date unit — it only fetches an image the peer confirms is *newer*, compared by embedded build timestamp). Trigger it from the web (Settings → System) **or the touchscreen** (Diag → Firmware), which also shows each unit's version. The target reboots into the new image only if the whole thing validates (embedded SHA-256), so an interrupted transfer is harmless. Push is gated by a per-device *allow remote update* toggle.
-- **WiFi** — always runs its AP (name + password settable and persisted); can also join an existing network, reachable at `vicmon.local` (mDNS).
+- **WiFi** — always runs its AP (name + password settable and persisted); can also join an existing network, reachable at `vicmon.local` (mDNS is started only when joined to a network, to save RAM in the AP-only case).
 - Config persists in NVS (survives reboot **and** reflash).
 
 ## Hardware
 
-- **Master with display:** Guition JC3248W535 (3.5" 480×320 capacitive touch, ESP32-S3 + PSRAM).
-- **Slave / headless nodes:** any ESP32-S3 (bare dev board, M5Stack AtomS3, …) — the same firmware runs as a master (BLE + AP) or a screenless slave, chosen at runtime.
-- **Coming:** LilyGo T-Display-S3 display + button driver (runs headless under the universal `s3` image for now).
+- **Displays:** Guition JC3248W535 (3.5" 480×320 capacitive touch, ESP32-S3 + PSRAM) and LilyGo T-Display-S3 (1.9" 320×170, two buttons) — both fully supported; the panel wired to the board is detected at boot.
+- **M5Stack M5Capsule** (StampS3, headless) — a compact node whose extras the firmware uses directly: its **BM8563 RTC** as the clock source (no NTP needed), a **buzzer** low-battery alarm (sounds while SoC-critical), and a **microSD** card for long-history CSV logging (one file per day). Stays powered off its internal battery via the power-hold pin.
+- **Other headless nodes:** any ESP32-S3 (bare dev board, M5Stack AtomS3, …). The same firmware runs as a master (BLE + AP) or a screenless slave, chosen at runtime.
 - Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect.
 
 ## Quick start
@@ -50,7 +50,7 @@ python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
 # host unit tests (decrypt/parse) — no hardware needed
 .piovenv/bin/pio test -e native
 
-# build + flash — ONE universal image for every ESP32-S3 board (Guition, AtomS3, bare S3)
+# build + flash — ONE universal image for every ESP32-S3 board (Guition, LilyGo, M5Capsule, AtomS3, bare S3)
 .piovenv/bin/pio run -e s3 -t upload --upload-port /dev/ttyACM0
 
 # read the serial log (pio's own monitor needs an interactive TTY)
