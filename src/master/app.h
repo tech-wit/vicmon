@@ -37,6 +37,14 @@
 #if defined(BOARD_LILYGO)
   #define VICMON_HAS_LILYGO 1
 #endif
+// The M5Capsule (StampS3) is a headless peripheral board — it has NO panel, so it
+// deliberately does NOT define VICMON_DISPLAY. What it adds instead is a BM8563
+// real-time clock (used as the time source in place of NTP), a buzzer (audible
+// low-battery alarm), a microSD slot (long-history CSV log) and a power-hold pin.
+// Compiled into the universal image and picked at boot by detectBoard().
+#if defined(BOARD_M5CAPSULE)
+  #define VICMON_HAS_M5CAPSULE 1
+#endif
 #if defined(VICMON_HAS_GUITION) || defined(VICMON_HAS_LILYGO)
   #define VICMON_DISPLAY 1
 #endif
@@ -53,9 +61,13 @@
 // role branch (so both master and slave bring-ups see it). The universal image
 // probes for the Guition's I2C touch controller to tell the two boards apart; a
 // single-backend build resolves at compile time. Overridable via NVS ("vicboard").
-enum HwBoard : uint8_t { HW_HEADLESS = 0, HW_GUITION = 1, HW_LILYGO = 2 };
+enum HwBoard : uint8_t { HW_HEADLESS = 0, HW_GUITION = 1, HW_LILYGO = 2, HW_M5CAPSULE = 3 };
 extern uint8_t gHwBoard;
 void detectBoard();
+// True when the running board is an M5Capsule (RTC/buzzer/SD peripherals present).
+// Inline so it is available in every translation unit, even those built without the
+// M5Capsule backend compiled in (where it is simply always false).
+inline bool capsulePresent() { return gHwBoard == HW_M5CAPSULE; }
 
 // ---- device role (Master / Slave) ------------------------------------------
 enum { ROLE_MASTER = 0, ROLE_SLAVE = 1 };
@@ -166,6 +178,7 @@ extern float gDeadband;       // A; |current| below this reads as idle
 extern int gTzOffsetMin;      // local time offset from UTC, minutes (+10h AEST)
 extern float gSocWarn;        // % — warn at/below
 extern float gSocCrit;        // % — critical at/below
+extern bool gBuzzerEnable;    // M5Capsule buzzer: sound the SoC-critical alarm (default on)
 extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
@@ -188,12 +201,15 @@ uint32_t currentLocalEpoch();
 uint32_t currentUtcEpoch();      // best-known UTC seconds (0 = no clock)
 void saveClock();                // snapshot the clock to NVS now
 void serviceClockPersist();      // periodic clock snapshot (call from both loops)
+void setManualClock(uint32_t utc);               // set system clock from a UTC epoch (settimeofday)
+uint32_t localClockToUtc(int Y, int Mo, int D, int h, int m);  // local wall-clock -> UTC epoch
 victron::Record parseType(const String& t);
 const char* typeName(victron::Record r);
 void applyProfile(int pid);
 void wipeProfile(int pid);
 void saveSettings(float capacity, float deadband, int tzMin);
 void saveAlertSettings(float socWarn, float socCrit, float vLow, float vHigh);
+void saveBuzzerEnable(bool en);
 void saveWifiCreds(const String& s, const String& pw);
 void loadWifi();
 void saveApCfg(const String& ssid, const String& pass);
@@ -221,6 +237,7 @@ void saveOtaAllow(bool allow);// persist the allow-remote-update flag (NVS ns "v
 // Defined in web.cpp, called from main.cpp.
 String jsonEsc(const String& s);
 void setupServer();
+void webSelfTest();  // build the big pages into pieces + report heap (serial `webtest`)
 
 #ifdef VICMON_DISPLAY
 // The four public display entry points (called from main.cpp setup/loop/slaveLoop)
@@ -231,6 +248,20 @@ void bringUpDisplay();
 void publishDash();
 void publishSlaveDash();
 void serviceDashRequests();
+#endif
+
+#ifdef VICMON_HAS_M5CAPSULE
+// M5Capsule peripheral board (capsule.cpp). Headless: no display entry points —
+// instead it owns the RTC clock source, the buzzer alarm and the microSD log.
+bool capsuleProbe();          // detect: does the BM8563 RTC ACK on the internal I2C bus?
+void capsuleBringUp();        // power-hold + I2C/RTC + buzzer + SD; seeds system time from RTC
+uint32_t capsuleRtcUtc();     // read the RTC as a UTC epoch (0 if unset/invalid)
+void capsuleRtcSet(uint32_t utc);            // write a UTC epoch to the RTC
+void capsuleServiceBuzzer(bool socCrit, uint32_t now);  // beep pattern while SoC-critical (paced)
+void capsuleLogSample(uint32_t now);         // append a CSV row to the daily SD log (paced 60 s)
+bool capsuleRtcOk();          // RTC present and holding a valid time
+bool capsuleSdOk();           // microSD card mounted for logging
+void capsuleDumpSd();         // serial diagnostic: list /vicmon log files
 #endif
 
 #ifdef VICMON_HAS_LILYGO

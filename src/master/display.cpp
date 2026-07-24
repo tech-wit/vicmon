@@ -832,6 +832,9 @@ static void saveDisplayBright() {
 // Bring up the panel + touch + display task (shared by both roles). Seeds the
 // first snapshot for the active role so the task has something to draw.
 void bringUpDisplay() {
+    // The M5Capsule is headless: don't run the Guition panel init, whose QSPI pins
+    // overlap the Capsule's SD bus (already brought up in capsuleBringUp).
+    if (capsulePresent()) { Serial.println("[display] M5Capsule — headless"); return; }
 #ifdef VICMON_HAS_LILYGO
     if (gHwBoard == HW_LILYGO) { lilygoBringUp(); return; }
 #endif

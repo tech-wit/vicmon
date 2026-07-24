@@ -11,6 +11,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <new>
 
 namespace slavelink {
 
@@ -35,6 +36,7 @@ class Receiver {
     self_ = this;
     ns_ = nvsNs;
     manageWifi_ = manageWifi;
+    allocHistBuffers();  // slave-only: a master never calls begin(), so it never pays the ~26KB
     load();
     if (manageWifi_) {
       WiFi.mode(WIFI_STA);
@@ -95,6 +97,7 @@ class Receiver {
   bool historyReady() const { return histReady_; }
   // Backlog-pull progress 0..100 (received chunks / expected chunks).
   uint8_t histPercent() const {
+    if (!fineGot_ || !coarseGot_) return 0;  // master (no staging allocated)
     uint16_t need = (fineTotal_ + kHistChunkPts - 1) / kHistChunkPts +
                     (coarseTotal_ + kHistChunkPts - 1) / kHistChunkPts;
     if (need == 0) return 0;
@@ -106,8 +109,8 @@ class Receiver {
   }
   uint16_t fineCount() const { return fineTotal_; }
   uint16_t coarseCount() const { return coarseTotal_; }
-  const HistPointW& finePoint(uint16_t i) const { return fineStage_[i]; }
-  const HistPointW& coarsePoint(uint16_t i) const { return coarseStage_[i]; }
+  const HistPointW& finePoint(uint16_t i) const { return fineStage_ ? fineStage_[i] : kNaPoint(); }
+  const HistPointW& coarsePoint(uint16_t i) const { return coarseStage_ ? coarseStage_[i] : kNaPoint(); }
 
   // Start (or restart) a full history pull from our paired master. No-op until
   // the master's MAC is known (learned from a received frame). Call once the link
@@ -115,9 +118,11 @@ class Receiver {
   // bitmap so a re-send only backfills the gaps.
   void requestHistory() {
     if (!haveMasterMac_ || paired_ == 0) return;
+    allocHistBuffers();  // safety: normally already done in begin()
+    if (!fineStage_ || !coarseStage_ || !fineGot_ || !coarseGot_) return;  // OOM
     fineTotal_ = coarseTotal_ = 0;
-    memset(fineGot_, 0, sizeof(fineGot_));
-    memset(coarseGot_, 0, sizeof(coarseGot_));
+    memset(fineGot_, 0, kFineChunks);      // pointer now — size explicitly, NOT sizeof(ptr)
+    memset(coarseGot_, 0, kCoarseChunks);
     HistPointW na;  // init staging to n/a so not-yet-received points render as gaps
     na.battery = na.solar = na.charger = na.dcdc = na.load = na.soc = -32768;
     for (uint16_t i = 0; i < kHistFineMax; ++i) fineStage_[i] = na;
@@ -208,6 +213,7 @@ class Receiver {
     uint16_t cap = (c.ring == 0) ? kHistFineMax : kHistCoarseMax;
     HistPointW* dst = (c.ring == 0) ? fineStage_ : coarseStage_;
     uint8_t* got = (c.ring == 0) ? fineGot_ : coarseGot_;
+    if (!dst || !got) return;      // staging not allocated (never happens in slave role)
     fineTotal_ = c.fineTotal;      // learn BOTH totals from any chunk, so a completed
     coarseTotal_ = c.coarseTotal;  // fine ring doesn't prematurely mark us "ready"
     if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
@@ -361,10 +367,25 @@ class Receiver {
   static const uint32_t kHistReqLostMs = 4000;  // no chunk yet -> request likely lost, resend
   static const uint32_t kHistStallMs = 8000;    // mid-transfer stall -> nudge a resend
   static const uint8_t kHistMaxAttempts = 20;   // plenty of passes; each backfills gaps
-  HistPointW fineStage_[kHistFineMax];
-  HistPointW coarseStage_[kHistCoarseMax];
-  uint8_t fineGot_[kFineChunks] = {0};
-  uint8_t coarseGot_[kCoarseChunks] = {0};
+  // Graph-pull staging (~26KB) is heap-allocated ONLY in the slave role (from
+  // begin()/allocHistBuffers), so a master (esp. the no-PSRAM M5Capsule) keeps that
+  // RAM free — it never calls begin() and these stay null.
+  HistPointW* fineStage_ = nullptr;
+  HistPointW* coarseStage_ = nullptr;
+  uint8_t* fineGot_ = nullptr;
+  uint8_t* coarseGot_ = nullptr;
+  void allocHistBuffers() {
+    if (fineStage_) return;
+    fineStage_ = new (std::nothrow) HistPointW[kHistFineMax];
+    coarseStage_ = new (std::nothrow) HistPointW[kHistCoarseMax];
+    fineGot_ = new (std::nothrow) uint8_t[kFineChunks]();
+    coarseGot_ = new (std::nothrow) uint8_t[kCoarseChunks]();
+  }
+  // Shared "no data" point returned by finePoint/coarsePoint before staging exists.
+  static const HistPointW& kNaPoint() {
+    static const HistPointW na = { -32768, -32768, -32768, -32768, -32768, -32768 };
+    return na;
+  }
   volatile uint16_t fineTotal_ = 0, coarseTotal_ = 0;
   volatile bool histActive_ = false;
   volatile bool histReady_ = false;

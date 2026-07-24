@@ -21,8 +21,11 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <driver/gpio.h>
+#include <esp_heap_caps.h>
 #include <esp_now.h>
 #include <esp_timer.h>
+#include <freertos/task.h>
+#include <sys/time.h>
 #include <esp_wifi.h>
 
 #include <cmath>
@@ -47,7 +50,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.5.1";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.6.2";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -94,16 +97,40 @@ int pairSecsLeft() {
 // 1=Guition 2=LilyGo 3=headless) wins if set, for a misdetect or bench forcing.
 uint8_t gHwBoard = HW_HEADLESS;
 void detectBoard() {
-#if defined(VICMON_HAS_GUITION) && defined(VICMON_HAS_LILYGO)
+    // NVS override (ns "vicboard" key "hw") wins for a misdetect or bench forcing:
+    // 1=Guition 2=LilyGo 3=headless 4=M5Capsule. Checked before any probing.
     {
         Preferences p;
         p.begin("vicboard", true);
         uint8_t f = p.getUChar("hw", 0);
         p.end();
-        if (f == 1) { gHwBoard = HW_GUITION;  Serial.println("[board] forced GUITION");  return; }
-        if (f == 2) { gHwBoard = HW_LILYGO;   Serial.println("[board] forced LILYGO");   return; }
-        if (f == 3) { gHwBoard = HW_HEADLESS; Serial.println("[board] forced HEADLESS"); return; }
+        if (f) {
+            gHwBoard = (f == 1) ? HW_GUITION
+                     : (f == 2) ? HW_LILYGO
+                     : (f == 4) ? HW_M5CAPSULE
+                                : HW_HEADLESS;
+            Serial.printf("[board] forced hw=%u\n", gHwBoard);
+#ifdef VICMON_HAS_M5CAPSULE
+            if (gHwBoard == HW_M5CAPSULE) capsuleProbe();  // start the RTC bus for bringUp
+#endif
+            return;
+        }
     }
+#ifdef VICMON_HAS_M5CAPSULE
+    // Positive probe first: the M5Capsule's BM8563 RTC ACKs at 0x51 on the internal
+    // I2C bus (SDA=8/SCL=10); nothing on the Guition or LilyGo answers there. On a
+    // miss, release GPIO8/10 so the Guition touch (Wire on 4/8) or the LilyGo bus
+    // (WR on 8) can claim them cleanly, then fall through to the panel detection.
+    if (capsuleProbe()) {
+        gHwBoard = HW_M5CAPSULE;
+        Serial.println("[board] auto-detect: M5CAPSULE (BM8563 @0x51)");
+        return;
+    }
+    Wire.end();
+    gpio_reset_pin((gpio_num_t)8);
+    gpio_reset_pin((gpio_num_t)10);
+#endif
+#if defined(VICMON_HAS_GUITION) && defined(VICMON_HAS_LILYGO)
     // Distinguish by the DC level on GPIO4 — a genuine hardware difference between
     // the two boards, unlike an I2C probe (GPIO4 is the LilyGo's battery-ADC pin,
     // which fakes ACKs and reads back as 0x00 just like an idle Guition touch):
@@ -198,6 +225,44 @@ static void serviceMasterSerial() {
                     Serial.printf("[master] pairing window open %ds\n", pairSecsLeft());
                 } else if (!strcmp(line, "role")) {
                     gRoleReq = true;
+                } else if (!strcmp(line, "mem")) {
+                    Serial.printf("[mem] heap pool total=%u free=%u largest=%u minfree-ever=%u\n",
+                                  (unsigned)ESP.getHeapSize(), (unsigned)ESP.getFreeHeap(),
+                                  (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap());
+                    Serial.printf("[mem] internal-RAM total=%u free=%u | flash=%u\n",
+                                  (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
+                                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                                  (unsigned)ESP.getFlashChipSize());
+                } else if (!strcmp(line, "webtest")) {
+                    webSelfTest();  // build the big pages + report heap (no HTTP client needed)
+                } else if (!strcmp(line, "tasks")) {
+                    // Min-ever free stack (BYTES) for the tasks worth trimming, so a
+                    // stack can be sized to just above its real peak. Load a few web
+                    // pages first, then run this, to catch the AsyncTCP peak.
+                    const char* names[] = {"async_tcp", "loopTask", "wifi", "tiT"};
+                    for (auto nm : names) {
+                        TaskHandle_t h = xTaskGetHandle(nm);
+                        if (h)
+                            Serial.printf("[task] %-10s minFreeStack=%uB\n", nm,
+                                          (unsigned)(uxTaskGetStackHighWaterMark(h) * sizeof(StackType_t)));
+                        else
+                            Serial.printf("[task] %-10s (not found)\n", nm);
+                    }
+#ifdef VICMON_HAS_M5CAPSULE
+                } else if (!strcmp(line, "cap")) {
+                    // Headless M5Capsule status probe (no screen to show it on).
+                    Serial.printf("[cap] board=%s rtc=%s(utc %lu) sd=%s buzzer=%s clock=%lu\n",
+                                  capsulePresent() ? "M5CAPSULE" : "other",
+                                  capsuleRtcOk() ? "ok" : "unset", (unsigned long)capsuleRtcUtc(),
+                                  capsuleSdOk() ? "mounted" : "none",
+                                  gBuzzerEnable ? "on" : "muted",
+                                  (unsigned long)currentUtcEpoch());
+                } else if (!strcmp(line, "beep")) {
+                    capsuleServiceBuzzer(true, millis());  // fire one test chirp
+                    Serial.println("[cap] test beep");
+                } else if (!strcmp(line, "sd")) {
+                    capsuleDumpSd();  // list the microSD log files
+#endif
                 }
             }
             n = 0;
@@ -556,6 +621,7 @@ float gSocWarn = 50;         // % — warn at/below
 float gSocCrit = 30;         // % — critical at/below
 float gVlow = 11.8f;         // V — critical at/below
 float gVhigh = 15.0f;        // V — critical at/above
+bool gBuzzerEnable = true;   // M5Capsule buzzer follows the SoC-critical alert (0 = mute)
 String settingsNs(int profile) {
     return profile == 0 ? String("vicset") : "vicset" + String(profile);
 }
@@ -569,7 +635,17 @@ static void loadSettings(int profile) {
     gSocCrit = p.getFloat("soccrit", 30);
     gVlow = p.getFloat("vlow", 11.8f);
     gVhigh = p.getFloat("vhigh", 15.0f);
+    gBuzzerEnable = p.getUChar("buzzen", 1) != 0;
     p.end();
+}
+// M5Capsule buzzer mute flag (own tiny writer so the 4-arg saveAlertSettings
+// signature and its callers stay unchanged).
+void saveBuzzerEnable(bool en) {
+    Preferences p;
+    p.begin(settingsNs(gProfiles.active()).c_str(), false);
+    p.putUChar("buzzen", en ? 1 : 0);
+    p.end();
+    gBuzzerEnable = en;
 }
 void saveSettings(float capacity, float deadband, int tzMin) {
     Preferences p;
@@ -648,6 +724,11 @@ void saveClock() {
     p.begin("vicclock", false);
     p.putUInt("utc", u);
     p.end();
+#ifdef VICMON_HAS_M5CAPSULE
+    // Push the best-known time back into the RTC so it survives power loss and, next
+    // boot, seeds the system clock without needing NTP. Cheap (~1 I2C write/min).
+    if (capsulePresent()) capsuleRtcSet(u);
+#endif
 }
 // Persist the clock on the kClockSaveMs cadence (see wear note above). Master-only
 // — the slave takes its time live from the master and never writes it to NVS.
@@ -655,6 +736,33 @@ void serviceClockPersist() {
     static uint32_t lastSaveMs = 0;
     uint32_t now = millis();
     if (now - lastSaveMs >= kClockSaveMs) { lastSaveMs = now; saveClock(); }
+}
+
+// Set the clock from a manual entry (Settings page) or the browser ("Now"). Moves
+// the ACTUAL system clock via settimeofday so time()/currentUtcEpoch() report it
+// immediately — the old code only set gManualEpoch, which currentUtcEpoch ignores
+// once time() is already valid (e.g. seeded from the M5Capsule RTC), so "Now" did
+// nothing there. saveClock() then persists it (NVS + RTC write-through).
+void setManualClock(uint32_t utc) {
+    if (utc < 1700000000u) return;
+    struct timeval tv = { (time_t)utc, 0 };
+    settimeofday(&tv, nullptr);
+    gManualEpoch = utc;
+    gManualMillis = millis();
+    saveClock();
+}
+
+// Convert a local wall-clock (Y/Mo/D h:m, using the configured TZ offset) to a UTC
+// epoch. Uses Howard Hinnant's days-from-civil so it needs no libc calendar calls.
+uint32_t localClockToUtc(int Y, int Mo, int D, int h, int m) {
+    int yy = Y - (Mo <= 2);
+    int era = (yy >= 0 ? yy : yy - 399) / 400;
+    unsigned yoe = (unsigned)(yy - era * 400);
+    unsigned doy = (153u * (Mo > 2 ? Mo - 3 : Mo + 9) + 2) / 5 + D - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long days = era * 146097L + (long)doe - 719468;
+    int64_t local = days * 86400LL + (int64_t)h * 3600 + (int64_t)m * 60;
+    return (uint32_t)(local - (int64_t)gTzOffsetMin * 60);
 }
 
 // Loads a profile's config/signals/settings and clears runtime caches so the
@@ -793,7 +901,8 @@ static void updateLed(int worst, ChargeMode mode) {
     else if (mode == ChargeMode::Charging) { g = 30; }
     else if (mode == ChargeMode::Discharging) { g = 6; b = 22; }
     else { r = g = b = 2; }  // idle / unknown: faint white
-    neopixelWrite(RGB_LED_PIN, r, g, b);
+    // The M5Capsule's WS2812 sits on GPIO21 (StampS3), not the AtomS3's GPIO35.
+    neopixelWrite(capsulePresent() ? 21 : RGB_LED_PIN, r, g, b);
 }
 
 // Resolve a field from the first configured device of a given type. Used for
@@ -936,7 +1045,7 @@ static void setupSlave() {
     gCoarse.clear();
     // Config SoftAP on channel 1 (matches the master's default AP channel).
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
+    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/2);
     IPAddress ip = WiFi.softAPIP();
     Serial.printf("[slave] config AP '%s' at http://%s/  (pass %s, ch1)\n", kApSsid,
                   ip.toString().c_str(), kApPass);
@@ -1073,6 +1182,13 @@ void setup() {
     // both the master and slave bring-ups render on the right hardware.
     detectBoard();
 
+#ifdef VICMON_HAS_M5CAPSULE
+    // M5Capsule (headless): latch power, bring up RTC/buzzer/SD and seed the system
+    // clock from the RTC. Runs in BOTH roles and before WiFi, so the clock is real
+    // (no NTP needed) the moment the stats/logging code starts.
+    if (gHwBoard == HW_M5CAPSULE) capsuleBringUp();
+#endif
+
     // Registry mutex: created before the server/tasks so RegLock is live the
     // moment concurrent access becomes possible (it no-ops while null above).
     gRegMux = xSemaphoreCreateRecursiveMutex();
@@ -1082,8 +1198,10 @@ void setup() {
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
     gCoarse.init(gCoarseBuf, HIST2_CAP, HIST2_INTERVAL);
 
+    Serial.printf("[mem] boot: %u\n", (unsigned)ESP.getFreeHeap());
     gFsOk = LittleFS.begin(/*formatOnFail=*/true);
     Serial.printf("LittleFS: %s\n", gFsOk ? "mounted" : "unavailable (history not persisted)");
+    Serial.printf("[mem] post-LittleFS: %u\n", (unsigned)ESP.getFreeHeap());
 
     gProfiles.begin();
     applyProfile(gProfiles.active());
@@ -1111,11 +1229,12 @@ void setup() {
     Serial.println("WiFi STA mode (no AP)");
 #else
     WiFi.mode(gStaSsid.length() ? WIFI_AP_STA : WIFI_AP);
-    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/4);
+    WiFi.softAP(kApSsid, kApPass, /*channel=*/1, /*hidden=*/0, /*max_conn=*/2);
     IPAddress ip = WiFi.softAPIP();
     { uint8_t pc = 0; wifi_second_chan_t sc; esp_wifi_get_channel(&pc, &sc);
       Serial.printf("AP '%s' up at http://%s/  (pass: %s) channel %u\n", kApSsid,
                     ip.toString().c_str(), kApPass, pc); }
+    Serial.printf("[mem] post-WiFiAP: %u\n", (unsigned)ESP.getFreeHeap());
 #ifdef GUITION_SLOW_BEACON
     {  // DIAG: slow the AP beacon to reduce TX-vs-LVGL collisions.
         wifi_config_t c;
@@ -1139,20 +1258,26 @@ void setup() {
     gDns.start(53, "*", ip);
     setupServer();
 
-    // mDNS: reachable as http://vicmon.local/ on a joined network.
-    if (MDNS.begin("vicmon")) {
+    // mDNS (http://vicmon.local/) costs ~6KB heap and only helps when the device is
+    // joined to a router — on its own SoftAP clients use 192.168.4.1 directly. So
+    // start it ONLY in STA mode; AP-only (the offline 4WD norm) skips it and keeps
+    // the 6KB. Re-provision WiFi and reboot to get vicmon.local back.
+    if (gStaSsid.length() && MDNS.begin("vicmon")) {
         MDNS.addService("http", "tcp", 80);
         Serial.println("mDNS: http://vicmon.local/");
     }
 
+    Serial.printf("[mem] post-server: %u\n", (unsigned)ESP.getFreeHeap());
     setupEspNow();  // live data broadcast to slaves
     setupOta(ROLE_MASTER);  // firmware clone: push to (or receive from) a paired slave
+    Serial.printf("[mem] post-espnow: %u\n", (unsigned)ESP.getFreeHeap());
 #endif
 
 #ifdef VICMON_SIM
     simSetup();
 #else
     NimBLEDevice::init("");
+    Serial.printf("[mem] post-NimBLE-init: %u\n", (unsigned)ESP.getFreeHeap());
     gScan = NimBLEDevice::getScan();
     // Active scan so we also receive scan responses, which carry the device's
     // friendly name (Victron puts it there, not in the advertisement).
@@ -1167,6 +1292,7 @@ void setup() {
 #ifdef VICMON_DISPLAY
     bringUpDisplay();  // panel + touch + display task (core 1)
 #endif
+    Serial.printf("[mem] setup done: %u\n", (unsigned)ESP.getFreeHeap());
 }
 
 void loop() {
@@ -1203,6 +1329,19 @@ void loop() {
     uint32_t now = millis();
     serviceClockPersist();  // master-only: snapshot the rough clock to NVS every ~5 min
     int worst = buildAlerts(now);
+#ifdef VICMON_HAS_M5CAPSULE
+    if (gHwBoard == HW_M5CAPSULE) {
+        // Audible alarm tracks the SoC-critical alert specifically (battery capacity),
+        // not the whole worst-severity (which also covers voltage / stale devices).
+        sig::Resolved soc = R(sig::Role::BatterySOC, now);
+        bool socCrit = soc.valid && gSocCrit > 0 && soc.value <= gSocCrit;
+        capsuleServiceBuzzer(socCrit, now);
+        capsuleLogSample(now);  // append to the daily SD CSV (paced 60 s internally)
+        // Drive the Capsule's WS2812 (GPIO21). The generic updateLed() call below is
+        // compiled out in this display-capable universal image, so do it here.
+        updateLed(worst, chargeMode(R(sig::Role::BatteryA, now)));
+    }
+#endif
 #ifndef VICMON_DISPLAY
     // Status LED on GPIO 35 — but on the Guition (OPI PSRAM) GPIO 35 is a PSRAM
     // data pin, and driving it corrupts the framebuffer. The Guition has no user
@@ -1237,7 +1376,9 @@ void loop() {
     // isn't bottlenecked by this loop's ~2s BLE scan.
 #endif
 
-    Serial.printf("[state] victron_adverts=%d decoded=%d |", gScanVictron, gScanDecoded);
+    Serial.printf("[state] heap=%u/%u victron_adverts=%d decoded=%d |",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                  gScanVictron, gScanDecoded);
     for (size_t i = 0; i < gConfig.count(); ++i) {
         const DeviceSlot& s = gConfig.slots()[i];
         Serial.printf(" %s=%s", s.name, s.stale(now) ? "stale" : "ok");

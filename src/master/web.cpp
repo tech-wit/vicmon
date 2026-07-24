@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <memory>
+#include <vector>
 
 #include "app.h"
 #include "web_assets.h"  // kStyle / kMimicPage / kStatsPage / kDiagPage (HTML/CSS/JS)
@@ -217,9 +219,10 @@ static String pageHead(const char* active) {
     String h = F("<!doctype html><html><head><meta charset=utf-8>"
                  "<meta name=viewport content='width=device-width,initial-scale=1'>"
                  "<title>Vicmon</title><link rel=stylesheet href=/style.css></head><body>"
-                 "<header><h1>VICMON</h1>");
+                 "<header><div class=hrow><h1>VICMON</h1>");
+    // Top row: title + profile (left) and the live clock (right). Tabs go on row 2.
     h += "<span class=muted style='font-size:.8em'>" + String(gProfiles.name(gProfiles.active())) +
-         "</span><nav>";
+         "</span><span id=clk></span></div><nav>";
     struct {
         const char* href;
         const char* name;
@@ -240,7 +243,24 @@ static String pageHead(const char* active) {
         h += l.name;
         h += "</a>";
     }
-    h += F("</nav></header><main>");
+    // Live clock in the header, on every page: seed the offset from the device's
+    // own time (RTC/NTP/manual via GET /api/time), then tick locally and re-sync
+    // each minute so it stays right through an NTP/RTC correction. now_epoch is the
+    // device LOCAL epoch (TZ already applied), so it's read with getUTC* methods.
+    h += F("</nav>"
+           "<script>(function(){var off=0,ok=false,synced=false,"
+           "D=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],"
+           "M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];"
+           "function p(n){return(n<10?'0':'')+n;}"
+           "function sync(){fetch('/api/time').then(function(r){return r.json();}).then(function(t){"
+           "synced=true;if(t.epoch>0){off=t.epoch*1000-Date.now();ok=true;}else{ok=false;}}).catch(function(){});}"
+           "function tick(){var e=document.getElementById('clk');if(!e)return;"
+           "if(!ok){e.textContent=synced?'no clock set':'';return;}"
+           "var d=new Date(Date.now()+off);"
+           "e.textContent=D[d.getUTCDay()]+' '+d.getUTCDate()+' '+M[d.getUTCMonth()]+' '+d.getUTCFullYear()"
+           "+' \\u00b7 '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());}"
+           "sync();tick();setInterval(tick,1000);setInterval(sync,60000);})();</script>"
+           "</header><main>");
     return h;
 }
 static String pageFoot() { return F("</main></body></html>"); }
@@ -294,9 +314,49 @@ static String jsEsc(String s) {
     return s;
 }
 
-static String devicesPage() {
+// Collects HTML into a list of SMALL pieces (each ~1.4 KB) that a chunked response
+// then streams through a tiny buffer (see servePieces). The large master pages
+// (Settings / Devices) must never be one big contiguous String on the no-PSRAM
+// M5Capsule: its heap is only ~58 KB free / ~47 KB largest block, so a whole-page
+// String (+ the copy req->send(String) makes) either came back BLANK or, when
+// pre-allocated big, crashed the AsyncTCP task and dropped WiFi. Pieces stay small
+// and non-contiguous, so they fit the fragmented heap and need no copy.
+struct HtmlOut {
+    std::vector<String>* pieces;
+    String cur;
+    void add(const String& s) {
+        cur += s;
+        if (cur.length() >= 1400) { pieces->push_back(cur); cur = ""; }
+    }
+    HtmlOut& operator+=(const String& s) { add(s); return *this; }
+    HtmlOut& operator+=(const char* s)   { add(String(s)); return *this; }
+    void flush() { if (cur.length()) { pieces->push_back(cur); cur = ""; } }
+};
+
+// Chunked-transfer the collected pieces so nothing large is held contiguously and
+// there is no second copy. The shared_ptr keeps the pieces alive for the async
+// response's lifetime and frees them when it completes.
+static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<String>> pieces) {
+    req->send(req->beginChunkedResponse("text/html",
+        [pieces](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            size_t pos = 0;
+            for (const String& s : *pieces) {
+                size_t len = s.length();
+                if (index < pos + len) {
+                    size_t off = index - pos;
+                    size_t n = (maxLen < len - off) ? maxLen : (len - off);
+                    memcpy(buf, s.c_str() + off, n);
+                    return n;
+                }
+                pos += len;
+            }
+            return 0;  // all pieces sent
+        }));
+}
+
+static void devicesPage(HtmlOut& h) {
     uint32_t now = millis();
-    String h = pageHead("/devices");
+    h += pageHead("/devices");
 
     h += "<div class=card><h3>Configured devices</h3>";
     if (gConfig.count() == 0) h += "<p class=muted>None yet.</p>";
@@ -364,7 +424,6 @@ document.getElementById('addName').value=n||'';document.getElementById('addType'
 location.hash='#add';document.getElementById('addKey').focus();}</script>)JS";
 
     h += pageFoot();
-    return h;
 }
 
 static String apCard();
@@ -374,8 +433,8 @@ static String backupCard();
 static String otaCard();
 static String systemCard();
 
-static String bindingsPage() {
-    String h = pageHead("/bindings");
+static void bindingsPage(HtmlOut& h) {
+    h += pageHead("/bindings");
     // A slave owns no BLE devices/profiles/bindings/alerts of its own — it mirrors a
     // master over ESP-NOW. Show only what it actually controls: pair/role (system),
     // its config AP, and OTA. The master-only cards (profiles, panel signals, system
@@ -386,7 +445,7 @@ static String bindingsPage() {
         h += apCard();
         h += otaCard();
         h += pageFoot();
-        return h;
+        return;
     }
     h += profilesCard();
     h += "<div class=card><h3>Panel signals</h3>"
@@ -441,7 +500,48 @@ static String bindingsPage() {
          "<button>save</button></form>"
          "<p class=muted>Capacity shows remaining Ah on the mimic. Currents within "
          "&plusmn;deadband read as <i>idle</i>. Time zone aligns the daily stats "
-         "rollover to local midnight (e.g. 600 = AEST +10h); needs WiFi/NTP.</p></div>";
+         "rollover to local midnight (e.g. 600 = AEST +10h) and is applied to the "
+         "date/time below.</p></div>";
+
+    // Date & time — set the device clock (drives the daily-stats rollover, the SD
+    // history log timestamps and the header clock). On an M5Capsule it's held in the
+    // RTC. Moved here from the Stats page. Local wall-clock; the TZ above is applied.
+    h += "<div class=card><h3>Date &amp; time</h3>"
+         "<div class=inline style='align-items:flex-end'>"
+         "<div><label>Date (D / M / Y)</label>"
+         "<span style='display:flex;gap:.3em;align-items:center'>"
+         "<input id=cd type=number min=1 max=31 placeholder=D style='width:3.6em;text-align:center'>"
+         "<span class=muted>/</span>"
+         "<input id=cmo type=number min=1 max=12 placeholder=M style='width:3.6em;text-align:center'>"
+         "<span class=muted>/</span>"
+         "<input id=cy type=number min=2023 max=2099 placeholder=Y style='width:5em;text-align:center'></span></div>"
+         "<div><label>Time (24h &nbsp; H : M)</label>"
+         "<span style='display:flex;gap:.3em;align-items:center'>"
+         "<input id=ch type=number min=0 max=23 placeholder=H style='width:3.6em;text-align:center'>"
+         "<span class=muted>:</span>"
+         "<input id=cmi type=number min=0 max=59 placeholder=M style='width:3.6em;text-align:center'></span></div>"
+         "<div><button id=setClock type=button>Set</button> "
+         "<button id=nowClock class=ghost type=button title=\"copy this browser's clock\">Now</button></div>"
+         "</div>"
+         "<p class=muted id=clockNow>&mdash;</p>"
+         "<p class=muted><b>Now</b> copies the clock from the browser you're on; or type a "
+         "local date &amp; time and press <b>Set</b>.</p>"
+         "<script>(function(){function g(i){return document.getElementById(i);}"
+         "function p(n){return(n<10?'0':'')+n;}"
+         "function show(){fetch('/api/time').then(function(r){return r.json();}).then(function(t){"
+         "var e=g('clockNow');if(!e)return;"
+         "if(t.epoch>0){var d=new Date(t.epoch*1000);"
+         "e.textContent='Device clock: '+d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());"
+         "if(document.activeElement&&document.activeElement.tagName=='INPUT')return;"
+         "g('cy').value=d.getUTCFullYear();g('cmo').value=d.getUTCMonth()+1;g('cd').value=d.getUTCDate();g('ch').value=d.getUTCHours();g('cmi').value=d.getUTCMinutes();"
+         "}else e.textContent='Device clock: not set';}).catch(function(){});}"
+         "g('setClock').addEventListener('click',function(){var b=this;b.textContent='\\u2026';"
+         "fetch('/api/time?y='+g('cy').value+'&mo='+g('cmo').value+'&d='+g('cd').value+'&h='+g('ch').value+'&m='+g('cmi').value,{method:'POST'})"
+         ".then(function(r){return r.text();}).then(function(t){b.textContent=(t=='ok')?'\\u2713':'?';setTimeout(function(){b.textContent='Set';},1500);show();});});"
+         "g('nowClock').addEventListener('click',function(){var b=this;b.textContent='\\u2026';"
+         "fetch('/api/time?epoch='+Math.floor(Date.now()/1000),{method:'POST'})"
+         ".then(function(r){return r.text();}).then(function(){b.textContent='\\u2713';setTimeout(function(){b.textContent='Now';},1500);show();});});"
+         "show();setInterval(show,5000);})();</script></div>";
 
     h += "<div class=card><h3>Alerts</h3>"
          "<form class=inline method=post action=/alerts>"
@@ -453,10 +553,13 @@ static String bindingsPage() {
          "<input name=vlow type=number min=0 step=0.1 value='" + String(gVlow, 1) + "'></div>"
          "<div><label>Voltage high (V)</label>"
          "<input name=vhigh type=number min=0 step=0.1 value='" + String(gVhigh, 1) + "'></div>"
+         "<div><label>Buzzer (M5Capsule)</label>"
+         "<input name=buzzer type=checkbox " + String(gBuzzerEnable ? "checked" : "") + "></div>"
          "<button>save</button></form>"
          "<p class=muted>Shown as a banner on the mimic and on the onboard LED "
          "(red = critical, amber = warning, green = charging). 0 disables a check. "
-         "A configured device that stops broadcasting also raises a warning.</p></div>";
+         "A configured device that stops broadcasting also raises a warning. On an "
+         "M5Capsule the buzzer chirps while the battery is SoC-critical.</p></div>";
 
     h += systemCard();
     h += apCard();
@@ -464,7 +567,25 @@ static String bindingsPage() {
     h += otaCard();
     h += backupCard();
     h += pageFoot();
-    return h;
+}
+
+// Serial self-test: build both big pages into pieces (the path that was OOM-crashing)
+// and report piece count / total size / heap, WITHOUT serving. Lets us verify the
+// memory behaviour on the no-PSRAM Capsule when no HTTP client is reachable here.
+void webSelfTest() {
+    for (int which = 0; which < 2; ++which) {
+        uint32_t h0 = ESP.getFreeHeap();
+        auto pieces = std::make_shared<std::vector<String>>();
+        HtmlOut h{pieces.get()};
+        if (which == 0) bindingsPage(h); else devicesPage(h);
+        h.flush();
+        size_t total = 0, mx = 0;
+        for (const String& s : *pieces) { total += s.length(); if (s.length() > mx) mx = s.length(); }
+        Serial.printf("[webtest] %s: %u pieces, %u bytes (max piece %u), heap %u->%u maxblk %u\n",
+                      which == 0 ? "bindings" : "devices", (unsigned)pieces->size(),
+                      (unsigned)total, (unsigned)mx, (unsigned)h0,
+                      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    }
 }
 
 // ---- handlers --------------------------------------------------------------
@@ -532,6 +653,7 @@ static void handleAlerts(AsyncWebServerRequest* req) {
     float vl = param(req, "vlow").toFloat();
     float vh = param(req, "vhigh").toFloat();
     saveAlertSettings(sw, sc, vl, vh);
+    saveBuzzerEnable(req->hasParam("buzzer", true));  // unchecked box => absent => mute
     req->redirect("/bindings");
 }
 
@@ -543,33 +665,29 @@ static void handleStatsReset(AsyncWebServerRequest* req) {
     req->redirect("/stats");
 }
 
-// Manually set the clock (UTC epoch from the browser). Lets the day rollover use
-// a real calendar without NTP; RAM-only, so lost on reboot (run-days take over).
+// Set the clock, from the Settings "Date & time" card or the "Now" button. On an
+// M5Capsule this writes through to the RTC (see setManualClock/saveClock).
 static void handleTime(AsyncWebServerRequest* req) {
     auto pv = [&](const char* k) -> String {
         if (req->hasParam(k, true)) return req->getParam(k, true)->value();   // POST body
         if (req->hasParam(k, false)) return req->getParam(k, false)->value(); // query string
         return String();
     };
-    // Manual entry: h (0-23) + m — the date doesn't matter, only the time-of-day
-    // (drives the midnight rollover). Anchor to a fixed UTC-midnight date and back
-    // out the TZ so currentLocalEpoch() reports exactly the entered local time.
-    String hh = pv("h");
-    if (hh.length()) {
-        int h = hh.toInt(), m = pv("m").toInt();
-        if (h < 0 || h > 23 || m < 0 || m > 59) { req->send(200, "text/plain", "bad"); return; }
-        const uint32_t base = 1735689600u;  // 2025-01-01 00:00 UTC
-        int64_t v = (int64_t)base + h * 3600 + m * 60 - (int64_t)gTzOffsetMin * 60;
-        gManualEpoch = (uint32_t)v;
-        gManualMillis = millis();
-        saveClock();  // persist the just-set time so a reboot keeps it
+    // Full manual entry: local Y/Mo/D + H:M -> UTC epoch (TZ backed out).
+    String ys = pv("y");
+    if (ys.length()) {
+        int Y = ys.toInt(), Mo = pv("mo").toInt(), D = pv("d").toInt();
+        int h = pv("h").toInt(), m = pv("m").toInt();
+        if (Y < 2023 || Y > 2099 || Mo < 1 || Mo > 12 || D < 1 || D > 31 ||
+            h < 0 || h > 23 || m < 0 || m > 59) { req->send(200, "text/plain", "bad"); return; }
+        setManualClock(localClockToUtc(Y, Mo, D, h, m));
         req->send(200, "text/plain", "ok");
         return;
     }
-    // Or a full UTC epoch straight from the browser clock ("Now").
+    // "Now" — a full UTC epoch straight from the browser clock.
     uint32_t e = (uint32_t)strtoul(pv("epoch").c_str(), nullptr, 10);
     bool ok = e > 1700000000;
-    if (ok) { gManualEpoch = e; gManualMillis = millis(); saveClock(); }
+    if (ok) setManualClock(e);
     req->send(200, "text/plain", ok ? "ok" : "bad");
 }
 
@@ -1050,6 +1168,12 @@ static String systemCard() {
     String h = "<div class=card><h3>System</h3>";
     h += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
          String(gRole == ROLE_SLAVE ? "paired master" : "id") + " " + String(idbuf) + "</p>";
+#ifdef VICMON_HAS_M5CAPSULE
+    if (capsulePresent())
+        h += "<p class=muted>M5Capsule &middot; RTC " + String(capsuleRtcOk() ? "set" : "unset") +
+             " &middot; SD " + String(capsuleSdOk() ? "logging" : "none") +
+             " &middot; buzzer " + String(gBuzzerEnable ? "on" : "muted") + "</p>";
+#endif
     if (gRole == ROLE_SLAVE) {
         h += "<button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
         h += "<button onclick=\"if(confirm('Forget the paired master?'))fetch('/api/unpair',{method:'POST'})\">Unpair</button> ";
@@ -1156,10 +1280,20 @@ void setupServer() {
         req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());
     });
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", devicesPage());
+        // Build into small pieces + chunk-serve (see HtmlOut/servePieces) so the big
+        // page never needs a large contiguous allocation on the fragmented heap.
+        auto pieces = std::make_shared<std::vector<String>>();
+        HtmlOut h{pieces.get()};
+        devicesPage(h);
+        h.flush();
+        servePieces(req, pieces);
     });
     gServer.on("/bindings", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", bindingsPage());
+        auto pieces = std::make_shared<std::vector<String>>();
+        HtmlOut h{pieces.get()};
+        bindingsPage(h);
+        h.flush();
+        servePieces(req, pieces);
     });
     gServer.on("/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/html", pageHead("/stats") + kStatsPage + pageFoot());
@@ -1174,8 +1308,26 @@ void setupServer() {
         req->send(200, "application/json", buildPanelJson());
     });
     gServer.on("/api/time", HTTP_POST, handleTime);
+    gServer.on("/api/time", HTTP_GET, [](AsyncWebServerRequest* req) {
+        // Device clock for the header display: local epoch (0 = no clock set yet).
+        uint32_t le = currentLocalEpoch();
+        String j = "{\"epoch\":" + String(le) + ",\"utc\":" + String(currentUtcEpoch()) +
+                   ",\"clock\":" + (le ? "true" : "false") + "}";
+        req->send(200, "application/json", j);
+    });
     gServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildStatsJson());
+    });
+    gServer.on("/api/sys", HTTP_GET, [](AsyncWebServerRequest* req) {
+        // Live memory + uptime for the Diagnostics page. maxblk = largest allocatable
+        // block (fragmentation), minheap = lowest free heap ever (catches transient
+        // pressure, e.g. serving a big page) — the numbers that matter on no-PSRAM.
+        String j = "{\"heap\":" + String(ESP.getFreeHeap()) +
+                   ",\"maxblk\":" + String(ESP.getMaxAllocHeap()) +
+                   ",\"minheap\":" + String(ESP.getMinFreeHeap()) +
+                   ",\"uptime\":" + String(millis() / 1000) +
+                   ",\"psram\":" + String(ESP.getPsramSize()) + "}";
+        req->send(200, "application/json", j);
     });
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildDataJson());

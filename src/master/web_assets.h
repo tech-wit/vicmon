@@ -8,11 +8,13 @@ static const char kStyle[] = R"CSS(
 --accent:#22d3ee;--green:#34d399;--red:#f87171;--amber:#fbbf24}
 *{box-sizing:border-box}
 body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;gap:1em;align-items:center;padding:.7em 1em;background:#0b1118;
+header{display:flex;flex-direction:column;gap:.45em;padding:.6em 1em;background:#0b1118;
 border-bottom:1px solid var(--line);position:sticky;top:0}
+.hrow{display:flex;align-items:baseline;gap:.8em}
 header h1{font-size:1em;margin:0;color:var(--accent);letter-spacing:.12em}
 nav a{color:var(--muted);text-decoration:none;margin-right:1em;font-size:.95em}
 nav a.active,nav a:hover{color:var(--fg)}
+#clk{margin-left:auto;font-size:.8em;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 main{padding:1em;max-width:760px;margin:auto}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1em;margin-bottom:1em}
 h3{margin:.2em 0 .8em}
@@ -256,17 +258,7 @@ static const char kStatsPage[] = R"HTML(
  .mfoot form{margin:0}
 </style>
 <div class=card>
- <div class=erow>
-  <div><h3 style="margin:0 0 .15em">Energy</h3><div id=daynote class=muted style="font-size:.82em">--</div></div>
-  <div id=clockset style="display:flex;gap:.35em;align-items:center;flex-wrap:wrap">
-   <input id=th type=number min=1 max=12 placeholder=h style="width:3.4em;text-align:center">
-   <span style="color:var(--muted)">:</span>
-   <input id=tm type=number min=0 max=59 placeholder=m style="width:3.4em;text-align:center">
-   <select id=tap style="padding:.4em"><option>AM</option><option>PM</option></select>
-   <button class=setbtn id=setManual>Set</button>
-   <button class=setbtn id=setTime title="use this device's clock">Now</button>
-  </div>
- </div>
+ <h3 style="margin:0 0 .4em">Energy</h3>
  <canvas id="dayChart" width="760" height="180" style="width:100%;height:180px;margin-top:.7em"></canvas>
  <div class="legend" style="margin-top:.3em">
   <span style="color:#facc15">&#9632; Solar</span>
@@ -295,7 +287,6 @@ function meters(){document.getElementById('meters').innerHTML=SC.map(function(sc
   '<form method=post action=/stats/reset onsubmit="return rst(\''+k+'\')"><input type=hidden name=scope value='+k+'>'+
   '<button class=ghost>Reset</button></form></div></div>';}).join('');}
 function render(){if(!data)return;
- var cs=document.getElementById('clockset');if(cs)cs.style.display=data.clock_ro?'none':'';
  SC.forEach(function(sc){var k=sc[0],b=data[k];if(!b)return;
   set('in_'+k,'+'+ah(b.charged_ah)+'<small>Ah</small>');
   set('out_'+k,'&minus;'+ah(b.discharged_ah)+'<small>Ah</small>');
@@ -307,16 +298,7 @@ function render(){if(!data)return;
   set('brk_'+k,'<span>Solar <b>'+b.solar_ah.toFixed(0)+'</b></span><span>DC-DC <b>'+b.dcdc_ah.toFixed(0)+
    '</b></span><span>Chg <b>'+b.charger_ah.toFixed(0)+'</b></span><span>Load <b>'+b.load_ah.toFixed(0)+'</b></span>');
   set('soc_'+k,b.soc_min==null?'':'SoC '+b.soc_min.toFixed(0)+'&ndash;'+b.soc_max.toFixed(0)+'%');});
- set('daynote',data.clock?('Clock '+fmtTime(data.now_epoch)+' &middot; calendar days'):('Run-day '+data.run_day+' &middot; no clock, days count run-time'));
- prefillTime();
 }
-function fmtTime(e){var t=new Date(e*1000),h=t.getUTCHours(),m=t.getUTCMinutes(),h12=h%12;if(h12==0)h12=12;
- return h12+':'+(m<10?'0':'')+m+' '+(h<12?'AM':'PM');}
-function prefillTime(){if(!data||!data.clock)return;
- var th=document.getElementById('th'),tm=document.getElementById('tm'),tap=document.getElementById('tap');
- if([th,tm,tap].indexOf(document.activeElement)>=0)return;  // don't clobber while editing
- var t=new Date(data.now_epoch*1000),h=t.getUTCHours(),m=t.getUTCMinutes(),h12=h%12;if(h12==0)h12=12;
- th.value=h12;tm.value=m;tap.value=h<12?'AM':'PM';}
 function lbl(d){if(d.now)return 'now';if(d.empty)return '';var s=''+d.stamp;return (data.clock&&d.stamp>=20000000)?(s.slice(4,6)+'/'+s.slice(6,8)):('d'+d.stamp);}
 function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getContext)return;
  var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=32,padR=8,padT=8,padB=18;
@@ -338,22 +320,14 @@ function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getConte
   ctx.fillStyle='#f87171';var yo=Y(d.o);ctx.fillRect(xo,yo,bw,base-yo);}
   ctx.fillStyle=d.now?'#e6edf3':'#7d8da1';ctx.fillText(lbl(d),cx,H-5);});
 }
-document.getElementById('setTime').addEventListener('click',function(){var btn=this;btn.textContent='…';
- fetch('/api/time?epoch='+Math.floor(Date.now()/1000),{method:'POST'}).then(function(r){return r.text();}).then(function(){
-  btn.textContent='✓';setTimeout(function(){btn.textContent='Now';},1600);load();}).catch(function(){btn.textContent='Now';});});
-document.getElementById('setManual').addEventListener('click',function(){var btn=this;
- var h=parseInt(document.getElementById('th').value),m=parseInt(document.getElementById('tm').value)||0;
- if(isNaN(h)||h<1||h>12||m<0||m>59){btn.textContent='h:m?';setTimeout(function(){btn.textContent='Set';},1500);return;}
- if(h==12)h=0; if(document.getElementById('tap').value=='PM')h+=12;
- btn.textContent='…';
- fetch('/api/time?h='+h+'&m='+m,{method:'POST'}).then(function(r){return r.text();}).then(function(){
-  btn.textContent='✓';setTimeout(function(){btn.textContent='Set';},1600);load();}).catch(function(){btn.textContent='Set';});});
 async function load(){try{data=await(await fetch('/api/stats')).json();}catch(e){return;}render();drawDays();}
 meters();load();setInterval(load,5000);
 </script>
 )HTML";
 
 static const char kDiagPage[] = R"HTML(
+<div class=card><h3>System memory</h3>
+<div id=sys class=muted>Loading&hellip;</div></div>
 <div class=card><h3>Diagnostics</h3>
 <p class=muted>Live decoded values plus the raw decrypted advertisement bytes for
 each configured device &mdash; use this to confirm a parser against
@@ -361,6 +335,16 @@ VictronConnect.</p>
 <div id=diag>Loading&hellip;</div></div>
 <script>
 function esc(s){return (s+'').replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+function kb(b){return (b/1024).toFixed(1)+' KB';}
+function dur(s){var d=Math.floor(s/86400);s%=86400;var h=Math.floor(s/3600);s%=3600;var m=Math.floor(s/60);
+ return (d?d+'d ':'')+(h?h+'h ':'')+m+'m';}
+async function loadSys(){var e=document.getElementById('sys');if(!e)return;
+ let s;try{s=await(await fetch('/api/sys')).json();}catch(err){return;}
+ e.innerHTML='<div style="display:flex;justify-content:space-between"><span>Free heap</span><b>'+kb(s.heap)+'</b></div>'+
+  '<div style="display:flex;justify-content:space-between"><span>Largest block</span><b>'+kb(s.maxblk)+'</b></div>'+
+  '<div style="display:flex;justify-content:space-between"><span>Min free (ever)</span><b>'+kb(s.minheap)+'</b></div>'+
+  (s.psram>0?'<div style="display:flex;justify-content:space-between"><span>PSRAM</span><b>'+kb(s.psram)+'</b></div>':'')+
+  '<div style="display:flex;justify-content:space-between"><span>Uptime</span><b>'+dur(s.uptime)+'</b></div>';}
 async function load(){let d;try{d=await(await fetch('/api/diag')).json();}catch(e){return;}
  var el=document.getElementById('diag');
  if(!d.length){el.innerHTML='<p class=muted>No devices configured.</p>';return;}
@@ -377,6 +361,6 @@ async function load(){let d;try{d=await(await fetch('/api/diag')).json();}catch(
    '<div class=muted style="font-size:.74em;word-break:break-all;margin-top:.3em">raw: '+
    (dev.raw||'(none)')+'</div></div>';
  }).join('');}
-load();setInterval(load,2000);
+load();loadSys();setInterval(function(){load();loadSys();},2000);
 </script>
 )HTML";

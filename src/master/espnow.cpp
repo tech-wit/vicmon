@@ -224,10 +224,18 @@ void sendStatsFrame() {
 static void ensureHistPeer(const uint8_t* mac) {
     if (gHistPeerAdded && memcmp(gHistPeerMac, mac, 6) == 0) return;
     if (gHistPeerAdded) { esp_now_del_peer(gHistPeerMac); gHistPeerAdded = false; }
+    // The slave's MAC may ALREADY be a registered peer — the OTA clone engine
+    // (gOta.ensurePeer) adds the very same unicast peer. In that case
+    // esp_now_add_peer returns ESP_ERR_ESPNOW_EXIST; treat that (and an existing
+    // entry) as success rather than a failure, or the history reply never sends
+    // and the slave's graph sync sticks at 0%. Mirrors OtaEngine::ensurePeer.
+    if (esp_now_is_peer_exist(mac)) { memcpy(gHistPeerMac, mac, 6); gHistPeerAdded = true; return; }
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, mac, 6);
     p.channel = 0; p.encrypt = false; p.ifidx = WIFI_IF_AP;  // master is AP
-    if (esp_now_add_peer(&p) == ESP_OK) { memcpy(gHistPeerMac, mac, 6); gHistPeerAdded = true; }
+    esp_err_t e = esp_now_add_peer(&p);
+    if (e == ESP_OK || e == ESP_ERR_ESPNOW_EXIST) { memcpy(gHistPeerMac, mac, 6); gHistPeerAdded = true; }
+    else Serial.printf("[hist] add_peer failed 0x%x\n", (unsigned)e);
 }
 
 // Serialize one chunk of a ring (chronological order, oldest first) and unicast
