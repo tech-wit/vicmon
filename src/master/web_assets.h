@@ -211,7 +211,7 @@ function setWin(m){chartWin=m;
  var bs=document.querySelectorAll('.winbtn');for(var i=0;i<bs.length;i++)
   bs[i].classList.toggle('active',+bs[i].dataset.m===m);
  loadChart();}
-let busy_loadChart=false;async function loadChart(){if(busy_loadChart||document.hidden)return;busy_loadChart=true;try{await loadChart_();}finally{busy_loadChart=false;}}
+let busy_loadChart=false;async function loadChart(){if(busy_loadChart||document.hidden||(typeof busy_tick!=='undefined'&&busy_tick)||(typeof busy_load!=='undefined'&&busy_load))return;busy_loadChart=true;try{await loadChart_();}finally{busy_loadChart=false;}}
 async function loadChart_(){
  try{chartData=await(await fetch('/api/history?mins='+chartWin)).json();}catch(e){return;}
  drawChart();drawEnvCharts();}

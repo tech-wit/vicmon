@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.13";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.15";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -911,7 +911,7 @@ static void sampleStats() {
 // kept) so current spikes survive, matching what the LCD does. `interval` is
 // reported as the EFFECTIVE column spacing so the chart's right-aligned x-axis
 // still lands each column in the right place.
-static const int kWebHistPts = 180;
+static const int kWebHistPts = 100;  // 760px canvas at ~7px per column; the LCD uses 116
 
 // Writes the JSON straight into the web arena with h.f(): no String, no vector,
 // no per-request allocation of any size.
@@ -1562,7 +1562,6 @@ void setup() {
 
     Serial.printf("[mem] boot: %u\n", (unsigned)ESP.getFreeHeap());
     gFsOk = LittleFS.begin(/*formatOnFail=*/true);
-    webPreallocate();  // fixed build arena, carved BEFORE WiFi/BLE take their share
     Serial.printf("LittleFS: %s\n", gFsOk ? "mounted" : "unavailable (history not persisted)");
     Serial.printf("[mem] post-LittleFS: %u\n", (unsigned)ESP.getFreeHeap());
 
@@ -1672,6 +1671,7 @@ void setup() {
 #ifdef VICMON_DISPLAY
     bringUpDisplay();  // panel + touch + display task (core 1)
 #endif
+    webPreallocate();  // fixed build arena, taken LAST so the big early library blocks stay contiguous
     Serial.printf("[mem] setup done: %u\n", (unsigned)ESP.getFreeHeap());
 }
 

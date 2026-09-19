@@ -242,11 +242,16 @@ int buildAlerts(uint32_t now, String* outArr);
 // web.cpp's arena-backed HtmlOut implements it.
 struct OutSink {
     virtual void put(const char* s, size_t n) = 0;
-    void f(const char* fmt, ...);
+    // Optional fast path: a writable run of n+1 bytes at the sink's tail (nullptr
+    // if the sink cannot offer one); commit(n) then accepts the bytes written.
+    virtual char* reserve(size_t) { return nullptr; }
+    virtual void commit(size_t) {}
+    void f(const char* fmt, ...);   // printf into the sink; correct for ANY length
     virtual ~OutSink() {}
 };
 void buildHistoryInto(int mins, OutSink& out);  // writes into the web build arena
-void webPreallocate();                         // allocate the arena at boot (web.cpp)
+void webPreallocate();
+void webRenderStaticPages();  // re-render cached static page heads (profile switch)                         // allocate the arena at boot (web.cpp)
 ChargeMode chargeMode(const sig::Resolved& ba);
 const char* chargeModeName(ChargeMode m);
 const char* chargeModeDisplayName(ChargeMode m);

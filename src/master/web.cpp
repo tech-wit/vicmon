@@ -21,6 +21,9 @@
 // ---- small JSON helpers ----------------------------------------------------
 static String jbool(bool b) { return b ? "true" : "false"; }
 
+static void jf(OutSink& o, float v, int dp) { char b[24]; dtostrf(v, 0, dp, b); o.put(b, strlen(b)); }
+static void joptf(OutSink& o, float v) { if (isnan(v)) o.put("null", 4); else jf(o, v, 2); }
+static void jb(OutSink& o, bool v) { if (v) o.put("true", 4); else o.put("false", 5); }
 static String buildPanelJson() {
     // Slave role: the registry is empty (no BLE) — build the panel from the last
     // ESP-NOW frame so the mimic/dashboard show the master's live data.
@@ -125,119 +128,88 @@ static String buildPanelJson() {
 }
 
 // Legacy snapshot used by slaves (Phase 4 HTTP fallback).
-static String buildDataJson() {
+static void dataInto(OutSink& o) {
     uint32_t now = millis();
     sig::Resolved soc = R(sig::Role::BatterySOC, now);
     sig::Resolved ba = R(sig::Role::BatteryA, now);
-    const char* mode = chargeModeName(chargeMode(ba));
-    String j = "{";
-    j += "\"system_status\":\"" + String(mode) + "\",";
-    j += "\"battery_soc\":" + String(soc.value, 1) + ",";
-    j += "\"battery_current\":" + String(ba.value, 2) + ",";
-    j += "\"timestamp\":" + String(now / 1000);
-    j += "}";
-    return j;
+    o.f("{\"system_status\":\"%s\",\"battery_soc\":", chargeModeName(chargeMode(ba))); jf(o, soc.value, 1);
+    o.put(",\"battery_current\":",19); jf(o, ba.value, 2);
+    o.f(",\"timestamp\":%lu}", (unsigned long)(now / 1000));
 }
 
 static String jopt(float v) {  // NAN -> null
     return isnan(v) ? String("null") : String(v, 2);
 }
-static String bucketJson(const stats::Bucket& b) {
-    String j = "{";
-    j += "\"solar_ah\":" + String(b.solarAh, 1) + ",\"solar_wh\":" + String(b.solarWh, 0) + ",";
-    j += "\"dcdc_ah\":" + String(b.dcdcAh, 1) + ",\"dcdc_wh\":" + String(b.dcdcWh, 0) + ",";
-    j += "\"charger_ah\":" + String(b.chargerAh, 1) + ",\"charger_wh\":" + String(b.chargerWh, 0) + ",";
-    j += "\"load_ah\":" + String(b.loadAh, 1) + ",\"load_wh\":" + String(b.loadWh, 0) + ",";
-    j += "\"charged_ah\":" + String(b.chargedAh, 1) + ",\"charged_wh\":" + String(b.chargedWh, 0) + ",";
-    j += "\"discharged_ah\":" + String(b.dischargedAh, 1) +
-         ",\"discharged_wh\":" + String(b.dischargedWh, 0) + ",";
-    j += "\"soc_min\":" + jopt(b.socMin) + ",\"soc_max\":" + jopt(b.socMax) + ",";
-    j += "\"v_min\":" + jopt(b.vMin) + ",\"v_max\":" + jopt(b.vMax) + ",";
-    j += "\"peak_solar_w\":" + String(b.peakSolarW, 0) +
-         ",\"peak_load_w\":" + String(b.peakLoadW, 0) + ",";
-    j += "\"peak_charge_a\":" + String(b.peakChargeA, 1) +
-         ",\"peak_discharge_a\":" + String(b.peakDischargeA, 1) + ",";
-    j += "\"charge_secs\":" + String(b.chargeSecs) +
-         ",\"discharge_secs\":" + String(b.dischargeSecs) + ",";
-    j += "\"duration_secs\":" + String(b.durationSecs) +
-         ",\"start_epoch\":" + String(b.startEpoch);
-    j += "}";
-    return j;
+static void bucketInto(OutSink& o, const stats::Bucket& b) {
+    o.put("{\"solar_ah\":",12); jf(o,b.solarAh,1); o.put(",\"solar_wh\":",12); jf(o,b.solarWh,0);
+    o.put(",\"dcdc_ah\":",11); jf(o,b.dcdcAh,1); o.put(",\"dcdc_wh\":",11); jf(o,b.dcdcWh,0);
+    o.put(",\"charger_ah\":",14); jf(o,b.chargerAh,1); o.put(",\"charger_wh\":",14); jf(o,b.chargerWh,0);
+    o.put(",\"load_ah\":",11); jf(o,b.loadAh,1); o.put(",\"load_wh\":",11); jf(o,b.loadWh,0);
+    o.put(",\"charged_ah\":",14); jf(o,b.chargedAh,1); o.put(",\"charged_wh\":",14); jf(o,b.chargedWh,0);
+    o.put(",\"discharged_ah\":",17); jf(o,b.dischargedAh,1); o.put(",\"discharged_wh\":",17); jf(o,b.dischargedWh,0);
+    o.put(",\"soc_min\":",11); joptf(o,b.socMin); o.put(",\"soc_max\":",11); joptf(o,b.socMax);
+    o.put(",\"v_min\":",9); joptf(o,b.vMin); o.put(",\"v_max\":",9); joptf(o,b.vMax);
+    o.put(",\"peak_solar_w\":",16); jf(o,b.peakSolarW,0); o.put(",\"peak_load_w\":",15); jf(o,b.peakLoadW,0);
+    o.put(",\"peak_charge_a\":",17); jf(o,b.peakChargeA,1); o.put(",\"peak_discharge_a\":",20); jf(o,b.peakDischargeA,1);
+    o.f(",\"charge_secs\":%lu,\"discharge_secs\":%lu,\"duration_secs\":%lu,\"start_epoch\":%lu}",
+        (unsigned long)b.chargeSecs,(unsigned long)b.dischargeSecs,(unsigned long)b.durationSecs,(unsigned long)b.startEpoch);
 }
 // A slave has no local stats::Stats — it receives the master's energy summary as
 // an ESP-NOW StatsFrame (Ah + durations, plus per-day Ah bars). Emit the same JSON
 // shape the Stats page expects; the fields the frame doesn't carry (Wh, peaks, SoC/
 // V ranges, per-scope start epoch) are 0 / null (the page treats SoC as optional).
-static String slaveBucketJson(const slavelink::StatMeterW& m) {
-    String j = "{";
-    j += "\"solar_ah\":" + String((float)m.solarAh, 1) + ",\"solar_wh\":0,";
-    j += "\"dcdc_ah\":" + String((float)m.dcdcAh, 1) + ",\"dcdc_wh\":0,";
-    j += "\"charger_ah\":" + String((float)m.chargerAh, 1) + ",\"charger_wh\":0,";
-    j += "\"load_ah\":" + String((float)m.loadAh, 1) + ",\"load_wh\":0,";
-    j += "\"charged_ah\":" + String((float)m.inAh, 1) + ",\"charged_wh\":0,";
-    j += "\"discharged_ah\":" + String((float)m.outAh, 1) + ",\"discharged_wh\":0,";
-    j += "\"soc_min\":null,\"soc_max\":null,\"v_min\":null,\"v_max\":null,";
-    j += "\"peak_solar_w\":0,\"peak_load_w\":0,\"peak_charge_a\":0,\"peak_discharge_a\":0,";
-    j += "\"charge_secs\":0,\"discharge_secs\":0,";
-    j += "\"duration_secs\":" + String(m.durSecs) + ",\"start_epoch\":0";
-    j += "}";
-    return j;
+static void slaveBucketInto(OutSink& o, const slavelink::StatMeterW& m) {
+    o.f("{\"solar_ah\":%lu.0,\"solar_wh\":0,\"dcdc_ah\":%lu.0,\"dcdc_wh\":0,\"charger_ah\":%lu.0,\"charger_wh\":0,"
+        "\"load_ah\":%lu.0,\"load_wh\":0,\"charged_ah\":%lu.0,\"charged_wh\":0,\"discharged_ah\":%lu.0,\"discharged_wh\":0,",
+        (unsigned long)m.solarAh,(unsigned long)m.dcdcAh,(unsigned long)m.chargerAh,(unsigned long)m.loadAh,(unsigned long)m.inAh,(unsigned long)m.outAh);
+    o.f("\"soc_min\":null,\"soc_max\":null,\"v_min\":null,\"v_max\":null,\"peak_solar_w\":0,\"peak_load_w\":0,"
+        "\"peak_charge_a\":0,\"peak_discharge_a\":0,\"charge_secs\":0,\"discharge_secs\":0,\"duration_secs\":%lu,\"start_epoch\":0}",
+        (unsigned long)m.durSecs);
 }
-static String buildSlaveStatsJson() {
+static void slaveStatsInto(OutSink& o) {
     const slavelink::StatsFrame& f = gRx.stats();  // all-zero until the first frame
     uint32_t epoch = currentLocalEpoch();           // slave adopts the master's clock
-    String j = "{";
-    j += "\"clock\":" + jbool(f.clockOk != 0) + ",\"clock_ro\":true,\"now_epoch\":" + String(epoch) +
-         ",\"run_day\":" + String(f.clockOk ? 0 : f.dayNow) + ",";
-    j += "\"today\":" + slaveBucketJson(f.today) + ",";
-    j += "\"trip\":"  + slaveBucketJson(f.trip)  + ",";
-    j += "\"total\":" + slaveBucketJson(f.total) + ",";
-    j += "\"days\":[";
+    o.f("{\"clock\":%s,\"clock_ro\":true,\"now_epoch\":%lu,\"run_day\":%lu,\"today\":",
+        f.clockOk ? "true" : "false", (unsigned long)epoch, (unsigned long)(f.clockOk ? 0 : f.dayNow));
+    slaveBucketInto(o, f.today); o.put(",\"trip\":",8); slaveBucketInto(o, f.trip);
+    o.put(",\"total\":",9); slaveBucketInto(o, f.total); o.put(",\"days\":[",9);
     int nd = f.dayCount > 7 ? 7 : f.dayCount;
-    for (int i = 0; i < nd; ++i) {
-        if (i) j += ",";
-        j += "{\"stamp\":" + String(f.dayStamp[i]) +
-             ",\"solar_ah\":" + String((float)f.daySolarAh[i], 1) +
-             ",\"dcdc_ah\":" + String((float)f.dayDcdcAh[i], 1) +
-             ",\"charger_ah\":" + String((float)f.dayChargerAh[i], 1) +
-             ",\"load_ah\":" + String((float)f.dayLoadAh[i], 1) +
-             ",\"soc_min\":null,\"soc_max\":null}";
-    }
-    j += "]}";
-    return j;
+    for (int i = 0; i < nd; ++i)
+        o.f("%s{\"stamp\":%lu,\"solar_ah\":%u.0,\"dcdc_ah\":%u.0,\"charger_ah\":%u.0,\"load_ah\":%u.0,\"soc_min\":null,\"soc_max\":null}",
+            i ? "," : "", (unsigned long)f.dayStamp[i], (unsigned)f.daySolarAh[i], (unsigned)f.dayDcdcAh[i],
+            (unsigned)f.dayChargerAh[i], (unsigned)f.dayLoadAh[i]);
+    o.put("]}",2);
 }
-static String buildStatsJson() {
-    if (gRole == ROLE_SLAVE) return buildSlaveStatsJson();
+static void statsInto(OutSink& o) {
+    if (gRole == ROLE_SLAVE) { slaveStatsInto(o); return; }
     uint32_t epoch = currentLocalEpoch();
-    String j = "{";
     // clock=true when a real/manual clock is set (day labels are dates); otherwise
     // days come from the run-time odometer and run_day is the current index.
-    j += "\"clock\":" + jbool(epoch != 0) + ",\"clock_ro\":false,\"now_epoch\":" + String(epoch) +
-         ",\"run_day\":" + String(gStats.runDay()) + ",";
-    j += "\"today\":" + bucketJson(gStats.bucket(stats::TODAY)) + ",";
-    j += "\"trip\":" + bucketJson(gStats.bucket(stats::TRIP)) + ",";
-    j += "\"total\":" + bucketJson(gStats.bucket(stats::TOTAL)) + ",";
-    j += "\"days\":[";
+    o.f("{\"clock\":%s,\"clock_ro\":false,\"now_epoch\":%lu,\"run_day\":%lu,\"today\":",
+        epoch ? "true" : "false", (unsigned long)epoch, (unsigned long)gStats.runDay());
+    bucketInto(o, gStats.bucket(stats::TODAY)); o.put(",\"trip\":",8); bucketInto(o, gStats.bucket(stats::TRIP));
+    o.put(",\"total\":",9); bucketInto(o, gStats.bucket(stats::TOTAL)); o.put(",\"days\":[",9);
     for (size_t i = 0; i < gStats.dayCount(); ++i) {
         const stats::DayRecord& d = gStats.day(i);
-        if (i) j += ",";
-        j += "{\"stamp\":" + String(d.dayStamp) +
-             ",\"solar_ah\":" + String(d.solarAh, 1) +
-             ",\"dcdc_ah\":" + String(d.dcdcAh, 1) +
-             ",\"charger_ah\":" + String(d.chargerAh, 1) +
-             ",\"load_ah\":" + String(d.loadAh, 1) +
-             ",\"charged_ah\":" + String(d.chargedAh, 1) +
-             ",\"discharged_ah\":" + String(d.dischargedAh, 1) +
-             ",\"soc_min\":" + jopt(d.socMin) + ",\"soc_max\":" + jopt(d.socMax) + "}";
+        o.f("%s{\"stamp\":%lu,\"solar_ah\":", i ? "," : "", (unsigned long)d.dayStamp); jf(o,d.solarAh,1);
+        o.put(",\"dcdc_ah\":",11); jf(o,d.dcdcAh,1); o.put(",\"charger_ah\":",14); jf(o,d.chargerAh,1);
+        o.put(",\"load_ah\":",11); jf(o,d.loadAh,1); o.put(",\"charged_ah\":",14); jf(o,d.chargedAh,1);
+        o.put(",\"discharged_ah\":",17); jf(o,d.dischargedAh,1);
+        o.put(",\"soc_min\":",11); joptf(o,d.socMin); o.put(",\"soc_max\":",11); joptf(o,d.socMax); o.put("}",1);
     }
-    j += "]}";
-    return j;
+    o.put("]}",2);
 }
 
 // ---- web app ---------------------------------------------------------------
 
 
 
+
+// Lowest free heap seen on the web path since the last reset of the counter
+// (GET /api/sys?reset=1). ESP.getMinFreeHeap() is since boot and cannot be
+// reset, which makes per-request measurement impossible without rebooting.
+static uint32_t gWebMinFree = 0xFFFFFFFF;
+static inline void webSample() { uint32_t f = ESP.getFreeHeap(); if (f < gWebMinFree) gWebMinFree = f; }
 
 static String pageHead(const char* active) {
     String h = F("<!doctype html><html><head><meta charset=utf-8>"
@@ -291,6 +263,60 @@ static String pageHead(const char* active) {
     return h;
 }
 static String pageFoot() { return F("</main></body></html>"); }
+
+// ---- static page cache -------------------------------------------------------
+// The three literal pages (/, /stats, /diag) are head + flash body + foot. The
+// head depends only on the role (fixed at boot) and the profile name, so ONE
+// copy is rendered at boot into a fixed buffer and re-rendered on a profile
+// switch or rename; which tab is highlighted is set by a one-line script from
+// location.pathname. Serving a static page is three segments and no build: it
+// never touches an arena, so a page load and the API poll a browser fires
+// alongside it cannot contend.
+static const char* const kFootLit = "</main></body></html>";
+static const size_t kHeadCap = 1536;
+static char gStaticHead[kHeadCap];
+static size_t gStaticHeadLen = 0;
+static int gStaticProfile = -1;
+static bool gStaticDirty = false;
+static int gStaticInflight = 0;
+static const char* gStaticBodies[3] = {nullptr, nullptr, nullptr};
+static void staticRender() {
+    String h = pageHead("");   // the one remaining String here: at boot / profile change only
+    h += F("<script>(function(){var a=document.querySelector(\"nav a[href='\"+location.pathname+\"']\");if(a)a.className='active';})();</script>");
+    if (h.length() >= kHeadCap) {  // never truncate silently: a first cut at 1280 bytes clipped the clock script
+        Serial.printf("[web] static head %u bytes exceeds %u — NOT cached\n", (unsigned)h.length(), (unsigned)kHeadCap);
+        gStaticHeadLen = 0; return;
+    }
+    memcpy(gStaticHead, h.c_str(), h.length()); gStaticHeadLen = h.length();
+    gStaticProfile = gProfiles.active(); gStaticDirty = false;
+    Serial.printf("[web] static head cached: %u bytes\n", (unsigned)gStaticHeadLen);
+}
+void webRenderStaticPages() {
+    gStaticBodies[0] = kMimicPage; gStaticBodies[1] = kStatsPage; gStaticBodies[2] = kDiagPage;
+    if (gStaticInflight == 0) staticRender(); else gStaticDirty = true;
+}
+static void serveStaticCached(AsyncWebServerRequest* req, int idx) {
+    if ((gStaticDirty || gStaticProfile != gProfiles.active()) && gStaticInflight == 0) staticRender();
+    if (!gStaticHeadLen) { req->send(507, "text/plain", "page head not cached"); return; }
+    const char* body = gStaticBodies[idx];
+    ++gStaticInflight;
+    std::shared_ptr<void> token(nullptr, [](void*) { --gStaticInflight; });
+    const size_t hl = gStaticHeadLen, bodyLen = strlen(body), footLen = strlen(kFootLit);
+    req->send(req->beginChunkedResponse("text/html",
+        [token, body, hl, bodyLen, footLen](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            webSample();
+            const char* src; size_t avail;
+            if (index < hl)                          { src = gStaticHead + index; avail = hl - index; }
+            else if (index < hl + bodyLen)           { src = body + (index - hl); avail = hl + bodyLen - index; }
+            else if (index < hl + bodyLen + footLen) { src = kFootLit + (index - hl - bodyLen); avail = hl + bodyLen + footLen - index; }
+            else return 0;
+            const size_t n = maxLen < avail ? maxLen : avail;
+            memcpy(buf, src, n);
+            return n;
+        }));
+}
+// Generated pages use the same cached head as a RAM segment (no build, no copy).
+static void headInto(struct HtmlOut& h);
 
 static String keyHex(const uint8_t* k) {
     char b[33];
@@ -348,64 +374,85 @@ static String jsEsc(String s) {
 // String (+ the copy req->send(String) makes) either came back BLANK or, when
 // pre-allocated big, crashed the AsyncTCP task and dropped WiFi. Pieces stay small
 // and non-contiguous, so they fit the fragmented heap and need no copy.
-// ---- boot-allocated build arena ---------------------------------------------
-// Every page and the history JSON are built into ONE buffer allocated at boot,
-// with a fixed table of segments that either point straight into flash (the
-// literals, never copied) or into the arena (the generated text). Nothing in
-// this path is allocated per request any more: no vector, no retained String,
-// no per-page new. The cost is fixed and known at boot, one build runs at a
-// time (the mutex is held until the response has fully gone out), and a second
-// concurrent build gets a 503 rather than a second buffer.
+// ---- boot-allocated build arenas --------------------------------------------
+// Every page and every API body is built into a fixed buffer allocated at
+// boot, with a fixed segment table whose entries point either straight into
+// flash (literals, never copied) or into the arena (generated text). Nothing in
+// this path is allocated per request: no vector, no retained String, no new.
 //
-// Sizing: the largest generated content is the history JSON at kWebHistPts
-// columns x 10 series, ~12KB; pages generate 1-5KB on top of their literals.
-static const size_t kArenaSize = 16 * 1024;
-static const int kMaxSegs = 160;
+// One 10KB arena: generated pages (<= ~4.2KB), the history JSON (<= ~7.2KB at
+// 100 columns) and the API bodies (<= ~3.5KB). A second 5KB arena for the APIs
+// was tried to keep a page and its poll from waiting on each other; measured,
+// contention was gone once the static pages stopped building, and its 5KB
+// was worth more back in the pool. Taken LAST in setup() so the big early WiFi/NimBLE blocks stay
+// contiguous (largest free block at boot: 53,236 none / 32,756 carved first /
+// 40,948 carved last). One build per arena at a time; the mutex is held until
+// the response has fully drained, and a second taker waits up to 50ms.
 struct Seg { const char* p = nullptr; size_t len = 0; };
-static uint8_t* gArena = nullptr;
-static Seg gSegs[kMaxSegs];
-static int gSegN = 0;
-static size_t gArenaUsed = 0, gArenaHigh = 0;   // high-water for the diag line
-static bool gArenaOverflow = false;
-static SemaphoreHandle_t gArenaMux = nullptr;
+struct Arena {
+    const char* name; size_t size; Seg* segs; int maxSegs;
+    uint8_t* buf = nullptr; int n = 0; size_t used = 0, high = 0; bool overflow = false;
+    SemaphoreHandle_t mux = nullptr;
+    void init() {
+        buf = static_cast<uint8_t*>(malloc(size)); mux = xSemaphoreCreateMutex();
+        Serial.printf("[mem] %s arena %uB: %s\n", name, (unsigned)size, (buf && mux) ? "ok" : "FAILED");
+    }
+    bool take() {
+        if (!buf || !mux) return false;
+        if (xSemaphoreTake(mux, pdMS_TO_TICKS(50)) != pdTRUE) { Serial.printf("[arena] %s busy\n", name); return false; }
+        n = 0; used = 0; overflow = false; return true;
+    }
+    void give() { if (mux) xSemaphoreGive(mux); }
+};
+static const size_t kArenaSize = 10 * 1024;  // history <= ~7.2KB at 100 cols; largest generated page ~4.2KB
+static Seg gPageSegs[160];   // segment table: static, allocated at start-up
+static Arena gPageArena{"page", kArenaSize, gPageSegs, 160};
+
+// Aliases so the page-arena diagnostics (webtest, /api/sys) read naturally.
+static int& gSegN = gPageArena.n;
+static Seg* const gSegs = gPageSegs;
+static size_t& gArenaUsed = gPageArena.used;
+static size_t& gArenaHigh = gPageArena.high;
+static bool& gArenaOverflow = gPageArena.overflow;
 
 void webPreallocate() {
-    gArena = static_cast<uint8_t*>(malloc(kArenaSize));
-    gArenaMux = xSemaphoreCreateMutex();
-    Serial.printf("[mem] web arena %uB: %s\n", (unsigned)kArenaSize, gArena ? "ok" : "FAILED");
+    gPageArena.init();
+    webRenderStaticPages();
 }
-// Waits briefly: a browser fetches the page, then its CSS and first API call
-// within milliseconds, and the page response may still be draining. Blocking
-// the TCP task for up to 30ms is far cheaper than a 503 the chart has to retry.
-static bool arenaTake() {
-    if (!gArena || !gArenaMux) return false;
-    if (xSemaphoreTake(gArenaMux, pdMS_TO_TICKS(30)) != pdTRUE) return false;
-    gSegN = 0; gArenaUsed = 0; gArenaOverflow = false;
-    return true;
-}
-static void arenaGive() { if (gArenaMux) xSemaphoreGive(gArenaMux); }
+static bool arenaTake() { return gPageArena.take(); }
+static void arenaGive() { gPageArena.give(); }
 
 struct HtmlOut : OutSink {
+    Arena& a;
+    explicit HtmlOut(Arena& ar = gPageArena) : a(ar) {}
     static const size_t kMinLit = 48;  // shorter literals are copied; a segment costs a table slot
-    // Append generated text at the arena tail, extending the open arena segment
-    // if the last segment is one (so runs of small appends share a slot).
     void put(const char* src, size_t n) override {
-        if (gArenaOverflow) return;
-        if (gArenaUsed + n > kArenaSize) { gArenaOverflow = true; return; }
-        const char* tailEnd = reinterpret_cast<char*>(gArena) + gArenaUsed;
-        Seg* tail = (gSegN && gSegs[gSegN - 1].p + gSegs[gSegN - 1].len == tailEnd) ? &gSegs[gSegN - 1] : nullptr;
+        if (a.overflow) return;
+        if (a.used + n > a.size) { a.overflow = true; return; }
+        const char* tailEnd = reinterpret_cast<char*>(a.buf) + a.used;
+        Seg* tail = (a.n && a.segs[a.n - 1].p + a.segs[a.n - 1].len == tailEnd) ? &a.segs[a.n - 1] : nullptr;
         if (!tail) {
-            if (gSegN >= kMaxSegs) { gArenaOverflow = true; return; }
-            tail = &gSegs[gSegN++]; tail->p = tailEnd; tail->len = 0;
+            if (a.n >= a.maxSegs) { a.overflow = true; return; }
+            tail = &a.segs[a.n++]; tail->p = tailEnd; tail->len = 0;
         }
-        memcpy(gArena + gArenaUsed, src, n);
-        tail->len += n; gArenaUsed += n;
-        if (gArenaUsed > gArenaHigh) gArenaHigh = gArenaUsed;
+        memcpy(a.buf + a.used, src, n);
+        tail->len += n; a.used += n;
+        if (a.used > a.high) a.high = a.used;
+    }
+    char* reserve(size_t n) override {   // f()'s fast path: format straight into the arena tail
+        if (a.overflow || a.used + n + 1 > a.size) return nullptr;
+        return reinterpret_cast<char*>(a.buf) + a.used;
+    }
+    void commit(size_t n) override {     // the bytes are already in place; account for them like put()
+        const char* tailEnd = reinterpret_cast<char*>(a.buf) + a.used;
+        Seg* tail = (a.n && a.segs[a.n - 1].p + a.segs[a.n - 1].len == tailEnd) ? &a.segs[a.n - 1] : nullptr;
+        if (!tail) { if (a.n >= a.maxSegs) { a.overflow = true; return; } tail = &a.segs[a.n++]; tail->p = tailEnd; tail->len = 0; }
+        tail->len += n; a.used += n; if (a.used > a.high) a.high = a.used;
     }
     void lit(const char* p, size_t n) {   // flash literal: reference, never copy
-        if (gArenaOverflow) return;
-        if (gSegN >= kMaxSegs) { gArenaOverflow = true; return; }
-        gSegs[gSegN].p = p; gSegs[gSegN].len = n; ++gSegN;
+        if (a.overflow) return;
+        if (a.n >= a.maxSegs) { a.overflow = true; return; }
+        a.segs[a.n].p = p; a.segs[a.n].len = n; ++a.n;
     }
     HtmlOut& operator+=(const String& s) { put(s.c_str(), s.length()); return *this; }
     HtmlOut& operator+=(const char* s) { size_t n = strlen(s); if (n < kMinLit) put(s, n); else lit(s, n); return *this; }
@@ -414,54 +461,83 @@ struct HtmlOut : OutSink {
 };
 // printf straight into whichever sink — the allocation-free way to emit numbers.
 void OutSink::f(const char* fmt, ...) {
-    char b[96]; va_list ap; va_start(ap, fmt);
+    // A first version formatted into a 96-byte stack buffer and silently
+    // truncated anything longer, which broke the diag JSON at character 95 and
+    // left the stats bucket line one wide number away from the same. Size the
+    // output first; short goes via the stack, long is written straight into the
+    // sink's tail when it offers one, and otherwise through a temporary.
+    char b[96]; va_list ap, ap2; va_start(ap, fmt); va_copy(ap2, ap);
     int n = vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
-    if (n > 0) put(b, static_cast<size_t>(n) < sizeof(b) ? n : sizeof(b) - 1);
+    if (n < 0) { va_end(ap2); return; }
+    if (static_cast<size_t>(n) < sizeof(b)) { put(b, n); va_end(ap2); return; }
+    char* dst = reserve(n);
+    if (dst) { vsnprintf(dst, n + 1, fmt, ap2); commit(n); }
+    else { char* t = static_cast<char*>(malloc(n + 1)); if (t) { vsnprintf(t, n + 1, fmt, ap2); put(t, n); free(t); } }
+    va_end(ap2);
 }
 
-// Stream the segment table. The token's deleter releases the arena when the
-// response is destroyed, i.e. after the last chunk has gone out.
-static void serveArena(AsyncWebServerRequest* req, const char* type) {
-    if (gArenaOverflow) {
-        arenaGive();
-        req->send(507, "text/plain", "page exceeds build arena");
+static void headInto(HtmlOut& h) {
+    if ((gStaticDirty || gStaticProfile != gProfiles.active()) && gStaticInflight == 0) staticRender();
+    if (gStaticHeadLen) h.lit(gStaticHead, gStaticHeadLen);   // lit() just references memory; RAM works as well as flash
+    else h += pageHead("");
+}
+
+// Stream an arena's segment table. The token's deleter releases the arena when
+// the response is destroyed, i.e. after the last chunk has gone out.
+static void serveArena(AsyncWebServerRequest* req, const char* type, Arena& a = gPageArena) {
+    if (a.overflow) {
+        a.give();
+        req->send(507, "text/plain", "response exceeds build arena");
         return;
     }
-    std::shared_ptr<void> token(nullptr, [](void*) { arenaGive(); });
+    // The arena is needed only until the library has copied the last byte into
+    // its own send buffer — not until the client closes the socket, which can be
+    // hundreds of milliseconds later and is what made a page and its poll, fired
+    // together by the browser, collide. Release on the final read; the token's
+    // deleter is the backstop if the response is torn down early.
+    Arena* ap = &a;
+    size_t total = 0; for (int i = 0; i < a.n; ++i) total += a.segs[i].len;
+    auto released = std::make_shared<bool>(false);
+    auto release = [ap, released]() { if (!*released) { *released = true; ap->give(); } };
+    std::shared_ptr<void> token(nullptr, [release](void*) { release(); });
     req->send(req->beginChunkedResponse(type,
-        [token](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
-            size_t pos = 0;
-            for (int i = 0; i < gSegN; ++i) {
-                const size_t len = gSegs[i].len;
-                if (index < pos + len) {
-                    const size_t off = index - pos;
-                    const size_t n = (maxLen < len - off) ? maxLen : (len - off);
-                    memcpy(buf, gSegs[i].p + off, n);
-                    return n;
+        [token, ap, total, release](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            webSample();
+            if (index >= total) { release(); return 0; }
+            size_t pos = 0, out = 0;
+            for (int i = 0; i < ap->n && out < maxLen && index + out < total; ++i) {
+                const size_t len = ap->segs[i].len;
+                if (index + out < pos + len) {
+                    const size_t off = index + out - pos;
+                    const size_t n = ((maxLen - out) < len - off) ? (maxLen - out) : (len - off);
+                    memcpy(buf + out, ap->segs[i].p + off, n);
+                    out += n;
                 }
                 pos += len;
             }
-            return 0;
+            if (index + out >= total) release();   // last bytes handed over: free the arena now
+            return out;
         }));
-}
-// Static page = nav head + one flash literal + foot, through the same path.
-static void serveStatic(AsyncWebServerRequest* req, const char* active, const char* body) {
-    HtmlOut h;
-    h += pageHead(active);
-    h.lit(body, strlen(body));
-    h += pageFoot();
-    serveArena(req, "text/html");
 }
 
 // Answer 503 instead of building anything when the heap is already low. A
 // browser click-through drives free heap down through connection concurrency,
 // not any one payload; refusing the next page while short costs the user one
 // retry and costs the board nothing, where building it anyway is how it wedges.
-static bool shedIfLow(AsyncWebServerRequest* req) {
-    // Retuned for the reserved arena: page builds no longer come out of this
-    // pool, so what is left to shed is library churn (lwIP / AsyncTCP / NimBLE),
-    // and the supervisor's own floors sit at 12KB / 16KB.
-    if (ESP.getMaxAllocHeap() >= 14 * 1024 && ESP.getFreeHeap() >= 22 * 1024) return false;
+// API polls retry silently every few seconds, so they are shed early; a page
+// is what the user is looking at, so it goes through unless memory is critical.
+static bool shedIfLow(AsyncWebServerRequest* req, bool page = false) {
+    webSample();
+    const uint32_t blk = ESP.getMaxAllocHeap(), fr = ESP.getFreeHeap();
+    // Measured in-flight cost on the Capsule: a small chunked API ~5KB, a page
+    // 10-14KB, so a page load with two polls is 25-30KB out of ~50KB idle. The
+    // API threshold sits at the supervisor's own floor (12KB / 16KB): shed a
+    // poll rather than let the pool reach the level that triggers a restart.
+    const bool ok = page ? (blk >= 10 * 1024 && fr >= 14 * 1024)
+                         : (blk >= 12 * 1024 && fr >= 16 * 1024);
+    if (ok) return false;
+    Serial.printf("[shed] %s %s blk=%lu free=%lu\n", page ? "page" : "api", req->url().c_str(),
+                  (unsigned long)blk, (unsigned long)fr);
     AsyncWebServerResponse* r = req->beginResponse(503, "text/plain", "busy");
     r->addHeader("Retry-After", "2");
     req->send(r);
@@ -472,7 +548,7 @@ static bool shedIfLow(AsyncWebServerRequest* req) {
 
 static void devicesPage(HtmlOut& h) {
     uint32_t now = millis();
-    h += pageHead("/devices");
+    headInto(h);
 
     h += "<div class=card><h3>Configured devices</h3>";
     if (gConfig.count() == 0) h += "<p class=muted>None yet.</p>";
@@ -539,28 +615,28 @@ else if(l.indexOf('charg')>=0||l.indexOf('blue')>=0)t='charger';
 document.getElementById('addName').value=n||'';document.getElementById('addType').value=t;
 location.hash='#add';document.getElementById('addKey').focus();}</script>)JS";
 
-    h += pageFoot();
+    h.lit(kFootLit, strlen(kFootLit));
 }
 
-static String apCard();
-static String wifiCard();
-static String profilesCard();
-static String backupCard();
-static String otaCard();
-static String systemCard();
+static void apCard(HtmlOut& out);
+static void wifiCard(HtmlOut& out);
+static void profilesCard(HtmlOut& out);
+static void backupCard(HtmlOut& out);
+static void otaCard(HtmlOut& out);
+static void systemCard(HtmlOut& out);
 
 static void bindingsPage(HtmlOut& h) {
-    h += pageHead("/bindings");
+    headInto(h);
     // A slave owns no BLE devices/profiles/bindings/alerts of its own — it mirrors a
     // master over ESP-NOW. Show only what it actually controls: pair/role (system),
     // its config AP, and OTA. The master-only cards (profiles, panel signals, system
     // tunables, alerts, WiFi-join, backup) would be empty or would break the link
     // (joining a router moves the SoftAP off ch1), so they're hidden.
     if (gRole == ROLE_SLAVE) {  // nothing here belongs to a slave — see /network
-        h += pageFoot();
+        h.lit(kFootLit, strlen(kFootLit));
         return;
     }
-    h += profilesCard();
+    profilesCard(h);
     h += "<div class=card><h3>Panel signals</h3>"
          "<p class=muted>Tag which device field feeds each signal the mimic / "
          "display uses. Derived options compute from the battery current vs the "
@@ -683,7 +759,7 @@ static void bindingsPage(HtmlOut& h) {
          "A configured device that stops broadcasting also raises a warning. On an "
          "M5Capsule the buzzer chirps while the battery is SoC-critical.</p></div>";
 
-    h += pageFoot();
+    h.lit(kFootLit, strlen(kFootLit));
 }
 
 // Connectivity and system control, split off /bindings so neither page has to be
@@ -692,13 +768,13 @@ static void bindingsPage(HtmlOut& h) {
 // heap down to nothing. Splitting halves the peak again on top of building the
 // selects client-side, and it is also where a slave's own controls live.
 static void networkPage(HtmlOut& h) {
-    h += pageHead("/network");
-    h += systemCard();
-    h += apCard();
-    if (gRole != ROLE_SLAVE) h += wifiCard();  // joining a router moves the AP off ch1
-    h += otaCard();
-    if (gRole != ROLE_SLAVE) h += backupCard();
-    h += pageFoot();
+    headInto(h);
+    systemCard(h);
+    apCard(h);
+    if (gRole != ROLE_SLAVE) wifiCard(h);  // joining a router moves the AP off ch1
+    otaCard(h);
+    if (gRole != ROLE_SLAVE) backupCard(h);
+    h.lit(kFootLit, strlen(kFootLit));
 }
 
 // Serial self-test: build both big pages into pieces (the path that was OOM-crashing)
@@ -849,7 +925,7 @@ static void handleBind(AsyncWebServerRequest* req) {
     req->redirect("/bindings");
 }
 
-static String wifiCard() {
+static void wifiCard(HtmlOut& out) {
     String status;
     if (gStaSsid.length()) {
         status = (WiFi.status() == WL_CONNECTED)
@@ -858,7 +934,7 @@ static String wifiCard() {
     } else {
         status = "<span class=muted>Not configured (AP only)</span>";
     }
-    return "<div class=card><h3>Join a WiFi network</h3>"
+    out += "<div class=card><h3>Join a WiFi network</h3>"
            "<p class=muted>The master always keeps its own <b>" + String(kApSsid) +
            "</b> access point, and can additionally join an existing network (e.g. a "
            "van router) so you can reach it there too.</p>"
@@ -871,8 +947,8 @@ static String wifiCard() {
            "<input type=hidden name=ssid value=''><button class=ghost>forget</button></form></div>";
 }
 
-static String apCard() {
-    return "<div class=card><h3>Access point</h3>"
+static void apCard(HtmlOut& out) {
+    out += "<div class=card><h3>Access point</h3>"
            "<p class=muted>This master's own WiFi hotspot. Saving reboots the device "
            "&mdash; you'll need to reconnect your phone/laptop to the new network, then "
            "open <b>http://192.168.4.1/</b>.</p>"
@@ -926,39 +1002,39 @@ static void handleWifi(AsyncWebServerRequest* req) {
     req->redirect("/network");
 }
 
-static String profilesCard() {
-    String h = "<div class=card><h3>Profiles</h3>"
+static void profilesCard(HtmlOut& out) {
+    out += "<div class=card><h3>Profiles</h3>"
          "<p class=muted>Each profile has its own devices, signal bindings and "
          "settings (e.g. Home vs 4WD). Switching applies immediately.</p>";
     for (int i = 0; i < ProfileManager::kMax; ++i) {
         if (!gProfiles.used(i)) continue;
         bool act = (i == gProfiles.active());
-        h += "<div style='padding:.5em 0;border-bottom:1px solid var(--line);display:flex;"
+        out += "<div style='padding:.5em 0;border-bottom:1px solid var(--line);display:flex;"
              "gap:.5em;align-items:center;flex-wrap:wrap'>";
-        h += "<b style='flex:1'>" + String(gProfiles.name(i)) +
+        out += "<b style='flex:1'>" + String(gProfiles.name(i)) +
              (act ? " <span class=muted>(active)</span>" : "") + "</b>";
         if (!act)
-            h += "<form method=post action=/profile/switch style='margin:0'>"
+            out += "<form method=post action=/profile/switch style='margin:0'>"
                  "<input type=hidden name=id value=" + String(i) + "><button>switch</button></form>";
-        h += "<form class=inline method=post action=/profile/rename style='margin:0'>"
+        out += "<form class=inline method=post action=/profile/rename style='margin:0'>"
              "<input type=hidden name=id value=" + String(i) + ">"
              "<input name=name value='" + String(gProfiles.name(i)) + "' size=12>"
              "<button class=ghost>rename</button></form>";
         if (!act && gProfiles.usedCount() > 1)
-            h += "<form method=post action=/profile/del style='margin:0' "
+            out += "<form method=post action=/profile/del style='margin:0' "
                  "onsubmit=\"return confirm('Delete this profile and all its data?')\">"
                  "<input type=hidden name=id value=" + String(i) + ">"
                  "<button class=danger>delete</button></form>";
-        h += "</div>";
+        out += "</div>";
     }
     if (gProfiles.usedCount() < ProfileManager::kMax)
-        h += "<form class=inline method=post action=/profile/new style='margin-top:.8em'>"
+        out += "<form class=inline method=post action=/profile/new style='margin-top:.8em'>"
              "<div><label>New profile name</label><input name=name required></div>"
              "<button>create</button></form>";
     else
-        h += "<p class=muted>Maximum profiles reached.</p>";
-    h += "</div>";
-    return h;
+        out += "<p class=muted>Maximum profiles reached.</p>";
+    out += "</div>";
+    return;
 }
 
 static void handleProfileSwitch(AsyncWebServerRequest* req) {
@@ -978,6 +1054,7 @@ static void handleProfileNew(AsyncWebServerRequest* req) {
 }
 static void handleProfileRename(AsyncWebServerRequest* req) {
     gProfiles.rename(param(req, "id").toInt(), param(req, "name").c_str());
+    webRenderStaticPages();  // the profile name is baked into the cached head
     req->redirect("/bindings");
 }
 static void handleProfileDel(AsyncWebServerRequest* req) {
@@ -1135,8 +1212,8 @@ static void handleImport(AsyncWebServerRequest* req) {
     req->send(ok ? 200 : 400, "application/json", String("{\"ok\":") + (ok ? "true" : "false") + "}");
 }
 
-static String backupCard() {
-    return F(
+static void backupCard(HtmlOut& out) {
+    out += F(
         "<div class=card><h3>Backup &amp; restore</h3>"
         "<p class=muted>Download every profile (devices, encryption keys, signal "
         "bindings and settings) as a JSON file, or restore from one &mdash; handy "
@@ -1234,23 +1311,21 @@ static String diagFields(DeviceSlot& s) {
     return a;
 }
 
-static String buildDiagJson() {
+static void diagInto(OutSink& o) {
     uint32_t now = millis();
-    String j = "[";
+    o.put("[", 1);
     for (size_t i = 0; i < gConfig.count(); ++i) {
-        if (i) j += ",";
-        DeviceSlot& s = gConfig.slots()[i];
-        uint32_t age = s.everSeen ? (now - s.lastSeenMs) / 1000 : 0;
-        j += "{\"name\":\"" + jsonEsc(s.name) + "\",\"type\":\"" + typeName(s.type) + "\",";
-        j += "\"mac\":\"" + String(s.mac) + "\",\"model\":\"" + modelHex(s.modelId) + "\",";
-        j += "\"seen\":" + jbool(s.everSeen) + ",\"stale\":" + jbool(s.stale(now)) +
-             ",\"age\":" + String(age) + ",";
-        j += "\"raw\":\"" + hexBytes(s.raw, s.rawLen) + "\",";
-        j += "\"fields\":" + diagFields(s);
-        j += "}";
+        DeviceSlot& sl = gConfig.slots()[i];
+        uint32_t age = sl.everSeen ? (now - sl.lastSeenMs) / 1000 : 0;
+        String nm = jsonEsc(sl.name), fields = diagFields(sl);   // small; the rest streams
+        o.f("%s{\"name\":\"%s\",\"type\":\"%s\",\"mac\":\"%s\",\"model\":\"%s\",\"seen\":%s,\"stale\":%s,\"age\":%lu,\"raw\":\"",
+            i ? "," : "", nm.c_str(), typeName(sl.type), sl.mac, modelHex(sl.modelId).c_str(),
+            sl.everSeen ? "true" : "false", sl.stale(now) ? "true" : "false", (unsigned long)age);
+        static const char* hx = "0123456789abcdef";
+        for (size_t k = 0; k < sl.rawLen; ++k) { char b[2] = {hx[sl.raw[k] >> 4], hx[sl.raw[k] & 0xF]}; o.put(b, 2); }
+        o.put("\",\"fields\":", 11); o.put(fields.c_str(), fields.length()); o.put("}", 1);
     }
-    j += "]";
-    return j;
+    o.put("]", 1);
 }
 
 
@@ -1282,8 +1357,8 @@ static void handleOtaDone(AsyncWebServerRequest* req) {
     }
 }
 
-static String otaCard() {
-    return F(
+static void otaCard(HtmlOut& out) {
+    out += F(
         "<div class=card><h3>Firmware update (OTA)</h3>"
         "<p class=muted>Upload a compiled <code>firmware.bin</code> (the universal build, at "
         "<code>.pio/build/s3/firmware.bin</code>) to flash over WiFi. The device "
@@ -1311,24 +1386,24 @@ static String otaCard() {
 // System / pairing card — the web equivalent of the on-screen Diag controls, so
 // anything doable on the display is doable from the AP (pair a slave, toggle debug
 // capture, switch role). Shown on the settings page for both roles.
-static String systemCard() {
+static void systemCard(HtmlOut& out) {
     char idbuf[12];
     snprintf(idbuf, sizeof(idbuf), "%08X", gRole == ROLE_SLAVE ? gRx.pairedMaster() : gMasterId);
     // Two-step confirm for the destructive/rebooting actions below: the first tap
     // arms the button and relabels it, the second performs the action, and it
     // disarms itself after 4 s. Deliberately not window.confirm() — see the note on
     // the buttons. Defined once here and reused by the OTA card on the same page.
-    String h = "<script>function cfm(b,fn){"
+    out += "<script>function cfm(b,fn){"
                "if(b.dataset.arm){delete b.dataset.arm;b.textContent=b.dataset.l0;fn();return;}"
                "b.dataset.l0=b.textContent;b.dataset.arm='1';b.textContent='Tap again to confirm';"
                "setTimeout(function(){if(b.dataset.arm){delete b.dataset.arm;"
                "b.textContent=b.dataset.l0;}},4000);}</script>";
-    h += "<div class=card><h3>System</h3>";
-    h += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
+    out += "<div class=card><h3>System</h3>";
+    out += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
          String(gRole == ROLE_SLAVE ? "paired master" : "id") + " " + String(idbuf) + "</p>";
 #ifdef VICMON_HAS_M5CAPSULE
     if (capsulePresent())
-        h += "<p class=muted>M5Capsule &middot; RTC " + String(capsuleRtcOk() ? "set" : "unset") +
+        out += "<p class=muted>M5Capsule &middot; RTC " + String(capsuleRtcOk() ? "set" : "unset") +
              " &middot; SD " + String(capsuleSdOk() ? "logging" : "none") +
              " &middot; buzzer " + String(gBuzzerEnable ? "on" : "muted") + "</p>";
 #endif
@@ -1339,36 +1414,36 @@ static String systemCard() {
     // Every confirm()-guarded action then silently did nothing, which is exactly how
     // "Switch to Slave" appeared broken while the unguarded Pair button worked.
     if (gRole == ROLE_SLAVE) {
-        h += "<button type=button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
-        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/unpair',{method:'POST'})})\">Unpair</button> ";
-        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Master</button>";
-        h += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots. "
+        out += "<button type=button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
+        out += "<button type=button onclick=\"cfm(this,function(){fetch('/api/unpair',{method:'POST'})})\">Unpair</button> ";
+        out += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Master</button>";
+        out += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots. "
              "Unpair and Switch ask for a second tap to confirm.</p>";
     } else {
-        h += "<button type=button id=pairBtn data-lbl='Pair a slave' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair a slave</button> ";
-        h += "<button type=button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
-        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Slave</button>";
-        h += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
+        out += "<button type=button id=pairBtn data-lbl='Pair a slave' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair a slave</button> ";
+        out += "<button type=button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
+        out += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Slave</button>";
+        out += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
              "capture records raw bytes of unknown Victron devices. Switching role reboots "
              "(a second tap confirms).</p>";
     }
     // Firmware clone (OTA push): either role can push its running image to the
     // paired peer over ESP-NOW; the peer accepts only if it allows remote updates.
     // A dropped transfer is non-destructive (the target keeps its current firmware).
-    h += "<p class=muted style='margin:.9em 0 .3em'>&mdash; Firmware clone (wireless) &mdash;</p>";
-    h += "<p class=muted id=otaVer style='margin:.1em 0 .5em'>This unit: firmware " +
+    out += "<p class=muted style='margin:.9em 0 .3em'>&mdash; Firmware clone (wireless) &mdash;</p>";
+    out += "<p class=muted id=otaVer style='margin:.1em 0 .5em'>This unit: firmware " +
          String(kFwVersion) + " &middot; built " + String(gOta.builtStr()) + "</p>";
-    h += "<label style='font-weight:normal;display:block;margin-bottom:.4em'>"
+    out += "<label style='font-weight:normal;display:block;margin-bottom:.4em'>"
          "<input type=checkbox id=otaAllow onchange=\"fetch('/api/ota/allow?v='+(this.checked?1:0),{method:'POST'})\"> "
          "Allow this device to be updated remotely</label>";
-    h += "<button type=button onclick=\"cfm(this,otaPush)\">Send my firmware to the paired device</button> "
+    out += "<button type=button onclick=\"cfm(this,otaPush)\">Send my firmware to the paired device</button> "
          "<button type=button class=ghost onclick=\"cfm(this,otaPull)\">Update this device from the paired device</button> "
          "<span id=otaStat class=muted></span>";
-    h += "<p class=muted>Push: the paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
+    out += "<p class=muted>Push: the paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
          " must have “allow remote update” on. Pull: asks the paired device to update <i>this</i> one, "
          "and it answers only if its firmware is newer. Either way the target reboots into the new "
          "firmware only if the whole image validates, so an interrupted transfer is harmless.</p>";
-    h += "<script>"
+    out += "<script>"
          "function otaPoll(){if(document.hidden)return;fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
          "var v=document.getElementById('otaVer');if(v&&s.version){var pt=s.peerKnown?(' \\u00b7 paired: '+s.peer+' ('+s.peerRel+')'):' \\u00b7 paired: not heard yet';v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built+pt;}"
@@ -1383,14 +1458,19 @@ static String systemCard() {
          "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
          "otaPoll();setInterval(otaPoll,4000);"
          "</script>";
-    return h + "</div>";
+    out += "</div>";
+    return;
 }
 
 void setupServer() {
     gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
         // Streams straight from flash; send(const char*) would copy it into a
         // heap String on every page load.
-        req->send(req->beginResponse_P(200, "text/css", (const uint8_t*)kStyle, strlen(kStyle)));
+        // Cached client-side for a day: each page load then costs one connection
+        // fewer, and connection concurrency is what drives the pool down.
+        AsyncWebServerResponse* r = req->beginResponse_P(200, "text/css", (const uint8_t*)kStyle, strlen(kStyle));
+        r->addHeader("Cache-Control", "max-age=86400");
+        req->send(r);
     });
     // Pairing / role / debug — parity with the on-screen Diag controls.
     gServer.on("/api/pair", HTTP_POST, [](AsyncWebServerRequest* req) {
@@ -1445,44 +1525,44 @@ void setupServer() {
         req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
-        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
-        serveStatic(req, "/", kMimicPage);
+        if (shedIfLow(req, true)) return;
+        serveStaticCached(req, 0);
     });
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
+        if (shedIfLow(req, true)) return;
         if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         HtmlOut h;
         devicesPage(h);
         serveArena(req, "text/html");
     });
     gServer.on("/bindings", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
+        if (shedIfLow(req, true)) return;
         if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         HtmlOut h;
         bindingsPage(h);
         serveArena(req, "text/html");
     });
     gServer.on("/network", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
+        if (shedIfLow(req, true)) return;
         if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         HtmlOut h;
         networkPage(h);
         serveArena(req, "text/html");
     });
     gServer.on("/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
-        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
-        serveStatic(req, "/stats", kStatsPage);
+        if (shedIfLow(req, true)) return;
+        serveStaticCached(req, 1);
     });
     gServer.on("/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
-        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
-        serveStatic(req, "/diag", kDiagPage);
+        if (shedIfLow(req, true)) return;
+        serveStaticCached(req, 2);
     });
     gServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        req->send(200, "application/json", buildDiagJson());
+        if (!gPageArena.take()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
+        diagInto(h);
+        serveArena(req, "application/json");
     });
     gServer.on("/api/panel", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildPanelJson());
@@ -1497,9 +1577,15 @@ void setupServer() {
     });
     gServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        req->send(200, "application/json", buildStatsJson());
+        if (!gPageArena.take()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
+        statsInto(h);
+        serveArena(req, "application/json");
     });
     gServer.on("/api/sys", HTTP_GET, [](AsyncWebServerRequest* req) {
+        webSample();
+        uint32_t wm = gWebMinFree == 0xFFFFFFFF ? 0 : gWebMinFree;
+        if (req->hasParam("reset")) gWebMinFree = 0xFFFFFFFF;
         // Live memory + uptime for the Diagnostics page. maxblk = largest allocatable
         // block (fragmentation), minheap = lowest free heap ever (catches transient
         // pressure, e.g. serving a big page) — the numbers that matter on no-PSRAM.
@@ -1509,6 +1595,8 @@ void setupServer() {
                    ",\"uptime\":" + String(millis() / 1000) +
                    ",\"psram\":" + String(ESP.getPsramSize()) +
                    ",\"arena_high\":" + String(gArenaHigh) + ",\"arena\":" + String(kArenaSize) +
+                   ",\"head\":" + String(gStaticHeadLen) +
+                   ",\"web_min\":" + String(wm) +
                    ",\"boots\":" + String(gBootCount) +
                    ",\"heap_restarts\":" + String(gHeapRestarts) +
                    ",\"reset\":\"" + String(gResetReason) + "\"}";
@@ -1516,7 +1604,10 @@ void setupServer() {
     });
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        req->send(200, "application/json", buildDataJson());
+        if (!gPageArena.take()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
+        dataInto(h);
+        serveArena(req, "application/json");
     });
     gServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
@@ -1550,11 +1641,14 @@ void setupServer() {
     // Browsers request this on every page load (and retry after a 404). It used
     // to fall through to onNotFound and get the ENTIRE mimic page back — a full
     // page render per click, on top of the page actually being loaded.
-    gServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) { req->send(204); });
+    gServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* r = req->beginResponse(204);
+        r->addHeader("Cache-Control", "max-age=86400");
+        req->send(r);
+    });
     gServer.onNotFound([](AsyncWebServerRequest* req) {
-        if (shedIfLow(req)) return;
-        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
-        serveStatic(req, "/", kMimicPage);
+        if (shedIfLow(req, true)) return;
+        serveStaticCached(req, 0);
     });
     gServer.begin();
 }
