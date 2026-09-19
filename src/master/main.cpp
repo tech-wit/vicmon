@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.17";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.18";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -342,6 +342,7 @@ void saveApCfg(const String& ssid, const String& pass) {
 // disagree this says which one is empty.
 static void dumpHist() {
     static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
+    Serial.printf("[hist] env-fine ring: count=%u cap=%u interval=%lums\n", (unsigned)gEnvFine.count, (unsigned)gEnvFine.cap, (unsigned long)gEnvFine.intervalMs);
     Serial.printf("[hist] env ring: count=%u cap=%u interval=%lums (%lu h span)\n", (unsigned)gEnv.count,
                   (unsigned)gEnv.cap, (unsigned long)gEnv.intervalMs, (unsigned long)(gEnv.count * gEnv.intervalMs / 3600000));
     for (int which = 0; which < 2; ++which) {
@@ -688,6 +689,13 @@ static const size_t ENV_CAP = 288;             // 24 h @ 5 min
 static const uint32_t ENV_INTERVAL = 300000;   // ms
 static EnvSample gEnvBuf[ENV_CAP];
 EnvRing gEnv;
+// A 5-minute cadence is right for 24h but gave the 1m/10m/1h windows one or two
+// points and a blank chart for five minutes after every boot. Windows up to an
+// hour read this 60s ring instead (480 B; live only, it refills within the hour).
+static const size_t ENVF_CAP = 60;
+static const uint32_t ENVF_INTERVAL = 60000;
+static EnvSample gEnvFineBuf[ENVF_CAP];
+EnvRing gEnvFine;
 uint8_t gLinkMismatch = 0;
 HistRing gFine, gCoarse;
 
@@ -740,7 +748,14 @@ static void sampleHistory() {
     uint32_t now = millis();
     // First env sample waits for a valid reading: at boot the BME688 has not
     // produced one yet, and an n/a sample would blank the first five minutes.
-    if (gEnv.due(now) && (gEnv.count || envReading().valid)) { EnvSample e; encodeEnv(e); gEnv.push(e, now); }
+    // Only ever store a VALID reading. The BME688 reading flips invalid between
+    // measurement cycles; at 5s cadence a stray n/a sample was harmless, at 60s
+    // it is a hole, and as a window's seed it blanks the whole window. A ring
+    // that is due simply stays due until the next valid reading.
+    if (envReading().valid) {
+        if (gEnv.due(now))     { EnvSample e; encodeEnv(e); gEnv.push(e, now); }
+        if (gEnvFine.due(now)) { EnvSample e; encodeEnv(e); gEnvFine.push(e, now); }
+    }
     bool dueFine = gFine.due(now);
     bool dueCoarse = gCoarse.due(now);
     if (!dueFine && !dueCoarse) return;
@@ -764,7 +779,7 @@ static void sampleHistory() {
 static void sampleSlaveHistory() {
     uint32_t now = millis();
     bool dueFine = gFine.due(now), dueCoarse = gCoarse.due(now);
-    if (!dueFine && !dueCoarse && !gEnv.due(now)) return;
+    if (!dueFine && !dueCoarse && !gEnv.due(now) && !gEnvFine.due(now)) return;
     if (!gRx.live()) return;  // only log while actually receiving
     using namespace slavelink;
     const Snapshot& sn = gRx.snapshot();
@@ -780,11 +795,12 @@ static void sampleSlaveHistory() {
     if (dueCoarse) gCoarse.push(s, now);
     // Environment mirrors the master's sensor on its own 5-min ring: T/H/P share
     // one validity bit, gas has its own (see slavelink::V_ENV / V_ENVGAS).
-    if (gEnv.due(now) && (gEnv.count || (sn.valid & V_ENV))) {
+    if (sn.valid & V_ENV) {   // never store an n/a env sample (see sampleHistory)
         EnvSample e;
         e.t = f(V_ENV, sn.envTemp_dc); e.h = f(V_ENV, sn.envHum_dp);
         e.p = f(V_ENV, (int16_t)sn.envPress_dhpa); e.g = f(V_ENVGAS, (int16_t)sn.envGas_kohm);
-        gEnv.push(e, now);
+        if (gEnv.due(now)) gEnv.push(e, now);
+        if (gEnvFine.due(now)) gEnvFine.push(e, now);
     }
 }
 
@@ -961,15 +977,21 @@ void buildHistoryInto(int mins, OutSink& h) {
     // same depth in time as the electrical ones, averaged per column, and a
     // column with no env sample carries the previous value forward (a reading
     // that changes by a tenth of a degree an hour is a level, not a gap).
+    const EnvRing& er = mins > 60 ? gEnv : gEnvFine;
+    const int ivE = static_cast<int>(er.intervalMs / 1000);
     const int depthSec = want * static_cast<int>(r.intervalMs / 1000);
-    int wantE = (depthSec + 299) / 300;
-    if (wantE > static_cast<int>(gEnv.count)) wantE = gEnv.count;
-    const size_t startE = (gEnv.head + gEnv.cap - static_cast<size_t>(wantE)) % gEnv.cap;
+    int wantE = (depthSec + ivE - 1) / ivE;
+    if (wantE > static_cast<int>(er.count)) wantE = er.count;
+    const size_t startE = (er.head + er.cap - static_cast<size_t>(wantE)) % er.cap;
+    // The sample just before the window seeds the level, so a window shorter than
+    // the cadence draws the current reading across it instead of nothing.
+    const bool haveSeed = static_cast<int>(er.count) > wantE;
+    const size_t seedIdx = (startE + er.cap - 1) % er.cap;
     for (int f = 0; f < kHistSeries; ++f) {
         const bool whole = (f == kHistGasIdx);
         const bool env = (f >= 6);
         h.f("\"%s\":[", names[f]);
-        int16_t hold = -32768;
+        int16_t hold = (env && haveSeed) ? envField(er.buf[seedIdx], f) : (int16_t)-32768;
         for (int k = 0; k < n; ++k) {
             int16_t best = -32768;
             if (env) {
@@ -978,7 +1000,7 @@ void buildHistoryInto(int mins, OutSink& h) {
                 if (hi > wantE) hi = wantE;
                 long sum = 0; int cnt = 0;
                 for (int si = lo; si < hi; ++si) {
-                    const int16_t v = envField(gEnv.buf[(startE + static_cast<size_t>(si)) % gEnv.cap], f);
+                    const int16_t v = envField(er.buf[(startE + static_cast<size_t>(si)) % er.cap], f);
                     if (v != -32768) { sum += v; ++cnt; }
                 }
                 if (cnt) hold = static_cast<int16_t>(sum / cnt);
@@ -1563,6 +1585,7 @@ static void slaveLoop() {
         gFine.clear();
         gCoarse.clear();
         gEnv.clear();
+        gEnvFine.clear();
     }
     serviceUpgradeWatch();
     if (gRx.live() && gRx.haveMasterMac()) {
@@ -1644,6 +1667,7 @@ void setup() {
     // the web app in BOTH roles, so it runs before the role branch.
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
     gEnv.init(gEnvBuf, ENV_CAP, ENV_INTERVAL);
+    gEnvFine.init(gEnvFineBuf, ENVF_CAP, ENVF_INTERVAL);
     gCoarse.init(gCoarseBuf, HIST2_CAP, HIST2_INTERVAL);
 
     Serial.printf("[mem] boot: %u\n", (unsigned)ESP.getFreeHeap());

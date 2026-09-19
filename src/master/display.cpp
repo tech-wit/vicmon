@@ -157,11 +157,17 @@ static void collectHistory(guition::DashData& d) {
     if (want < 2) { d.histCount = 0; return; }
     int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
     size_t start = (r.head + r.cap - (size_t)want) % r.cap;
+    const EnvRing& er = mins > 60 ? gEnv : gEnvFine;   // 60s ring for windows up to an hour
+    const int ivE = (int)(er.intervalMs / 1000);
     const int depthSec = want * (int)(r.intervalMs / 1000);
-    int wantE = (depthSec + 299) / 300;
-    if (wantE > (int)gEnv.count) wantE = gEnv.count;
-    const size_t startE = (gEnv.head + gEnv.cap - (size_t)wantE) % gEnv.cap;
+    int wantE = (depthSec + ivE - 1) / ivE;
+    if (wantE > (int)er.count) wantE = er.count;
+    const size_t startE = (er.head + er.cap - (size_t)wantE) % er.cap;
     int16_t holdE[4] = {-32768, -32768, -32768, -32768};
+    if ((int)er.count > wantE) {   // seed from the sample just before the window
+        const EnvSample& sd = er.buf[(startE + er.cap - 1) % er.cap];
+        holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
+    }
     // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
     // Nearest-sample aliases — every column jumps as the window slides. Mean is
     // stable but flattens the transient current spikes that matter most (a 50A load
@@ -201,7 +207,7 @@ static void collectHistory(guition::DashData& d) {
             if (hiE > wantE) hiE = wantE;
             long sum[4] = {0, 0, 0, 0}; int cnt[4] = {0, 0, 0, 0};
             for (int si = loE; si < hiE; ++si) {
-                const EnvSample& e = gEnv.buf[(startE + (size_t)si) % gEnv.cap];
+                const EnvSample& e = er.buf[(startE + (size_t)si) % er.cap];
                 const int16_t ev[4] = {e.t, e.h, e.p, e.g};
                 for (int f = 0; f < 4; ++f) if (ev[f] != -32768) { sum[f] += ev[f]; ++cnt[f]; }
             }
