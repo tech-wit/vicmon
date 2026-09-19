@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.19";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.20";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -342,12 +342,14 @@ void saveApCfg(const String& ssid, const String& pass) {
 // disagree this says which one is empty.
 static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0;
 static uint32_t gLastHistSaveMs = 0;  // 0 = not saved since boot
+static bool gLastHistSaveOk = false;
 static const uint32_t kHistSaveMs = 2 * 60 * 1000;
 static void dumpHist() {
     static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
-    Serial.printf("[hist] restored at boot: fine=%u coarse=%u env=%u | last save %s | next in %lus\n",
+    Serial.printf("[hist] restored at boot: fine=%u coarse=%u env=%u | last save %s%s | next in %lus\n",
                   (unsigned)gHistLoadedFine, (unsigned)gHistLoadedCoarse, (unsigned)gHistLoadedEnv,
                   gLastHistSaveMs ? (String((millis() - gLastHistSaveMs) / 1000) + "s ago").c_str() : "none since boot",
+                  gLastHistSaveMs ? (gLastHistSaveOk ? " (ok)" : " (FAILED)") : "",
                   (unsigned long)((kHistSaveMs - (millis() - gLastHistSaveMs) % kHistSaveMs) / 1000));
     Serial.printf("[hist] env-fine ring: count=%u cap=%u interval=%lums\n", (unsigned)gEnvFine.count, (unsigned)gEnvFine.cap, (unsigned long)gEnvFine.intervalMs);
     Serial.printf("[hist] env ring: count=%u cap=%u interval=%lums (%lu h span)\n", (unsigned)gEnv.count,
@@ -883,12 +885,21 @@ void saveHistFile(int profile) {
               f.write(reinterpret_cast<uint8_t*>(&cc), 2) == 2 &&
               f.write(reinterpret_cast<uint8_t*>(&ec), 2) == 2;
     if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); writeEnvRing(f, gEnv); }
-    size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
-    ok = ok && f.size() == expect;
     f.close();
-    if (!ok) { LittleFS.remove(tmp); return; }
+    // Verify the length on a fresh handle. Checking size() on the still-open
+    // handle read the pre-flush length, judged every save short, and silently
+    // discarded it — so the file on flash stayed the previous version and every
+    // boot "started fresh". A failed save is now loud, never silent.
+    const size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
+    size_t got = 0;
+    { File v = LittleFS.open(tmp, "r"); if (v) { got = v.size(); v.close(); } }
+    if (!ok || got != expect) {
+        Serial.printf("[hist] SAVE FAILED: wrote %u of %u bytes\n", (unsigned)got, (unsigned)expect);
+        LittleFS.remove(tmp); gLastHistSaveOk = false; return;
+    }
     LittleFS.remove(path);
-    LittleFS.rename(tmp, path);
+    if (!LittleFS.rename(tmp, path)) { Serial.println("[hist] SAVE FAILED: rename"); gLastHistSaveOk = false; return; }
+    gLastHistSaveOk = true;
 }
 
 static void loadHistFile(int profile) {
