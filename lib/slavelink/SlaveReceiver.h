@@ -58,6 +58,7 @@ class Receiver {
 
   // User triggers (raised from a button, touch, or serial command).
   void startAdopt() { startAdopt_ = true; }  // open the adopt window
+  void stopAdopt() { stopAdopt_ = true; }    // close it again without adopting
   void unpair() { unpairReq_ = true; }       // forget the current master
 
   // Optional peek at every received frame BEFORE the receiver's own dispatch, so
@@ -79,7 +80,16 @@ class Receiver {
   uint32_t drops() const { return drops_; }
   uint32_t heardMaster() const { return heardMaster_; }
   // A master is currently inviting pairing on our channel.
+  // A master on a different firmware version was heard recently — the link cannot
+  // carry telemetry, but pairing and the OTA clone still work.
+  bool foreignMasterSeen() const { return foreignMs_ != 0 && (millis() - foreignMs_) < kStaleMs; }
+  uint8_t foreignMasterVersion() const { return foreignVer_; }
+  uint32_t foreignMasterId() const { return foreignId_; }
+
+  // Includes a master on a foreign wire version: it is precisely the one the user
+  // needs to pair with (to then push firmware at it), so it must not be hidden.
   bool heardInvite() const {
+    if (foreignInvite_ && foreignMs_ != 0 && (millis() - foreignMs_) < kStaleMs) return true;
     return (millis() - lastAnyMs_) < kStaleMs && (heardFlags_ & F_PAIRING);
   }
   bool anyMasterHeard() const { return lastAnyMs_ != 0 && (millis() - lastAnyMs_) < kStaleMs; }
@@ -125,6 +135,7 @@ class Receiver {
     memset(coarseGot_, 0, kCoarseChunks);
     HistPointW na;  // init staging to n/a so not-yet-received points render as gaps
     na.battery = na.solar = na.charger = na.dcdc = na.load = na.soc = -32768;
+    na.envT = na.envH = na.envP = na.envG = -32768;
     for (uint16_t i = 0; i < kHistFineMax; ++i) fineStage_[i] = na;
     for (uint16_t i = 0; i < kHistCoarseMax; ++i) coarseStage_[i] = na;
     histReady_ = false;
@@ -180,6 +191,48 @@ class Receiver {
       if (validHistChunk(c) && histActive_ && paired_ != 0 && c.masterId == paired_)
         stageChunk(c);
       return;
+    }
+    // ---- cross-version pairing ------------------------------------------
+    // The adopt handshake needs only three things from a Snapshot: the magic, the
+    // masterId and the F_PAIRING flag. All three sit at FIXED offsets in a header
+    // that has not moved since v2 (packed: magic0@0 magic1@1 version@2 mode@3
+    // valid@4 alertWorst@6 profile@7 masterId@8 flags@12), so a pairing invite can
+    // be read from ANY wire version.
+    //
+    // Telemetry below stays strictly version-gated — decoding an unknown layout
+    // would silently misreport battery figures — but refusing to PAIR across
+    // versions was a trap. The OTA clone is deliberately version-independent, yet
+    // it filters on the paired masterId, so an unpaired slave could never update
+    // the very master it needed to talk to: the only way out was USB. Now the
+    // order is pair -> OTA -> telemetry resumes on a matched pair.
+    if (len >= kSnapHdrMin && data[0] == kMagic0 && data[1] == kMagic1) {
+      bool foreign = (len != (int)sizeof(Snapshot) || data[2] != kVersion);
+      if (foreign) {
+        uint32_t fid;
+        memcpy(&fid, data + kSnapMasterIdOff, sizeof(fid));
+        uint8_t fflags = data[kSnapFlagsOff];
+        foreignVer_ = data[2];
+        foreignId_ = fid;
+        foreignMs_ = millis();
+        foreignInvite_ = (fflags & F_PAIRING) != 0;
+        if (adopting_ && (fflags & F_PAIRING) && fid != paired_) adoptId_ = fid;
+        static uint32_t lastVerWarnMs = 0;
+        uint32_t nw = millis();
+        if (lastVerWarnMs == 0 || nw - lastVerWarnMs > 10000) {
+          lastVerWarnMs = nw;
+          // Report the invite + adopt state too: across versions the ONLY thing the
+          // user can act on is whether both windows are open at the same time, and
+          // without this they are guessing at an invisible handshake.
+          Serial.printf("[slave] master %08X on wire v%u (%d B), this unit v%u (%d B) — "
+                        "inviting:%s adopting:%s%s\n",
+                        (unsigned)fid, data[2], len, (unsigned)kVersion, (int)sizeof(Snapshot),
+                        (fflags & F_PAIRING) ? "YES" : "no", adopting_ ? "YES" : "no",
+                        ((fflags & F_PAIRING) && adopting_)
+                            ? "  -> adopting now"
+                            : "  (need BOTH: open its pairing window AND press Pair here)");
+        }
+        return;  // never decode an unknown layout as telemetry
+      }
     }
     if (len != (int)sizeof(Snapshot)) return;
     Snapshot s;
@@ -307,8 +360,13 @@ class Receiver {
     }
     if (startAdopt_) {
       startAdopt_ = false;
+      stopAdopt_ = false;   // a fresh request wins over a stale cancel
       adopting_ = true;
       adoptStartMs_ = millis();
+    }
+    if (stopAdopt_) {
+      stopAdopt_ = false;
+      adopting_ = false;
     }
     if (adopting_ && (millis() - adoptStartMs_) > kAdoptMs) adopting_ = false;
     uint32_t adopt = adoptId_;
@@ -352,6 +410,7 @@ class Receiver {
   uint32_t paired_ = 0;
   volatile uint32_t adoptId_ = 0;
   volatile bool startAdopt_ = false;
+  volatile bool stopAdopt_ = false;
   volatile bool unpairReq_ = false;
   volatile bool adopting_ = false;  // read in the RX callback, written in loop
   uint32_t adoptStartMs_ = 0;
@@ -381,11 +440,21 @@ class Receiver {
     fineGot_ = new (std::nothrow) uint8_t[kFineChunks]();
     coarseGot_ = new (std::nothrow) uint8_t[kCoarseChunks]();
   }
+  // Byte offsets into the Snapshot header, stable across every wire version since
+  // v2 — see the cross-version pairing note in the receive path.
+  static const int kSnapMasterIdOff = 8, kSnapFlagsOff = 12, kSnapHdrMin = 13;
+
   // Shared "no data" point returned by finePoint/coarsePoint before staging exists.
   static const HistPointW& kNaPoint() {
-    static const HistPointW na = { -32768, -32768, -32768, -32768, -32768, -32768 };
+    static const HistPointW na = { -32768, -32768, -32768, -32768, -32768,
+                                   -32768, -32768, -32768, -32768, -32768 };
     return na;
   }
+  // Last master heard on a DIFFERENT wire version (diagnostics / UI).
+  volatile uint32_t foreignId_ = 0;
+  volatile uint32_t foreignMs_ = 0;
+  volatile uint8_t foreignVer_ = 0;
+  volatile bool foreignInvite_ = false;
   volatile uint16_t fineTotal_ = 0, coarseTotal_ = 0;
   volatile bool histActive_ = false;
   volatile bool histReady_ = false;

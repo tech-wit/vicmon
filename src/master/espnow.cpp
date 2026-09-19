@@ -114,6 +114,9 @@ static slavelink::Snapshot buildSnapshot() {
     if (p.dcdcInV.valid) v |= V_DCDCINV;
     if (p.dcdcOutV.valid) v |= V_DCDCOUTV;
     if (p.consumed.valid) v |= V_CONSUMED;
+    const EnvReading& env = envReading();
+    if (env.valid) v |= V_ENV;
+    if (env.gasValid) v |= V_ENVGAS;
     s.valid = v;
 
     s.soc_d = encDeci(p.soc.valid, p.soc.value);
@@ -131,6 +134,20 @@ static slavelink::Snapshot buildSnapshot() {
     s.dcdcOutV_cv = encCenti(p.dcdcOutV.valid, p.dcdcOutV.value);
     s.consumedAh_da = encDeci(p.consumed.valid, p.consumed.value);
     s.capacityAh = (uint16_t)(p.capacity > 0 ? p.capacity + 0.5f : 0);
+
+    // v6 environment. Pressure and gas are unsigned on the wire (neither can go
+    // negative) so they use 0 / 0xFFFF for "n/a" rather than the int16 sentinel.
+    s.envTemp_dc = encDeci(env.valid, env.tempC);
+    s.envHum_dp = encDeci(env.valid, env.humidity);
+    s.envPress_dhpa = env.valid ? (uint16_t)lroundf(env.pressureHpa * 10.0f) : 0;
+    if (env.gasValid) {
+        float k = env.gasOhm / 1000.0f;
+        if (k > 65000.0f) k = 65000.0f;
+        if (k < 0.0f) k = 0.0f;
+        s.envGas_kohm = (uint16_t)lroundf(k);
+    } else {
+        s.envGas_kohm = 0xFFFF;
+    }
 
     s.alertWorst = (uint8_t)p.alertWorst;
     s.profile = (uint8_t)gProfiles.active();
@@ -254,7 +271,13 @@ static bool sendHistChunk(uint8_t ring, const HistRing& r, uint16_t offset) {
     c.count = n;
     for (uint8_t i = 0; i < n; ++i) {
         const HistSample& s = r.buf[(r.head + r.cap - r.count + offset + i) % r.cap];
-        memcpy(&c.pts[i], &s, sizeof(HistPointW));  // HistSample and HistPointW share layout
+        // HistSample (app.h) and HistPointW (SlaveLink.h) are deliberately the same
+        // sequence of int16 channels so a history point needs no field-by-field
+        // repacking. Adding a channel to one and not the other would otherwise
+        // truncate or over-read here silently.
+        static_assert(sizeof(HistSample) == sizeof(slavelink::HistPointW),
+                      "HistSample and HistPointW must stay layout-compatible");
+        memcpy(&c.pts[i], &s, sizeof(HistPointW));
     }
     return esp_now_send(gHistPeerMac, (const uint8_t*)&c, sizeof(c)) == ESP_OK;
 }

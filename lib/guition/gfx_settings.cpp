@@ -222,7 +222,6 @@ static constexpr int DM_TOP = 52, DM_RH = 42, DM_GAP = 8, DM_X = 8, DM_W = W - 1
 static constexpr int DBACK_H = 34, DBACK_Y = TAB_Y - DBACK_H - 6, DBACK_X = 8, DBACK_W = W - 16;
 static constexpr int DCTL_Y = 52, DCTL_H = 42, DCTL_X = 8, DCTL_W = W - 16;
 static constexpr int DROLE_BTN_Y = 116, DROLE_BTN_H = 46;
-static constexpr int DRESTART_Y = 248, DRESTART_H = 30;  // Diag menu: bottom Restart button
 static constexpr int DLINK_UNPAIR_Y = 196;  // slave Link screen: Unpair button
 // Firmware screen: two side-by-side action buttons.
 static constexpr int DFW_BTN_Y = 64, DFW_BTN_H = 46, DFW_GAP = 10;
@@ -237,26 +236,50 @@ static void diagBtn(Arduino_GFX* c, int x, int y, int w, int h, const char* labe
 
 // Menu structure — role-dependent. Master: Monitored/Discovered/Debug/Role.
 // Slave (no BLE): Link/Role. render + hit-test share this ordering.
-// Master: Monitored/Discovered/Debug/Firmware/Role. Slave (no BLE): Link/Firmware/Role.
-static int diagMenuCount(int role) { return role == 1 ? 3 : 5; }
+// Master: Monitored/Discovered/Debug/Firmware/Role/Restart.
+// Slave (no BLE):  Link/Firmware/Role/Restart.
+// Restart is a normal row rather than a pinned bottom button — as a button it sat
+// on top of the 5th row and, because its hit-test ran first, ate every tap meant
+// for "Switch to Slave".
+static int diagMenuCount(int role) { return role == 1 ? 4 : 6; }
+int diagMenuPages(int role) {
+  return (diagMenuCount(role) + DIAG_PERPAGE - 1) / DIAG_PERPAGE;
+}
 static DiagAction diagMenuAction(int role, int i) {
-  if (role == 1) { return i == 0 ? DIAG_OPEN_LINK : (i == 1 ? DIAG_OPEN_FW : DIAG_OPEN_ROLE); }
+  if (role == 1) {
+    switch (i) {
+      case 0:  return DIAG_OPEN_LINK;
+      case 1:  return DIAG_OPEN_FW;
+      case 2:  return DIAG_OPEN_ROLE;
+      default: return DIAG_RESTART;
+    }
+  }
   switch (i) {
     case 0:  return DIAG_OPEN_MON;
     case 1:  return DIAG_OPEN_DISC;
     case 2:  return DIAG_OPEN_DEBUG;
     case 3:  return DIAG_OPEN_FW;
-    default: return DIAG_OPEN_ROLE;
+    case 4:  return DIAG_OPEN_ROLE;
+    default: return DIAG_RESTART;
   }
 }
 static void diagMenuLabel(const DashData& d, int i, char* out, size_t n) {
-  if (d.role == 1) { snprintf(out, n, i == 0 ? "Link status" : (i == 1 ? "Firmware" : "Switch to Master")); return; }
+  if (d.role == 1) {
+    switch (i) {
+      case 0:  snprintf(out, n, "Link status"); break;
+      case 1:  snprintf(out, n, "Firmware"); break;
+      case 2:  snprintf(out, n, "Switch to Master"); break;
+      default: snprintf(out, n, "Restart device"); break;
+    }
+    return;
+  }
   switch (i) {
     case 0:  snprintf(out, n, "Monitored (%d)", d.monCount); break;
     case 1:  snprintf(out, n, "Discovered (%d)", d.discCount); break;
     case 2:  snprintf(out, n, d.debugCapture ? "Debug capture: ON" : "Debug capture: OFF"); break;
     case 3:  snprintf(out, n, "Firmware"); break;
-    default: snprintf(out, n, "Switch to Slave"); break;
+    case 4:  snprintf(out, n, "Switch to Slave"); break;
+    default: snprintf(out, n, "Restart device"); break;
   }
 }
 
@@ -268,14 +291,19 @@ static void renderDiagMenu(Arduino_GFX* c, const DashData& d) {
   char buf[32];
   gtext(c, &FreeSansBold18pt7b, 12, 28, "Diagnostics", kText);
   int cnt = diagMenuCount(d.role);
-  for (int i = 0; i < cnt; ++i) {
-    int y = DM_TOP + i * (DM_RH + DM_GAP);
-    c->fillRoundRect(DM_X, y, DM_W, DM_RH, 8, kCard);
+  int total = diagMenuPages(d.role);
+  renderNav(c, d.diagPage, total);          // same up/down arrows as the Bindings list
+  int rowR = rowRight(total);               // rows shrink to clear the nav column
+  int base = d.diagPage * DIAG_PERPAGE;
+  for (int s = 0; s < DIAG_PERPAGE; ++s) {
+    int i = base + s;
+    if (i >= cnt) break;
+    int y = DM_TOP + s * (DM_RH + DM_GAP);
+    c->fillRoundRect(DM_X, y, rowR - DM_X, DM_RH, 8, kCard);
     diagMenuLabel(d, i, buf, sizeof(buf));
     gtext(c, &FreeSansBold12pt7b, DM_X + 18, y + DM_RH / 2 + 7, buf, kText, L);
-    gtext(c, &FreeSansBold18pt7b, DM_X + DM_W - 18, y + DM_RH / 2 + 9, ">", kMuted, R);
+    gtext(c, &FreeSansBold18pt7b, rowR - 12, y + DM_RH / 2 + 9, ">", kMuted, R);
   }
-  diagBtn(c, DM_X, DRESTART_Y, DM_W, DRESTART_H, "Restart device", kGrey, kText);
 }
 
 static void renderDiagMon(Arduino_GFX* c, const DashData& d) {
@@ -408,13 +436,20 @@ static void renderDiag(Arduino_GFX* c, const DashData& d) {
   }
 }
 
-int diagHit(int x, int y, int role, int screen) {
+int diagHit(int x, int y, int role, int screen, int page) {
   if (screen == DS_MENU) {
-    if (y >= DRESTART_Y && y < DRESTART_Y + DRESTART_H && x >= DM_X && x < DM_X + DM_W)
-      return DIAG_RESTART;
-    for (int i = 0; i < diagMenuCount(role); ++i) {
-      int ry = DM_TOP + i * (DM_RH + DM_GAP);
-      if (y >= ry && y < ry + DM_RH && x >= DM_X && x < DM_X + DM_W) return diagMenuAction(role, i);
+    int total = diagMenuPages(role);
+    int nv = navHit(x, y);
+    if (nv == 0) return DIAG_MENU_PREV;
+    if (nv == 1) return DIAG_MENU_NEXT;
+    int rowR = rowRight(total);
+    if (x < DM_X || x >= rowR) return DIAG_NONE;
+    for (int s = 0; s < DIAG_PERPAGE; ++s) {
+      int ry = DM_TOP + s * (DM_RH + DM_GAP);
+      if (y >= ry && y < ry + DM_RH) {
+        int i = page * DIAG_PERPAGE + s;
+        return (i < diagMenuCount(role)) ? diagMenuAction(role, i) : DIAG_NONE;
+      }
     }
     return DIAG_NONE;
   }

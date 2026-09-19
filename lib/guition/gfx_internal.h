@@ -39,6 +39,12 @@ static constexpr uint16_t kSerChg   = RGB565(0x60, 0xa5, 0xfa);  // #60a5fa ligh
 static constexpr uint16_t kSerDcdc  = RGB565(0xa7, 0x8b, 0xfa);  // #a78bfa violet
 static constexpr uint16_t kSerLoad  = RGB565(0xf8, 0x71, 0x71);  // #f87171 red
 static constexpr uint16_t kSerSoc   = RGB565(0xf1, 0xf5, 0xf9);  // #f1f5f9 near-white
+// Environment series colours — matched to the AP Environment charts so the LCD
+// page and the web page read the same.
+static constexpr uint16_t kSerTemp  = RGB565(0xfb, 0x92, 0x3c);  // #fb923c orange
+static constexpr uint16_t kSerHum   = RGB565(0x38, 0xbd, 0xf8);  // #38bdf8 sky
+static constexpr uint16_t kSerPress = RGB565(0xa3, 0xe6, 0x35);  // #a3e635 lime
+static constexpr uint16_t kSerGas   = RGB565(0xc0, 0x84, 0xfc);  // #c084fc violet
 // AP mimic flow colours.
 static constexpr uint16_t kFlowChg  = RGB565(0x34, 0xd3, 0x99);  // #34d399 charging/source green
 static constexpr uint16_t kFlowLoad = RGB565(0xfb, 0xbf, 0x24);  // #fbbf24 load yellow
@@ -48,6 +54,11 @@ static constexpr int TAB_Y = 284, TAB_H = H - TAB_Y;   // bottom tab bar
 static constexpr int TAB_W = W / PAGE_COUNT;
 
 enum Align { L, R, C };
+
+// Zoom-pill row (1m/10m/1h/12h/24h) drawn at the top of both the Graph and the
+// Environment page — they share one selected window, so the pills are shared too.
+// Defined in gfx_graph.cpp alongside graphHitTest(), which must match its geometry.
+void renderZoomRow(Arduino_GFX* c, int activeMin);
 
 // Shared drawing primitives (defined in gfx_common.cpp).
 void gtext(Arduino_GFX* c, const GFXfont* f, int x, int y, const char* s,
@@ -67,6 +78,7 @@ void ttgLabel(char* buf, size_t n, const DashData& d);
 void renderDash(Arduino_GFX* c, const DashData& d);
 void renderFlow(Arduino_GFX* c, const DashData& d);
 void renderGraph(Arduino_GFX* c, const DashData& d);
+void renderEnv(Arduino_GFX* c, const DashData& d);
 void renderDays(Arduino_GFX* c, const DashData& d);
 void renderSettings(Arduino_GFX* c, const DashData& d);
 

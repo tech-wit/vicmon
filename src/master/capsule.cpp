@@ -10,6 +10,15 @@
 //                    on-chip ring buffer.
 //   • Power-hold  -> latch the power circuit on so it keeps running off its internal
 //                    battery (the StampS3 power button otherwise drops the rail).
+//   • Button      -> the side push-button opens/closes the ESP-NOW pairing window.
+//   • WS2812 LED  -> status colour normally, a bright flash while pairing is open.
+//
+// The button and the LED are driven from a small dedicated task rather than the
+// main loop, because the loop spends ~2 s of every pass inside a blocking BLE
+// scan: polled from there a press would often be missed outright and a "flash"
+// would be a sullen blink every two seconds. The task also becomes the SOLE
+// owner of neopixelWrite() for this board (the loop publishes a colour via
+// capsuleSetLed instead), so two tasks never drive the RMT peripheral at once.
 //
 // detectBoard() (main.cpp) probes the RTC to positively identify the Capsule; a
 // board that isn't one never reaches this code.  Everything here is behind
@@ -35,6 +44,14 @@ static constexpr int PIN_SD_SCK     = 14;
 static constexpr int PIN_SD_MOSI    = 12;
 static constexpr int PIN_SD_MISO    = 39;
 static constexpr int PIN_SD_CS      = 11;
+static constexpr int PIN_BUTTON     = 42;   // side push-button (BtnA), active LOW
+static constexpr int PIN_LED        = 21;   // WS2812 RGB status LED (data)
+// Capsule v1.1 (Stamp-S3A) puts the RGB LED behind an independent electronic power
+// switch to save power: GPIO38 must be driven HIGH or the LED is simply unpowered
+// and ignores everything sent on GPIO21 — silently, with no way to tell the
+// difference from a dead LED. On the older v1.0 (plain StampS3) GPIO38 is unused,
+// so driving it HIGH is harmless there and one image covers both revisions.
+static constexpr int PIN_LED_POWER  = 38;
 
 static constexpr uint8_t RTC_ADDR   = 0x51; // BM8563 (PCF8563-compatible)
 static constexpr int     BUZZER_CH  = 6;    // LEDC channel (0-3 may be used by panel PWM)
@@ -44,8 +61,26 @@ static bool sBusUp  = false;   // internal I2C started
 static bool sRtcOk  = false;   // RTC present and holding a valid (>= 2023) time
 static bool sSdOk   = false;   // microSD mounted
 
+// Steady status colour published by the loop (capsuleSetLed) and rendered by the
+// button/LED task. Packed into one word so a reader can never tear a half-updated
+// colour out of three separate bytes.
+static volatile uint32_t sLedSteady = 0;
+// While sLedTestActive is set the task leaves the pixel alone, so capsuleLedTest()
+// can drive it without the 25 ms tick overwriting each colour immediately. An
+// explicit flag rather than a magic "0 = not testing" deadline: millis() cast to
+// int32_t goes negative after ~24.8 days of uptime, which would make a bare
+// `(int32_t)(now - 0) < 0` deadline compare true forever and silently kill the
+// status LED on any long-running device.
+static volatile bool sLedTestActive = false;
+static volatile uint32_t sLedTestUntil = 0;
+
 bool capsuleRtcOk() { return sRtcOk; }
 bool capsuleSdOk()  { return sSdOk; }
+
+// Called from the loop's updateLed(). Stores only — the task does the writing.
+void capsuleSetLed(uint8_t r, uint8_t g, uint8_t b) {
+    sLedSteady = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+}
 
 // ---- small helpers ---------------------------------------------------------
 static uint8_t bcd2dec(uint8_t b) { return (uint8_t)((b >> 4) * 10 + (b & 0x0f)); }
@@ -133,6 +168,8 @@ bool capsuleProbe() {
 }
 
 // ---- bring-up --------------------------------------------------------------
+static void capsuleTask(void*);  // button + status LED (defined below)
+
 void capsuleBringUp() {
     // Latch power ASAP so a battery-only cold boot doesn't drop the rail once the
     // StampS3 power button is released.
@@ -160,8 +197,127 @@ void capsuleBringUp() {
         settimeofday(&tv, nullptr);
         sRtcOk = true;
     }
-    Serial.printf("[capsule] power-hold on, RTC %s, SD %s\n",
-                  sRtcOk ? "set" : "unset", sSdOk ? "mounted" : "none");
+    // Power the RGB LED's rail before the task starts driving it.
+    pinMode(PIN_LED_POWER, OUTPUT);
+    digitalWrite(PIN_LED_POWER, HIGH);
+
+    // Button + status LED, on their own task (see the file header for why).
+    // Core 1 alongside loopTask, leaving core 0 to WiFi/BLE.
+    xTaskCreatePinnedToCore(capsuleTask, "vcapbtn", 2560, nullptr, 1, nullptr, 1);
+
+    Serial.printf("[capsule] power-hold on, RTC %s, SD %s, button GPIO%d, "
+                  "LED GPIO%d (rail GPIO%d on)\n",
+                  sRtcOk ? "set" : "unset", sSdOk ? "mounted" : "none",
+                  PIN_BUTTON, PIN_LED, PIN_LED_POWER);
+}
+
+// ---- button + status LED ---------------------------------------------------
+// One task owns both, ticking fast enough that a press is never missed and the
+// pairing flash actually looks like a flash.
+
+static constexpr uint32_t LED_TICK_MS   = 25;    // task period
+static constexpr uint32_t BTN_DEBOUNCE  = 40;    // ms the level must hold to count
+static constexpr uint32_t BTN_LONG_MS   = 1500;  // press longer than this is ignored
+static constexpr uint32_t FLASH_HALF_MS = 150;   // pairing flash: ~3.3 Hz
+
+// Pairing flash colour: a bright amber that none of the steady status colours use
+// (those are red / red-green / green / green-blue / faint white), so "pairing" is
+// unmistakable at a glance rather than a slightly different shade of the usual.
+static constexpr uint8_t FLASH_R = 120, FLASH_G = 70, FLASH_B = 0;
+
+// Debounced press/release edge detector. Returns true once per completed press
+// that was shorter than BTN_LONG_MS — acting on RELEASE rather than press means a
+// press-and-hold can be abandoned, and a stuck/shorted button can't machine-gun
+// the pairing window open and shut.
+static bool buttonClicked(uint32_t now) {
+    static bool stable = true;        // debounced level (true = released, pin is active LOW)
+    static bool lastRaw = true;
+    static uint32_t changedAt = 0;
+    static uint32_t pressedAt = 0;
+
+    bool raw = digitalRead(PIN_BUTTON) != LOW;
+    if (raw != lastRaw) { lastRaw = raw; changedAt = now; }
+    if (raw == stable || (now - changedAt) < BTN_DEBOUNCE) return false;
+
+    stable = raw;
+    if (!stable) { pressedAt = now; return false; }       // press edge
+    return (now - pressedAt) < BTN_LONG_MS;               // release edge: a click?
+}
+
+static void capsuleTask(void*) {
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    uint32_t lastWriteColour = 0xFFFFFFFFu;  // impossible value -> always write once
+    bool flashOn = false;
+    uint32_t flashAt = 0;
+
+    for (;;) {
+        uint32_t now = millis();
+
+        // A self-test owns the pixel while it runs; resync afterwards so the next
+        // tick repaints whatever the current state should be.
+        if (sLedTestActive && (int32_t)(now - sLedTestUntil) < 0) {
+            lastWriteColour = 0xFFFFFFFFu;
+            vTaskDelay(pdMS_TO_TICKS(LED_TICK_MS));
+            continue;
+        }
+
+        if (buttonClicked(now)) {
+            togglePairingMode();
+            Serial.printf("[capsule] button: pairing %s\n",
+                          pairingModeActive() ? "OPEN" : "closed");
+        }
+
+        uint32_t want;
+        if (pairingModeActive()) {
+            if ((int32_t)(now - flashAt) >= 0) {
+                flashOn = !flashOn;
+                flashAt = now + FLASH_HALF_MS;
+            }
+            want = flashOn ? (((uint32_t)FLASH_R << 16) | ((uint32_t)FLASH_G << 8) | FLASH_B) : 0;
+        } else {
+            flashOn = false;
+            flashAt = now;  // next pairing window starts lit immediately
+            want = sLedSteady;
+        }
+
+        // Only touch the RMT when the colour actually changes — at a 25 ms tick an
+        // unconditional write would be 40 needless bit-bangs a second.
+        if (want != lastWriteColour) {
+            lastWriteColour = want;
+            neopixelWrite(PIN_LED, (want >> 16) & 0xFF, (want >> 8) & 0xFF, want & 0xFF);
+        }
+        vTaskDelay(pdMS_TO_TICKS(LED_TICK_MS));
+    }
+}
+
+// Serial `led`: drive the WS2812 through unmistakable full-brightness colours so
+// it is obvious whether the pin drives a visible LED at all. The normal status
+// colours are deliberately dim (2..40) to avoid a blinding indicator in a dark
+// cab, which makes "not working" and "working but barely visible" hard to tell
+// apart by eye — this removes that ambiguity.
+void capsuleLedTest() {
+    // Deliberately NO red: the Capsule has its own hardware power/charge LED that
+    // glows red and is not under software control, so a red step in this test is
+    // indistinguishable from it. Green/blue/white with OFF gaps between means
+    // anything the observer sees is unambiguously us driving the WS2812.
+    struct Step { const char* name; uint8_t r, g, b; uint16_t ms; };
+    static const Step steps[] = {
+        {"GREEN", 0, 255, 0, 2500}, {"off", 0, 0, 0, 1200},
+        {"BLUE", 0, 0, 255, 2500},  {"off", 0, 0, 0, 1200},
+        {"WHITE", 255, 255, 255, 2500}, {"off", 0, 0, 0, 1200},
+    };
+    Serial.printf("[led] GPIO%d (rail GPIO%d) — watch for GREEN, BLUE, WHITE\n",
+                  PIN_LED, PIN_LED_POWER);
+    for (const Step& st : steps) {
+        sLedTestUntil = millis() + st.ms + 1500;  // keep the task off the pixel
+        sLedTestActive = true;
+        Serial.printf("[led]   %s\n", st.name);
+        neopixelWrite(PIN_LED, st.r, st.g, st.b);
+        delay(st.ms);
+    }
+    neopixelWrite(PIN_LED, 0, 0, 0);
+    sLedTestActive = false;  // hand the pixel back
+    Serial.println("[led] self-test done");
 }
 
 // ---- buzzer ----------------------------------------------------------------
@@ -189,6 +345,24 @@ void capsuleServiceBuzzer(bool socCrit, uint32_t now) {
 // Append one CSV row per minute to /vicmon/YYYYMMDD.csv (named from local date).
 // Needs a valid clock for the filename + timestamp, so it no-ops until the RTC
 // (or NTP) has one. Values are written blank when the signal isn't available.
+// Column set of the daily log. Adding a column here changes the shape of rows
+// appended to a file that a PREVIOUS firmware started earlier the same day, which
+// would leave a parser silently mis-reading everything after the upgrade — so the
+// header of an existing file is checked and re-emitted when it no longer matches.
+static const char kCsvHeader[] =
+    "utc,localtime,soc,vbat,ibat,solar,charger,dcdc,load,vstart,"
+    "tempC,humidity,pressure_hpa,gas_kohm";
+
+// True when `path` already starts with exactly kCsvHeader (i.e. same schema).
+static bool csvHeaderMatches(const char* path) {
+    File f = SD.open(path, FILE_READ);
+    if (!f) return false;
+    String first = f.readStringUntil('\n');
+    f.close();
+    first.trim();
+    return first == kCsvHeader;
+}
+
 static void csvNum(String& row, const sig::Resolved& r, int dp) {
     row += ',';
     if (r.valid) row += String(r.value, dp);
@@ -213,11 +387,21 @@ void capsuleLogSample(uint32_t now) {
     snprintf(path, sizeof(path), "/vicmon/%04d%02u%02u.csv", Y, M, D);
     snprintf(tstr, sizeof(tstr), "%04d-%02u-%02u %02u:%02u:%02u", Y, M, D, h, mi, s);
 
-    bool isNew = !SD.exists(path);
+    // Write the header for a brand-new file, and also when an existing one was
+    // started by a firmware with a different column set (the day of an upgrade).
+    // A second header line mid-file is at least self-describing; rows that just
+    // silently grew four columns would not be. The check costs a file open, so do
+    // it once per file rather than on every one-minute row — the answer can only
+    // change when the date (and so the path) rolls over.
+    static char checkedPath[32] = {0};
+    bool needHeader = false;
+    if (strcmp(checkedPath, path) != 0) {
+        needHeader = !SD.exists(path) || !csvHeaderMatches(path);
+        snprintf(checkedPath, sizeof(checkedPath), "%s", path);
+    }
     File f = SD.open(path, FILE_APPEND);
     if (!f) { sSdOk = false; return; }  // card pulled? stop trying until reboot
-    if (isNew)
-        f.println("utc,localtime,soc,vbat,ibat,solar,charger,dcdc,load,vstart");
+    if (needHeader) f.println(kCsvHeader);
 
     PanelModel pm = collectPanel(now);
     String row = String(utc) + ',' + tstr;
@@ -229,6 +413,14 @@ void capsuleLogSample(uint32_t now) {
     csvNum(row, pm.dcdcOutA, 1);
     csvNum(row, pm.loadA, 1);
     csvNum(row, pm.starterV, 2);
+    // Environment (Unit ENV Pro). Blank columns where no sensor is attached, or
+    // for gas alone while its heater is still settling — same "absent means
+    // unknown, never zero" convention as the electrical columns above.
+    const EnvReading& e = envReading();
+    csvNum(row, {e.tempC, e.valid}, 2);
+    csvNum(row, {e.humidity, e.valid}, 1);
+    csvNum(row, {e.pressureHpa, e.valid}, 1);
+    csvNum(row, {e.gasOhm / 1000.0f, e.gasValid}, 1);
     f.println(row);
     f.close();
 }

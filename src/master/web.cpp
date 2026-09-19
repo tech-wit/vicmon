@@ -61,6 +61,16 @@ static String buildPanelJson() {
              ",\"out_v_valid\":" + jbool(has(V_DCDCOUTV)) + "},";
         j += "\"load\":{\"valid\":" + jbool(has(V_LOAD)) + ",\"a\":" + String(decDeci(s.loadA_da), 1) +
              ",\"derived\":false},";
+        // Environment mirrored from the master's sensor. "present" follows the
+        // validity bits — a slave has no way to tell "no sensor fitted" from
+        // "sensor not reading yet", and either way there is nothing to show.
+        j += "\"env\":{\"present\":" + jbool(has(V_ENV)) +
+             ",\"valid\":" + jbool(has(V_ENV)) +
+             ",\"temp\":" + String(decDeci(s.envTemp_dc), 1) +
+             ",\"humidity\":" + String(decDeci(s.envHum_dp), 1) +
+             ",\"pressure\":" + String(s.envPress_dhpa / 10.0f, 1) +
+             ",\"gas\":" + String(has(V_ENVGAS) ? s.envGas_kohm : 0) +
+             ",\"gas_valid\":" + jbool(has(V_ENVGAS)) + "},";
         j += "\"alerts\":[]}";
         return j;
     }
@@ -95,6 +105,18 @@ static String buildPanelJson() {
     j += "\"load\":{\"valid\":" + jbool(p.loadA.valid) +
          ",\"a\":" + String(p.loadA.value, 1) +
          ",\"derived\":" + jbool(p.loadDerived) + "},";
+    {
+        // Environment (Unit ENV Pro / BME688). "present" tells the UI whether to
+        // show the card at all; "valid"/"gas_valid" whether the numbers are good.
+        const EnvReading& e = envReading();
+        j += "\"env\":{\"present\":" + jbool(envPresent()) +
+             ",\"valid\":" + jbool(e.valid) +
+             ",\"temp\":" + String(e.tempC, 1) +
+             ",\"humidity\":" + String(e.humidity, 1) +
+             ",\"pressure\":" + String(e.pressureHpa, 1) +
+             ",\"gas\":" + String(e.gasOhm / 1000.0f, 1) +
+             ",\"gas_valid\":" + jbool(e.gasValid) + "},";
+    }
     String alerts;
     buildAlerts(now, &alerts);
     j += "\"alerts\":" + alerts;
@@ -586,6 +608,12 @@ void webSelfTest() {
                       (unsigned)total, (unsigned)mx, (unsigned)h0,
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     }
+    // The JSON endpoints the pages poll. On a headless board (the M5Capsule) there
+    // is no screen and no way to reach the AP without disconnecting from whatever
+    // network you are on, so being able to read the exact API payloads over the
+    // serial console is the only practical way to check them.
+    Serial.printf("[webtest] /api/panel: %s\n", buildPanelJson().c_str());
+    Serial.printf("[webtest] /api/history?mins=1: %s\n", buildHistoryJson(1).c_str());
 }
 
 // ---- handlers --------------------------------------------------------------
@@ -1149,13 +1177,16 @@ static String otaCard() {
         "document.getElementById('fwb').addEventListener('click',function(){"
         "var f=document.getElementById('fw').files[0];var m=document.getElementById('fwmsg');"
         "if(!f){m.textContent='Choose a firmware.bin first.';return;}"
-        "if(!confirm('Flash this firmware? The device will reboot.'))return;"
+        // Two-step confirm rather than window.confirm(), for the same captive-portal
+        // reason as the System card's buttons.
+        "cfm(this,function(){"
         "m.textContent='Uploading\\u2026 do not close this page.';"
         "var fd=new FormData();fd.append('f',f);"
         "fetch('/api/ota',{method:'POST',body:fd}).then(function(x){return x.text();})"
         ".then(function(t){m.textContent=t.indexOf('OK')>=0?"
         "'Flashed \\u2014 rebooting, reload in ~10 s.':'Update failed (see serial log).';})"
-        ".catch(function(){m.textContent='Upload sent; if it succeeded the device is rebooting.';});});"
+        ".catch(function(){m.textContent='Upload sent; if it succeeded the device is rebooting.';});"
+        "});});"
         "</script></div>");
 }
 
@@ -1165,7 +1196,16 @@ static String otaCard() {
 static String systemCard() {
     char idbuf[12];
     snprintf(idbuf, sizeof(idbuf), "%08X", gRole == ROLE_SLAVE ? gRx.pairedMaster() : gMasterId);
-    String h = "<div class=card><h3>System</h3>";
+    // Two-step confirm for the destructive/rebooting actions below: the first tap
+    // arms the button and relabels it, the second performs the action, and it
+    // disarms itself after 4 s. Deliberately not window.confirm() — see the note on
+    // the buttons. Defined once here and reused by the OTA card on the same page.
+    String h = "<script>function cfm(b,fn){"
+               "if(b.dataset.arm){delete b.dataset.arm;b.textContent=b.dataset.l0;fn();return;}"
+               "b.dataset.l0=b.textContent;b.dataset.arm='1';b.textContent='Tap again to confirm';"
+               "setTimeout(function(){if(b.dataset.arm){delete b.dataset.arm;"
+               "b.textContent=b.dataset.l0;}},4000);}</script>";
+    h += "<div class=card><h3>System</h3>";
     h += "<p class=muted>Role: <b>" + String(gRole == ROLE_SLAVE ? "Slave" : "Master") + "</b> &middot; " +
          String(gRole == ROLE_SLAVE ? "paired master" : "id") + " " + String(idbuf) + "</p>";
 #ifdef VICMON_HAS_M5CAPSULE
@@ -1174,17 +1214,25 @@ static String systemCard() {
              " &middot; SD " + String(capsuleSdOk() ? "logging" : "none") +
              " &middot; buzzer " + String(gBuzzerEnable ? "on" : "muted") + "</p>";
 #endif
+    // NB: these use an in-page two-step confirm (cfm), NOT window.confirm(). The
+    // device runs a captive-portal DNS, so a phone joining its AP opens this page in
+    // the OS captive-portal WebView (Android CaptivePortalLogin / iOS CNA) — and
+    // those routinely suppress native dialogs, returning false with nothing shown.
+    // Every confirm()-guarded action then silently did nothing, which is exactly how
+    // "Switch to Slave" appeared broken while the unguarded Pair button worked.
     if (gRole == ROLE_SLAVE) {
-        h += "<button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
-        h += "<button onclick=\"if(confirm('Forget the paired master?'))fetch('/api/unpair',{method:'POST'})\">Unpair</button> ";
-        h += "<button onclick=\"if(confirm('Switch to Master and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Master</button>";
-        h += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots.</p>";
+        h += "<button type=button id=pairBtn data-lbl='Pair to a master' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair to a master</button> ";
+        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/unpair',{method:'POST'})})\">Unpair</button> ";
+        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Master</button>";
+        h += "<p class=muted>Pair while a master's pairing window is open. Switching role reboots. "
+             "Unpair and Switch ask for a second tap to confirm.</p>";
     } else {
-        h += "<button id=pairBtn data-lbl='Pair a slave' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair a slave</button> ";
-        h += "<button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
-        h += "<button onclick=\"if(confirm('Switch to Slave and reboot?'))fetch('/api/role',{method:'POST'})\">Switch to Slave</button>";
+        h += "<button type=button id=pairBtn data-lbl='Pair a slave' onclick=\"fetch('/api/pair',{method:'POST'});this.textContent='Opening\\u2026'\">Pair a slave</button> ";
+        h += "<button type=button onclick=\"fetch('/api/debug',{method:'POST'}).then(()=>location.reload())\">Toggle debug capture</button> ";
+        h += "<button type=button onclick=\"cfm(this,function(){fetch('/api/role',{method:'POST'})})\">Switch to Slave</button>";
         h += "<p class=muted>Pairing lets a slave display adopt this master (60 s window). Debug "
-             "capture records raw bytes of unknown Victron devices. Switching role reboots.</p>";
+             "capture records raw bytes of unknown Victron devices. Switching role reboots "
+             "(a second tap confirms).</p>";
     }
     // Firmware clone (OTA push): either role can push its running image to the
     // paired peer over ESP-NOW; the peer accepts only if it allows remote updates.
@@ -1195,8 +1243,8 @@ static String systemCard() {
     h += "<label style='font-weight:normal;display:block;margin-bottom:.4em'>"
          "<input type=checkbox id=otaAllow onchange=\"fetch('/api/ota/allow?v='+(this.checked?1:0),{method:'POST'})\"> "
          "Allow this device to be updated remotely</label>";
-    h += "<button onclick=\"otaPush()\">Send my firmware to the paired device</button> "
-         "<button class=ghost onclick=\"otaPull()\">Update this device from the paired device</button> "
+    h += "<button type=button onclick=\"cfm(this,otaPush)\">Send my firmware to the paired device</button> "
+         "<button type=button class=ghost onclick=\"cfm(this,otaPull)\">Update this device from the paired device</button> "
          "<span id=otaStat class=muted></span>";
     h += "<p class=muted>Push: the paired " + String(gRole == ROLE_SLAVE ? "master" : "slave") +
          " must have “allow remote update” on. Pull: asks the paired device to update <i>this</i> one, "
@@ -1209,10 +1257,10 @@ static String systemCard() {
          "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
          "var pb=document.getElementById('pairBtn');if(pb){if(s.pairing){pb.textContent='Pairing\\u2026 '+s.pairSec+'s';pb.style.background='#22d3ee';pb.style.color='#001018';}else{pb.textContent=pb.dataset.lbl;pb.style.background='';pb.style.color='';}}"
          "}).catch(()=>{});}"
-         "function otaPush(){if(!confirm('Push this firmware to the paired device? It reboots when done.'))return;"
+         "function otaPush(){"
          "fetch('/api/ota/push',{method:'POST'}).then(r=>r.text()).then(t=>{"
          "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
-         "function otaPull(){if(!confirm('Ask the paired device to update this one? This device reboots when done.'))return;"
+         "function otaPull(){"
          "fetch('/api/ota/pull',{method:'POST'}).then(r=>r.text()).then(t=>{"
          "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
          "otaPoll();setInterval(otaPoll,1500);"

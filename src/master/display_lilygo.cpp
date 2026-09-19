@@ -69,11 +69,23 @@ static const uint16_t C_ALT   = RGB565(90, 212, 228);
 static const uint16_t C_CHG   = RGB565(182, 152, 255);
 static const uint16_t C_LOAD  = RGB565(255, 142, 72);
 static const uint16_t C_SOC   = RGB565(235, 235, 240);
+// Environment series — same hues as the web Environment card and the Guition's
+// Env page, so the three UIs read alike.
+static const uint16_t C_ENV_T = RGB565(251, 146, 60);   // #fb923c temperature
+static const uint16_t C_ENV_H = RGB565(56, 189, 248);   // #38bdf8 humidity
+static const uint16_t C_ENV_P = RGB565(163, 230, 53);   // #a3e635 pressure
+static const uint16_t C_ENV_G = RGB565(192, 132, 252);  // #c084fc gas
 
 // ---- pages & UI state ------------------------------------------------------
-enum LPage : uint8_t { LP_DASH = 0, LP_FLOW, LP_GRAPH, LP_WEEK, LP_INFO, LP_SET, LP_COUNT };
-static const char* kPageName[LP_COUNT] = {"Dashboard", "Power Flow", "Graph", "Week", "Status", "Settings"};
-static const uint16_t kPageColor[LP_COUNT] = {C_GREEN, C_ALT, C_SOLAR, C_LOAD, C_BLUE, RGB565(190, 195, 210)};
+enum LPage : uint8_t { LP_DASH = 0, LP_FLOW, LP_GRAPH, LP_ENV, LP_WEEK, LP_INFO, LP_SET, LP_COUNT };
+static const char* kPageName[LP_COUNT] = {"Dashboard", "Power Flow", "Graph", "Environment",
+                                          "Week", "Status", "Settings"};
+static const uint16_t kPageColor[LP_COUNT] = {C_GREEN, C_ALT, C_SOLAR, C_ENV_T, C_LOAD, C_BLUE,
+                                              RGB565(190, 195, 210)};
+// Environment page shows ONE pair at a time (B cycles): 0 = temp+humidity,
+// 1 = pressure+gas. Four axes will not fit legibly on 320x170 — the Guition's
+// 480x320 can stack both pairs, this cannot.
+static volatile uint8_t gEnvPair = 0;
 static volatile uint8_t gPage = LP_DASH;
 
 // Settings page: a list cycled with B (short), the highlighted item activated with
@@ -283,52 +295,91 @@ static void pageFlow(const DashData& d) {
 }
 
 // ---- Page: Graph -----------------------------------------------------------
-static void plotAmps(const int16_t* a, int n, int x0, int pw, int midY, int halfH,
-                     float span, uint16_t col) {
+// Line plot of one deci-unit series across the plot rect, mapping [lo,hi] to the
+// height. Deliberately the same math as gfx_graph.cpp's linePlot (and the web
+// chart's Y()): value -> fraction of the axis range -> pixel, bottom-up. Gaps
+// (-32768) break the line; `dashed` renders the SoC overlay broken, as there.
+static void plotSeries(const int16_t* a, int n, float scale, int px0, int pw, int py0, int ph,
+                       float lo, float hi, uint16_t col, bool dashed) {
+    if (n < 2 || pw < 2 || ph < 2 || hi <= lo) return;
     Arduino_GFX* g = G();
-    int px = -1, py = -1;
+    int prevX = -1, prevY = -1;
     for (int i = 0; i < n; ++i) {
-        if (a[i] == -32768) { px = -1; continue; }
-        int x = x0 + (n <= 1 ? 0 : i * pw / (n - 1));
-        int y = midY - (int)(a[i] / 10.0f / span * halfH);
-        if (y < midY - halfH) y = midY - halfH;
-        if (y > midY + halfH) y = midY + halfH;
-        if (px >= 0) g->drawLine(px, py, x, y, col);
-        else g->drawPixel(x, y, col);
-        px = x; py = y;
+        if (a[i] == -32768) { prevX = -1; continue; }
+        float v = a[i] / scale;
+        if (v < lo) v = lo;
+        if (v > hi) v = hi;
+        int x = px0 + (int)lroundf((float)i * (pw - 1) / (n - 1));
+        int y = py0 + ph - 1 - (int)lroundf((v - lo) / (hi - lo) * (ph - 1));
+        if (prevX >= 0) {
+            if (!dashed || ((x >> 2) & 1)) g->drawLine(prevX, prevY, x, y, col);
+        } else {
+            g->drawPixel(x, y, col);
+        }
+        prevX = x; prevY = y;
     }
 }
 static void pageGraph(const DashData& d) {
     Arduino_GFX* g = G();
-    int x0 = 6, y0 = 4, pw = W - 12, ph = 112;
-    int midY = y0 + ph / 2, halfH = ph / 2;
+    const int x0 = 6, y0 = 4, pw = W - 12, ph = 112;
     g->drawRect(x0, y0, pw, ph, RGB565(45, 45, 56));
-    Tf(x0 + 4, y0 + 18, F_M, kPageColor[LP_GRAPH], "%s", kGraphWinName[gGraphWinIdx]);
+
+    // Axis gutters — Amps labels left, SoC % right — as on the Env page. Wide
+    // enough for a signed label ("-100") without running into the frame.
+    const int GUTL = 40, GUTR = 34;
+    const int plotX = x0 + GUTL, plotW = pw - GUTL - GUTR;
+    const int plotY = y0 + 4, plotH = ph - 8;
 
     if (d.histCount < 2) {
-        T(x0 + 96, midY + 4, F_S, C_LBL, d.graphSyncing ? "syncing..." : "no data yet");
+        T(x0 + 96, y0 + ph / 2 + 4, F_S, C_LBL, d.graphSyncing ? "syncing..." : "no data yet");
     } else {
-        float span = 5.0f;
+        // Auto-scale the Amps axis across the five current series exactly as
+        // gfx_graph.cpp and the web chart do: track the real min and max, always
+        // include zero, and never let the range close below 2A. A symmetric
+        // +/-peak axis (what this page used to do) draws the SAME samples with a
+        // different shape — an all-positive day lands entirely in the top half at
+        // half amplitude — so the small screen disagreed with every other view.
+        float mn = 0, mx = 0;
         const int16_t* series[5] = {d.histBatt, d.histSolar, d.histCharger, d.histDcdc, d.histLoad};
         for (int s = 0; s < 5; ++s)
-            for (int i = 0; i < d.histCount; ++i)
-                if (series[s][i] != -32768) { float m = fabsf(series[s][i] / 10.0f); if (m > span) span = m; }
-        g->drawFastHLine(x0, midY, pw, RGB565(60, 60, 74));
-        const uint16_t col[5] = {C_GREEN, C_SOLAR, C_CHG, C_ALT, C_LOAD};
-        for (int s = 0; s < 5; ++s) plotAmps(series[s], d.histCount, x0, pw, midY, halfH, span, col[s]);
-        if (!gGraphHideSoc) {
-            int px = -1, py = -1;
             for (int i = 0; i < d.histCount; ++i) {
-                if (d.histSoc[i] == -32768) { px = -1; continue; }
-                int x = x0 + (d.histCount <= 1 ? 0 : i * pw / (d.histCount - 1));
-                int y = y0 + ph - (int)(d.histSoc[i] / 1000.0f * ph);
-                if (px >= 0) g->drawLine(px, py, x, y, C_SOC);
-                px = x; py = y;
+                if (series[s][i] == -32768) continue;
+                float v = series[s][i] / 10.0f;
+                if (v < mn) mn = v;
+                if (v > mx) mx = v;
             }
+        if (mx - mn < 2) mx = mn + 2;
+        auto yA = [&](float v) {
+            return plotY + plotH - 1 - (int)lroundf((v - mn) / (mx - mn) * (plotH - 1));
+        };
+
+        // Three gridlines (min / mid / max). Both axes span the full plot height,
+        // so the 0/50/100 % ticks land on the same three lines.
+        int dec = (mx - mn) >= 10 ? 0 : 1;
+        for (int gi = 0; gi <= 2; ++gi) {
+            float val = mn + (mx - mn) * gi / 2;
+            int y = yA(val);
+            g->drawFastHLine(plotX, y, plotW, RGB565(50, 50, 62));
+            TR(plotX - 2, y + 4, F_S, C_LBL, "%.*f", dec, val);
+            if (!gGraphHideSoc) Tf(plotX + plotW + 3, y + 4, F_S, C_DIM, "%d", gi * 50);
         }
-        TR(x0 + pw - 4, y0 + 18, F_M, C_TEXT, "%.0fA", span);
+        if (mn < 0 && mx > 0) g->drawFastHLine(plotX, yA(0), plotW, RGB565(95, 95, 112));
+
+        const uint16_t col[5] = {C_GREEN, C_SOLAR, C_CHG, C_ALT, C_LOAD};
+        for (int s = 0; s < 5; ++s)
+            plotSeries(series[s], d.histCount, 10.0f, plotX, plotW, plotY, plotH,
+                       mn, mx, col[s], false);
+        if (!gGraphHideSoc)
+            plotSeries(d.histSoc, d.histCount, 10.0f, plotX, plotW, plotY, plotH,
+                       0.0f, 100.0f, C_SOC, true);
     }
-    // Legend.
+    // Time axis under the frame: oldest .. now, as on the Guition and the web.
+    // The left end doubles as the zoom readout (page colour), so cycling the
+    // window with B still shows plainly which span is on screen.
+    Tf(plotX, y0 + ph + 10, F_S, kPageColor[LP_GRAPH], "-%s", kGraphWinName[gGraphWinIdx]);
+    TR(plotX + plotW, y0 + ph + 10, F_S, C_DIM, "now");
+
+    // Legend. Six slots at this font only fit across 320px with tight gaps.
     struct Leg { const char* n; uint16_t c; bool on; };
     Leg leg[6] = {{"Bat", C_GREEN, true}, {"Sol", C_SOLAR, true}, {"Chg", C_CHG, true},
                   {"Alt", C_ALT, true}, {"Load", C_LOAD, true}, {"SoC", C_SOC, !gGraphHideSoc}};
@@ -336,9 +387,121 @@ static void pageGraph(const DashData& d) {
     for (int i = 0; i < 6; ++i) {
         g->fillRect(lx, 128, 9, 9, leg[i].on ? leg[i].c : C_DIM);
         T(lx + 12, 138, F_S, leg[i].on ? C_TEXT : C_DIM, leg[i].n);
-        lx += 12 + textW(F_S, leg[i].n) + 12;
+        lx += 12 + textW(F_S, leg[i].n) + 9;
     }
     drawFooter("B:zoom  hold:SoC");
+}
+
+// ---- Page: Environment -----------------------------------------------------
+// One pair of channels at a time (B cycles), each on its OWN auto-scaled axis:
+// the first is solid and labelled down the left, the second dashed and labelled
+// down the right, in the series colour. Pairs and colours match the web card and
+// the Guition page. Only one pair is shown because four axis gutters will not fit
+// legibly across 320 px.
+struct EnvCh {
+    const int16_t* vals;
+    float scale;        // stored / scale = real units (10 = deci-*, 1 = whole kOhm)
+    const char* name;
+    const char* unit;
+    int dp;
+    uint16_t col;
+    float minSpan;      // keeps a flat trace a flat line instead of amplified noise
+    bool nowOk;
+    float now;
+};
+
+// Auto-scaled [lo,hi] over n points plus the live value; false when nothing valid.
+static bool envSpan(const EnvCh& c, int n, float& lo, float& hi) {
+    bool any = false; float mn = 0, mx = 0;
+    for (int i = 0; i < n; ++i) {
+        if (c.vals[i] == -32768) continue;
+        float v = c.vals[i] / c.scale;
+        if (!any) { mn = mx = v; any = true; } else { if (v < mn) mn = v; if (v > mx) mx = v; }
+    }
+    if (c.nowOk) { if (!any) { mn = mx = c.now; any = true; }
+                   else { if (c.now < mn) mn = c.now; if (c.now > mx) mx = c.now; } }
+    if (!any) return false;
+    float sp = mx - mn;
+    if (sp < c.minSpan) { float mid = (mn + mx) / 2; lo = mid - c.minSpan / 2; hi = mid + c.minSpan / 2; }
+    else { lo = mn - sp * 0.1f; hi = mx + sp * 0.1f; }
+    return true;
+}
+
+static void plotEnv(const EnvCh& c, int n, int px0, int pw, int py0, int ph,
+                    float lo, float hi, bool dashed) {
+    if (n < 2 || hi <= lo) return;
+    Arduino_GFX* g = G();
+    int prevX = -1, prevY = -1;
+    for (int i = 0; i < n; ++i) {
+        if (c.vals[i] == -32768) { prevX = -1; continue; }
+        float v = c.vals[i] / c.scale;
+        if (v < lo) v = lo;
+        if (v > hi) v = hi;
+        int x = px0 + (n <= 1 ? 0 : i * pw / (n - 1));
+        int y = py0 + ph - 1 - (int)((v - lo) / (hi - lo) * (ph - 1));
+        if (prevX >= 0) {
+            if (!dashed || ((x >> 2) & 1)) g->drawLine(prevX, prevY, x, y, c.col);
+        } else {
+            g->drawPixel(x, y, c.col);
+        }
+        prevX = x; prevY = y;
+    }
+}
+
+static void pageEnv(const DashData& d) {
+    Arduino_GFX* g = G();
+    const int x0 = 6, y0 = 4, pw = W - 12, ph = 112;
+    g->drawRect(x0, y0, pw, ph, RGB565(45, 45, 56));
+
+    if (!d.envPresent) {
+        T(x0 + 54, y0 + ph / 2 + 4, F_S, C_LBL, "no environment sensor");
+        drawFooter("A:page");
+        return;
+    }
+
+    EnvCh L, R;
+    if (gEnvPair == 0) {
+        L = {d.histEnvT, 10.0f, "Temp", "C",   1, C_ENV_T, 1.0f,  d.envValid,    d.envTempC};
+        R = {d.histEnvH, 10.0f, "Hum",  "%",   1, C_ENV_H, 1.0f,  d.envValid,    d.envHumidity};
+    } else {
+        L = {d.histEnvP, 10.0f, "Press", "hPa", 1, C_ENV_P, 2.0f,  d.envValid,    d.envPressureHpa};
+        R = {d.histEnvG, 1.0f,  "Gas",   "k",   0, C_ENV_G, 10.0f, d.envGasValid, d.envGasKohm};
+    }
+
+    // Plot rect, inset to leave an axis gutter on each side.
+    const int GUT = 34;
+    const int plotX = x0 + GUT, plotW = pw - 2 * GUT;
+    const int plotY = y0 + 4, plotH = ph - 8;
+
+    float lLo, lHi, rLo, rHi;
+    bool haveL = envSpan(L, d.histCount, lLo, lHi);
+    bool haveR = envSpan(R, d.histCount, rLo, rHi);
+
+    if (d.histCount < 2) {
+        T(x0 + 96, y0 + ph / 2 + 4, F_S, C_LBL, d.graphSyncing ? "syncing..." : "no data yet");
+    } else {
+        for (int gi = 0; gi <= 2; ++gi) {   // 3 gridlines, labelled on both sides
+            int y = plotY + plotH - 1 - gi * (plotH - 1) / 2;
+            g->drawFastHLine(plotX, y, plotW, RGB565(50, 50, 62));
+            if (haveL) TR(plotX - 2, y + 4, F_S, L.col, "%.*f", L.dp, lLo + (lHi - lLo) * gi / 2);
+            if (haveR) Tf(plotX + plotW + 3, y + 4, F_S, R.col, "%.*f", R.dp, rLo + (rHi - rLo) * gi / 2);
+        }
+        if (haveL) plotEnv(L, d.histCount, plotX, plotW, plotY, plotH, lLo, lHi, false);
+        if (haveR) plotEnv(R, d.histCount, plotX, plotW, plotY, plotH, rLo, rHi, true);
+    }
+
+    // Live values + the shared zoom window.
+    char lv[16], rv[16];
+    if (L.nowOk) snprintf(lv, sizeof(lv), "%.*f%s", L.dp, L.now, L.unit); else snprintf(lv, sizeof(lv), "--");
+    if (R.nowOk) snprintf(rv, sizeof(rv), "%.*f%s", R.dp, R.now, R.unit); else snprintf(rv, sizeof(rv), "--");
+    g->fillRect(6, 128, 9, 9, L.col);
+    Tf(18, 138, F_S, C_TEXT, "%s %s", L.name, lv);
+    int mid = 6 + 12 + textW(F_S, L.name) + 6 + textW(F_S, lv) + 16;
+    g->fillRect(mid, 128, 9, 9, R.col);
+    Tf(mid + 12, 138, F_S, C_TEXT, "%s %s", R.name, rv);
+    TR(W - 6, 138, F_S, C_LBL, "%s", kGraphWinName[gGraphWinIdx]);
+
+    drawFooter("B:channel  hold:zoom");
 }
 
 // ---- Page: Week ------------------------------------------------------------
@@ -567,6 +730,7 @@ static void drawFrame(const DashData& d) {
         case LP_DASH:  pageDash(d);  break;
         case LP_FLOW:  pageFlow(d);  break;
         case LP_GRAPH: pageGraph(d); break;
+        case LP_ENV:   pageEnv(d);   break;
         case LP_WEEK:  pageWeek(d);  break;
         case LP_SET:   pageSettings(d); break;
         default:       pageInfo(d);  break;
@@ -616,6 +780,7 @@ static void bShort() {
         case LP_DASH:  gDashDetail = (gDashDetail + 1) % 3; break;
         case LP_FLOW:  gFlowWatts = !gFlowWatts; break;
         case LP_GRAPH: gGraphWinIdx = (gGraphWinIdx + 1) % 5; setGraphWindowMinutes(kGraphWins[gGraphWinIdx]); break;
+        case LP_ENV:   gEnvPair ^= 1; break;
         case LP_WEEK:  gWeekScope = (gWeekScope + 1) % 3; break;
         case LP_SET:   gSetSel = (gSetSel + 1) % SET_N; break;
         default:       gBrightIdx = (gBrightIdx + 1) % (uint8_t)sizeof(kBright); applyBrightness(); break;
@@ -631,6 +796,11 @@ static void bLong() {
         return;
     }
     if (gPage == LP_GRAPH) gGraphHideSoc = !gGraphHideSoc;
+    // Env shares the Graph's history window, so hold-B cycles the same zoom.
+    else if (gPage == LP_ENV) {
+        gGraphWinIdx = (gGraphWinIdx + 1) % 5;
+        setGraphWindowMinutes(kGraphWins[gGraphWinIdx]);
+    }
     else if (gPage == LP_INFO) openPairWindow();
     else if (gPage == LP_SET) settingsActivate();
 }

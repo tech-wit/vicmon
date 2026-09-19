@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 5;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow)
+static const uint8_t kVersion = 6;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688)
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -47,6 +47,12 @@ enum Valid : uint16_t {
     V_DCDCINV = 1 << 11,   // DC-DC input voltage
     V_DCDCOUTV = 1 << 12,  // DC-DC output voltage
     V_CONSUMED = 1 << 13,  // battery consumed Ah
+    // v6 environment (Unit ENV Pro / BME688). Temperature, humidity and pressure
+    // come from one sensor read and are valid together, so they share a bit; the
+    // gas channel has its own validity (the heater must reach a stable setpoint,
+    // which takes a few measurement cycles from cold), hence the second bit.
+    V_ENV = 1 << 14,     // envTemp_dc / envHum_dp / envPress_dhpa are good
+    V_ENVGAS = 1 << 15,  // envGas_kohm is good (heater stable, gas measurement valid)
 };
 
 enum Mode : uint8_t {
@@ -91,6 +97,13 @@ struct Snapshot {
     int16_t consumedAh_da;// battery consumed, deci-amp-hours (signed, usually < 0)
     uint16_t capacityAh;  // v4: configured battery capacity, whole Ah (0 = unknown)
 
+    // v6 additions — cabin environment from a Unit ENV Pro (BME688) on the
+    // master's Grove port, so a slave mimics it alongside the Victron data.
+    int16_t envTemp_dc;      // temperature, deci-degrees C (signed)
+    int16_t envHum_dp;       // relative humidity, deci-percent (0..1000)
+    uint16_t envPress_dhpa;  // barometric pressure, deci-hectopascals (3000..11000)
+    uint16_t envGas_kohm;    // gas resistance, whole kilo-ohms (0xFFFF = n/a)
+
     uint16_t seq;         // increments each broadcast (slave can spot gaps)
     uint32_t uptime_s;    // master uptime, seconds
 };
@@ -133,13 +146,19 @@ static const uint8_t kHistChunkMagic1 = 'C';
 // coarse 24h@60s). Used to size the slave's staging buffers.
 static const uint16_t kHistFineMax = 720;
 static const uint16_t kHistCoarseMax = 1440;
-struct HistPointW { int16_t battery, solar, charger, dcdc, load, soc; };  // == app HistSample
+// == app HistSample (memcpy'd field-for-field in sendHistChunk), so the two MUST
+// stay in lockstep. envT/H/P/G mirror the HistSample encodings: deci-degC,
+// deci-%RH, deci-hPa and whole kilo-ohms, with -32768 meaning "not available".
+struct HistPointW {
+    int16_t battery, solar, charger, dcdc, load, soc;
+    int16_t envT, envH, envP, envG;
+};
 
 struct HistReq {
     uint8_t magic0, magic1, version, pad_;  // 'V','Q'
     uint32_t masterId;                       // target master (ignored by others)
 };
-static const int kHistChunkPts = 18;         // 18*12 + 16 hdr = 232 B (< 250)
+static const int kHistChunkPts = 11;         // 11*20 + 16 hdr = 236 B (< 250)
 struct HistChunk {
     uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse
     uint32_t masterId;

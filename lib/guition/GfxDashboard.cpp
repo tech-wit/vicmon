@@ -9,7 +9,7 @@ namespace guition {
 
 // ---------------------------------------------------------------- tab bar ----
 static void renderTabs(Arduino_GFX* c, Page page) {
-  static const char* names[PAGE_COUNT] = {"Dash", "Mimic", "Graph", "Week", "Settings"};
+  static const char* names[PAGE_COUNT] = {"Dash", "Mimic", "Graph", "Env", "Week", "Settings"};
   c->fillRect(0, TAB_Y, W, TAB_H, kBg);
   c->drawFastHLine(0, TAB_Y, W, kGrey);
   for (int i = 0; i < PAGE_COUNT; ++i) {
@@ -40,6 +40,7 @@ static const PageRenderFn kPageRender[PAGE_COUNT] = {
     renderDash,      // PAGE_DASH
     renderFlow,      // PAGE_FLOW
     renderGraph,     // PAGE_GRAPH  (slave builds history from received frames)
+    renderEnv,       // PAGE_ENV    (environment; shares the Graph page's zoom window)
     renderDays,      // PAGE_DAYS   (slave fills from the stats frame)
     renderSettings,  // PAGE_SETTINGS
 };

@@ -89,6 +89,13 @@ static const char kMimicPage[] = R"HTML(
   <canvas id="chart" width="700" height="160" style="width:100%;height:160px;margin-top:.5em"></canvas>
   <div id="legend" class="legend"></div>
 </div>
+<div class=card id="envCard" style="display:none">
+  <h3 style="margin:.2em 0 .6em">Environment</h3>
+  <div id="envNowTH" class="legend"></div>
+  <canvas id="envChartTH" width="700" height="140" style="width:100%;height:140px;margin:.4em 0 1em"></canvas>
+  <div id="envNowPG" class="legend"></div>
+  <canvas id="envChartPG" width="700" height="140" style="width:100%;height:140px;margin-top:.4em"></canvas>
+</div>
 <script>
 function set(id,t){document.getElementById(id).textContent=t;}
 function setNode(id,valid,a){set(id,valid?a.toFixed(1)+'A':'--');}
@@ -146,6 +153,25 @@ async function tick(){
  var ld=p.load.valid?p.load.a:0;
  setLine('lineLoad',(p.load.valid&&ld>0.05)?1:0,'#fbbf24');
  set('loadTxt','Load '+(p.load.valid?ld.toFixed(1)+'A':'--'));
+ renderEnvNow(p.env);
+}
+// The Environment card stays hidden until a sensor has actually been seen, so a
+// board with nothing on Port A shows no empty card. Once seen it stays visible,
+// showing '--' through a dropout rather than vanishing and reflowing the page.
+function renderEnvNow(e){
+ var card=document.getElementById('envCard');if(!card)return;
+ if(e&&e.present)envSeen=true;
+ card.style.display=envSeen?'':'none';
+ if(!envSeen)return;
+ ENVPAIRS.forEach(function(pair){
+  document.getElementById(pair.now).innerHTML=[pair.left,pair.right].map(function(k){
+   var m=ENV[k],ok=e&&e.valid&&(k!='gas'||e.gas_valid);
+   var v=ok?e[k].toFixed(m.dp)+' '+m.unit:'--';
+   // The dashed marker mirrors the dashed stroke the right-hand series is drawn with.
+   var mark=k===pair.right?'&#9644;':'&#9632;';
+   return '<span style="color:'+m.color+'">'+mark+' '+m.label+' <b>'+v+'</b></span>';
+  }).join('');
+ });
 }
 var SERIES=[
  {k:'battery',label:'Battery',color:'#22d3ee'},
@@ -156,6 +182,29 @@ var SERIES=[
  {k:'soc',label:'SoC %',color:'#f1f5f9',right:true,dash:true}
 ];
 var hidden={};
+// Environment channels, in two charts of two. Unlike the Trend chart — where every
+// series is amps on one shared axis — each of these has its own unit, so a pair
+// shares a chart but NOT an axis: the first series is scaled and labelled on the
+// left, the second (dashed) on the right, each auto-scaled to its own range and its
+// axis labels drawn in the series colour so which-is-which needs no legend lookup.
+// Both are auto-scaled rather than pinned to a nominal full range, because the
+// interesting movement is small — indoor humidity lives in a few percent and
+// pressure in a few hPa, which a 0-100% or 300-1100 hPa axis would flatten to a
+// straight line.
+var ENV={
+ temp:{label:'Temperature',unit:'\u00b0C',dp:1,color:'#fb923c'},
+ humidity:{label:'Humidity',unit:'%RH',dp:1,color:'#38bdf8'},
+ pressure:{label:'Pressure',unit:'hPa',dp:1,color:'#a3e635'},
+ gas:{label:'Gas',unit:'k\u03a9',dp:0,color:'#c084fc'}
+};
+// Minimum axis span per channel, so a dead-flat trace becomes a flat line in a
+// sensible band instead of noise amplified to full scale.
+var ENVSPAN={temp:1,humidity:1,pressure:2,gas:10};
+var ENVPAIRS=[
+ {canvas:'envChartTH',now:'envNowTH',left:'temp',right:'humidity'},
+ {canvas:'envChartPG',now:'envNowPG',left:'pressure',right:'gas'}
+];
+var envSeen=false;
 var chartWin=10,chartData=null;
 function setWin(m){chartWin=m;
  var bs=document.querySelectorAll('.winbtn');for(var i=0;i<bs.length;i++)
@@ -163,7 +212,7 @@ function setWin(m){chartWin=m;
  loadChart();}
 async function loadChart(){
  try{chartData=await(await fetch('/api/history?mins='+chartWin)).json();}catch(e){return;}
- drawChart();}
+ drawChart();drawEnvCharts();}
 function drawChart(){
  var c=document.getElementById('chart');if(!c||!c.getContext||!chartData)return;
  var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=40,padR=32,padT=8,padB=18;
@@ -216,6 +265,66 @@ function drawChart(){
   for(var i=0;i<a.length;i++){var v=a[i];if(v==null){started=false;continue;}
    var x=X(i),y=yf(v);if(started)ctx.lineTo(x,y);else{ctx.moveTo(x,y);started=true;}}
   ctx.stroke();});
+ ctx.setLineDash([]);
+}
+// Auto-scaled [min,max] for one channel, or null when it has no data at all.
+function envRange(a,key){
+ var mn=null,mx=null;
+ for(var i=0;i<a.length;i++){var v=a[i];if(v==null)continue;
+  if(mn==null||v<mn)mn=v;if(mx==null||v>mx)mx=v;}
+ if(mn==null)return null;
+ var span=mx-mn,floor=ENVSPAN[key]||1;
+ if(span<floor){var mid=(mn+mx)/2;return [mid-floor/2,mid+floor/2];}
+ return [mn-span*0.1,mx+span*0.1];
+}
+function drawEnvCharts(){ENVPAIRS.forEach(drawEnvPair);}
+// Two channels, two independent axes, over the same window and time base as Trend.
+function drawEnvPair(pair){
+ var c=document.getElementById(pair.canvas);if(!c||!c.getContext||!chartData)return;
+ var s=chartData.series||{};
+ var L=ENV[pair.left],R=ENV[pair.right];
+ var la=s[pair.left]||[],ra=s[pair.right]||[];
+ var lr=envRange(la,pair.left),rr=envRange(ra,pair.right);
+ var ctx=c.getContext('2d'),W=c.width,H=c.height,padL=54,padR=54,padT=8,padB=18;
+ ctx.clearRect(0,0,W,H);
+ if(!lr&&!rr){ctx.fillStyle='#5b6b7d';ctx.font='12px system-ui';ctx.textAlign='center';
+  ctx.fillText('no '+L.label.toLowerCase()+' / '+R.label.toLowerCase()+' history yet',W/2,H/2);return;}
+ var interval=chartData.interval||5;
+ var totalSlots=Math.max(2,Math.round(chartData.mins*60/interval));
+ function mapY(v,r){return padT+(H-padT-padB)*(1-(v-r[0])/(r[1]-r[0]));}
+ function X(i,n){var f=1-((n-1-i)/(totalSlots-1));if(f<0)f=0;return padL+(W-padL-padR)*f;}
+ // Five shared gridlines, labelled twice: left in the left series' colour and
+ // unit, right in the right series'. One set of lines, two readings.
+ var divs=4;
+ ctx.font='9px system-ui';
+ for(var gi=0;gi<=divs;gi++){
+  var y=padT+(H-padT-padB)*(1-gi/divs);
+  ctx.strokeStyle='#1f2c3a';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();
+  if(lr){ctx.fillStyle=L.color;ctx.textAlign='right';
+   ctx.fillText((lr[0]+(lr[1]-lr[0])*gi/divs).toFixed(L.dp)+L.unit,padL-4,y+3);}
+  if(rr){ctx.fillStyle=R.color;ctx.textAlign='left';
+   ctx.fillText((rr[0]+(rr[1]-rr[0])*gi/divs).toFixed(R.dp)+R.unit,W-padR+4,y+3);}
+ }
+ var stepMin=chartWin<=10?1:(chartWin<=60?10:180),plot=W-padL-padR;
+ for(var t=stepMin;t<chartWin-0.001;t+=stepMin){
+  var xx=padL+plot*(1-t/chartWin);
+  ctx.strokeStyle='#243140';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(xx,padT);ctx.lineTo(xx,H-padB);ctx.stroke();}
+ ctx.font='10px system-ui';ctx.fillStyle='#7d8da1';
+ ctx.textAlign='left';ctx.fillText('-'+(chartWin>=60?chartWin/60+'h':chartWin+'m'),padL,H-5);
+ ctx.textAlign='right';ctx.fillText('now',W-padR,H-5);
+ // The right-hand series is dashed, matching how Trend marks its right-axis series.
+ function line(a,r,meta,dash){
+  if(!r)return;
+  ctx.strokeStyle=meta.color;ctx.lineWidth=2;ctx.setLineDash(dash?[5,3]:[]);
+  ctx.beginPath();var started=false;
+  for(var i=0;i<a.length;i++){var v=a[i];if(v==null){started=false;continue;}
+   var x=X(i,a.length),y=mapY(v,r);
+   if(started)ctx.lineTo(x,y);else{ctx.moveTo(x,y);started=true;}}
+  ctx.stroke();}
+ line(la,lr,L,false);
+ line(ra,rr,R,true);
  ctx.setLineDash([]);
 }
 function renderLegend(){

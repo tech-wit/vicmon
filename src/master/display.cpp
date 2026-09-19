@@ -37,6 +37,7 @@ static int gBindMenuRole = -1;           // display-local: open source-picker ro
 static int gBindPage = 0;                // display-local: bindings-list page
 static int gMenuPage = 0;                // display-local: source-picker page
 static int gDiagScreen = 0;              // display-local: Diag sub-screen (guition::DiagScreen)
+static int gDiagPage = 0;                // display-local: Diag menu page
 static bool gDisplayFlip = false;        // display-local: panel rotated 180° (NVS-persisted)
 static volatile bool gFlipSaveReq = false;  // request: persist gDisplayFlip on the loop task
 static volatile bool gBrightSaveReq = false; // request: persist current brightness on the loop task
@@ -176,6 +177,30 @@ static void collectHistory(guition::DashData& d) {
         d.histDcdc[k]    = val(3);
         d.histLoad[k]    = val(4);
         d.histSoc[k]     = val(5);
+
+        // Environment downsamples by MEAN, not by the peak rule above. Peak-
+        // preserving exists to keep transient current spikes visible; temperature,
+        // humidity and pressure have no such transients, and picking the extreme
+        // sample of each bucket would just bias every column outward and make a
+        // steady reading look like it is drifting.
+        long sum[4] = {0, 0, 0, 0};
+        int cnt[4] = {0, 0, 0, 0};
+        for (int si = lo; si < hi; ++si) {
+            const HistSample& s = r.buf[(start + (size_t)si) % r.cap];
+            const int16_t ev[4] = {s.envT, s.envH, s.envP, s.envG};
+            for (int f = 0; f < 4; ++f) {
+                if (ev[f] == -32768) continue;
+                sum[f] += ev[f];
+                ++cnt[f];
+            }
+        }
+        auto mean = [&](int f) -> int16_t {
+            return cnt[f] ? (int16_t)(sum[f] / cnt[f]) : (int16_t)-32768;
+        };
+        d.histEnvT[k] = mean(0);
+        d.histEnvH[k] = mean(1);
+        d.histEnvP[k] = mean(2);
+        d.histEnvG[k] = mean(3);
     }
     d.histCount = out;
 }
@@ -217,7 +242,19 @@ static void collectDash(guition::DashData& d) {
     d.loadValid = p.loadA.valid; d.loadA = p.loadA.value;
     d.loadDerived = p.loadDerived;
 
-    // Graph page.
+    // Environment page: the master reads its own sensor.
+    {
+        const EnvReading& e = envReading();
+        d.envPresent = envPresent();
+        d.envValid = e.valid;
+        d.envGasValid = e.gasValid;
+        d.envTempC = e.tempC;
+        d.envHumidity = e.humidity;
+        d.envPressureHpa = e.pressureHpa;
+        d.envGasKohm = e.gasOhm / 1000.0f;
+    }
+
+    // Graph + Environment pages.
     collectHistory(d);
 
     // Week page: resettable meters + last-7 "day" Ah bars (a "day" = a calendar
@@ -387,6 +424,15 @@ static void collectSlaveDash(guition::DashData& d) {
     d.dcdcInVValid = has(V_DCDCINV); d.dcdcInV = decCenti(s.dcdcInV_cv);  // v3
     d.loadValid = has(V_LOAD); d.loadA = decDeci(s.loadA_da); d.loadDerived = false;
     d.battCapAh = s.capacityAh;  // v4: for the Dash/Flow remaining-Ah readout
+    // Environment mirrored from the master's sensor (v6). A slave cannot tell "no
+    // sensor fitted" from "sensor not reading yet", so validity stands in for both.
+    d.envPresent = has(V_ENV);
+    d.envValid = has(V_ENV);
+    d.envGasValid = has(V_ENVGAS);
+    d.envTempC = decDeci(s.envTemp_dc);
+    d.envHumidity = decDeci(s.envHum_dp);
+    d.envPressureHpa = s.envPress_dhpa / 10.0f;
+    d.envGasKohm = has(V_ENVGAS) ? (float)s.envGas_kohm : 0.0f;
     d.profileId = s.profile;
     collectHistory(d);  // Graph page: fill from the history built off received frames
     d.graphSyncing = gRx.histActive();  // show the "syncing" hint while pulling history
@@ -625,6 +671,7 @@ static void displayTask(void*) {
                 if ((guition::Page)t != gPage) { gPage = (guition::Page)t; redraw = true; }
                 gBindMenuRole = -1;  // leaving the page closes any open picker
                 gDiagScreen = 0;     // and returns Diag to its menu
+                gDiagPage = 0;
             } else if (gPage == guition::PAGE_GRAPH) {
                 // Tap a zoom pill to jump straight to that window (1m..24h).
                 int win = guition::graphHitTest(tp.x, tp.y);
@@ -634,6 +681,12 @@ static void displayTask(void*) {
                     int s = guition::graphLegendHit(tp.x, tp.y);  // tap legend to toggle a series
                     if (s >= 0) { gGraphHidden ^= (uint8_t)(1 << s); redraw = true; }
                 }
+            } else if (gPage == guition::PAGE_ENV) {
+                // Same zoom pills as the Graph page, driving the same window — the
+                // two pages plot the same history ring over the same time span, so
+                // switching tabs keeps the zoom you were looking at.
+                int win = guition::graphHitTest(tp.x, tp.y);
+                if (win > 0 && win != gGraphWinMin) { gGraphWinMin = win; redraw = true; }
             } else if (gPage == guition::PAGE_SETTINGS) {
                 if (gSetView == 1 && gBindMenuRole >= 0) {
                     // Source picker open: tap an option to bind it, Back to cancel,
@@ -663,9 +716,9 @@ static void displayTask(void*) {
                     if (gRole == ROLE_SLAVE && effView == 1) effView = 0;
                     int v = guition::settingsViewHit(tp.x, tp.y);
                     if (v >= 0 && !(gRole == ROLE_SLAVE && v == 1)) {
-                        if (v != gSetView) { gSetView = v; gBindMenuRole = -1; gDiagScreen = 0; redraw = true; }
+                        if (v != gSetView) { gSetView = v; gBindMenuRole = -1; gDiagScreen = 0; gDiagPage = 0; redraw = true; }
                     } else if (effView == 2) {
-                        switch (guition::diagHit(tp.x, tp.y, gRole, gDiagScreen)) {
+                        switch (guition::diagHit(tp.x, tp.y, gRole, gDiagScreen, gDiagPage)) {
                             case guition::DIAG_OPEN_MON:   gDiagScreen = guition::DS_MON;   redraw = true; break;
                             case guition::DIAG_OPEN_DISC:  gDiagScreen = guition::DS_DISC;  redraw = true; break;
                             case guition::DIAG_OPEN_DEBUG: gDiagScreen = guition::DS_DEBUG; redraw = true; break;
@@ -679,6 +732,15 @@ static void displayTask(void*) {
                             case guition::DIAG_ROLE_TOGGLE: gRoleReq = true; break;
                             case guition::DIAG_RESTART: gRebootReq = true; break;  // loop applies (serviceRole)
                             case guition::DIAG_UNPAIR: gRx.unpair(); redraw = true; break;
+                            case guition::DIAG_MENU_PREV:
+                                if (gDiagPage > 0) { gDiagPage--; redraw = true; }
+                                break;
+                            case guition::DIAG_MENU_NEXT:
+                                if (gDiagPage < guition::diagMenuPages(gRole) - 1) {
+                                    gDiagPage++;
+                                    redraw = true;
+                                }
+                                break;
                             default: break;
                         }
                     } else if (effView == 1) {
@@ -777,6 +839,7 @@ static void displayTask(void*) {
             d.bindPage = (uint8_t)gBindPage;        // bindings-list page (display-owned)
             d.menuPage = (uint8_t)gMenuPage;        // source-picker page (display-owned)
             d.diagScreen = (uint8_t)gDiagScreen;    // Diag sub-screen (display-owned)
+            d.diagPage = (uint8_t)gDiagPage;        // Diag menu page (display-owned)
             d.displayFlip = gDisplayFlip;           // screen 180° flip (display-owned)
             d.debugCapture = gDebugCapture;         // reflect the toggle instantly (display-owned)
             d.weekHold = wkHold; d.weekHoldFrac = wkFrac;  // Week long-press feedback (display-owned)

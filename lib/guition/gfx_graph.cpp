@@ -32,7 +32,7 @@ int graphHitTest(int x, int y) {
   return -1;
 }
 
-static void renderZoomRow(Arduino_GFX* c, int activeMin) {
+void renderZoomRow(Arduino_GFX* c, int activeMin) {
   char buf[8];
   for (int i = 0; i < 5; ++i) {
     int px = GZ_X0 + i * (GZ_W + GZ_GAP);

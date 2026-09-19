@@ -45,6 +45,13 @@
 #if defined(BOARD_M5CAPSULE)
   #define VICMON_HAS_M5CAPSULE 1
 #endif
+// Unit ENV Pro (BME688) on the M5Capsule's Grove Port A — cabin temperature,
+// humidity, pressure and gas resistance (env_sensor.cpp). Compiled in with the
+// Capsule backend since Port A's pins (13/15) are that board's; absent hardware
+// simply never initialises and every reading stays "not available".
+#if defined(VICMON_HAS_M5CAPSULE)
+  #define VICMON_HAS_ENVPRO 1
+#endif
 #if defined(VICMON_HAS_GUITION) || defined(VICMON_HAS_LILYGO)
   #define VICMON_DISPLAY 1
 #endif
@@ -105,12 +112,32 @@ struct PanelModel {
     float capacity = 0;  // battery Ah (0 = unknown)
 };
 
+// Latest environment reading from the Unit ENV Pro (BME688). Kept out of
+// PanelModel deliberately: PanelModel is *resolved from the Victron registry*,
+// whereas this is a locally attached sensor with no device binding.
+struct EnvReading {
+    float tempC = 0;        // degrees Celsius
+    float humidity = 0;     // % relative humidity
+    float pressureHpa = 0;  // hectopascals (millibars)
+    float gasOhm = 0;       // gas resistance, ohms (relative VOC indicator)
+    bool valid = false;     // a fresh temperature/humidity/pressure reading is held
+    bool gasValid = false;  // ...and the gas heater was stable for it
+    uint32_t lastMs = 0;    // millis() of that reading
+};
+
 // One time-series sample + ring buffer. Two rings (fine 5 s/1 h, coarse 60 s/24 h)
 // are written by the loop (sampleHistory) and read by the display (collectHistory)
 // and the web history JSON (buildHistoryJson).
+// NOTE: the layout is memcpy'd straight onto slavelink::HistPointW when a slave
+// pulls the graph history, so the two structs must be changed together.
 struct HistSample {
     int16_t battery, solar, charger, dcdc, load;  // deci-amps, -32768 = n/a
     int16_t soc;                                   // deci-percent (0..1000), -32768 = n/a
+    // Environment (Unit ENV Pro / BME688), -32768 = n/a on each.
+    int16_t envT;   // temperature, deci-degrees C
+    int16_t envH;   // relative humidity, deci-percent
+    int16_t envP;   // barometric pressure, deci-hectopascals (3000..11000)
+    int16_t envG;   // gas resistance, whole kilo-ohms
 };
 struct HistRing {
     HistSample* buf = nullptr;
@@ -216,8 +243,14 @@ void saveApCfg(const String& ssid, const String& pass);
 String settingsNs(int profile);
 void saveHistFile(int profile);
 void startPairing();
+void stopPairing();
 bool pairingActive();
 int pairSecsLeft();
+// Role-aware pairing for callers that just want "the pair button": a master opens
+// its advertising window, a slave arms adoption. Used by the Capsule's physical
+// button and its pairing-flash LED.
+bool pairingModeActive();
+void togglePairingMode();
 void serviceRole();
 void hexInto(char* out, size_t n, const uint8_t* p, size_t len);
 void summarizeDevice(const DeviceSlot& s, char* out, size_t n);
@@ -262,6 +295,23 @@ void capsuleLogSample(uint32_t now);         // append a CSV row to the daily SD
 bool capsuleRtcOk();          // RTC present and holding a valid time
 bool capsuleSdOk();           // microSD card mounted for logging
 void capsuleDumpSd();         // serial diagnostic: list /vicmon log files
+void capsuleLedTest();        // serial diagnostic: cycle the WS2812 through bright colours
+void capsuleSetLed(uint8_t r, uint8_t g, uint8_t b);  // publish the steady status colour
+                              // (the button/LED task owns the pixel and overlays the
+                              // pairing flash on top of it)
+#endif
+
+#ifdef VICMON_HAS_ENVPRO
+// Unit ENV Pro (BME688) on Grove Port A (env_sensor.cpp).
+void envBringUp();                 // bring up Wire1 on Port A + probe/configure the sensor
+void envService(uint32_t now);     // non-blocking sample state machine; call each loop
+const EnvReading& envReading();    // latest reading (goes invalid once stale)
+bool envPresent();                 // a BME68x answered on Port A
+void envDump();                    // serial diagnostic: scan Port A + print the reading
+#else
+// Headless stand-ins so the history/JSON/CSV writers stay branch-free.
+inline const EnvReading& envReading() { static const EnvReading kNone; return kNone; }
+inline bool envPresent() { return false; }
 #endif
 
 #ifdef VICMON_HAS_LILYGO

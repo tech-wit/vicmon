@@ -68,8 +68,17 @@ void test_encode_decode() {
 }
 
 void test_fits_espnow() {
-    // Must stay well under the 250-byte ESP-NOW payload limit.
+    // Every broadcast/unicast frame must fit the 250-byte ESP-NOW payload limit.
+    // HistChunk is the sharp edge: its size is kHistChunkPts * sizeof(HistPointW)
+    // plus a header, so adding a history channel silently pushes it over unless
+    // kHistChunkPts comes down to match. esp_now_send just fails at runtime, and
+    // the only symptom is a slave whose graph history never arrives.
     TEST_ASSERT_LESS_THAN(250, (int)sizeof(Snapshot));
+    TEST_ASSERT_LESS_THAN(250, (int)sizeof(StatsFrame));
+    TEST_ASSERT_LESS_THAN(250, (int)sizeof(HistChunk));
+    TEST_ASSERT_LESS_THAN(250, (int)sizeof(HistReq));
+    // ...and a chunk should still carry a useful number of points.
+    TEST_ASSERT_GREATER_THAN(0, kHistChunkPts);
 }
 
 int main(int, char**) {

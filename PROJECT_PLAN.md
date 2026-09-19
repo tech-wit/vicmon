@@ -12,8 +12,9 @@ development can resume cleanly when the display/slave hardware arrives.
 | 1 | BLE advertisement decryption core | ✅ done, verified on hardware |
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
-| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 6-page renderer, 2-button nav, one universal image w/ runtime board-detect) |
+| 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 7-page renderer incl. Environment, 2-button nav, one universal image w/ runtime board-detect) |
 | — | **M5Stack M5Capsule** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm, microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
+| — | **Environment sensing** (Unit ENV Pro / BME688) | ✅ done + verified — temperature / humidity / pressure / gas on Grove Port A, in the history rings, web Environment chart, **Guition LCD Environment page** (2 dual-axis charts) and **LilyGo Environment page** (one pair at a time, B cycles), both sharing the Graph zoom window; SD CSV and the ESP-NOW snapshot; pairing on the Capsule button with a flashing LED |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
 **One app, one codebase (2026-07-08).** `src/master/` is *the* application, and the
@@ -47,6 +48,16 @@ free). The two remaining giants (WiFi ~55 KB, BLE controller ~48 KB) are fixed b
 the precompiled Arduino/IDF core. Live memory is on the web `/diag` page and via
 the `mem` / `tasks` serial commands.
 
+**Memory after environment support (fw 0.7.x).** Adding four env channels spent a
+good chunk of that reclaimed headroom on the Capsule: the history rings grew ~17 KB
+(`HistSample` 12→20 B across 720+1440 samples) and the LCD Environment page's
+`DashData` arrays another ~3.8 KB, taking free heap **96 KB → ~65 KB**. Still safe —
+the chunked page serving keeps the largest single allocation at 3.8 KB, and
+`webtest` confirms both heavy pages still build (worst dip ~37 KB free while
+rendering Settings) — but the margin is thinner than the paragraph above implies.
+The cheapest ~5.8 KB back would be dropping env from the *fine* (5 s) ring, which it
+does not need. Note the slave-role graph staging grew in step (26 KB → 43 KB).
+
 ### ESP-NOW master ↔ slave (Phase 4, verified)
 
 - **Filtering:** every frame carries a stable `masterId` (low 3 bytes of the
@@ -58,10 +69,19 @@ the `mem` / `tasks` serial commands.
 - **Transmit:** a 250 ms `esp_timer` broadcasts a cached snapshot (~4/s) so the
   rate is independent of the loop's ~2 s BLE scan; the broadcast peer uses
   `ifidx = WIFI_IF_AP` (the master is AP-only — the original STA default sent
-  nothing). Wire format `lib/slavelink/SlaveLink.h` (v5; +solar W/V, dc-dc V,
-  consumed & capacity Ah, master clock), shared receiver `lib/slavelink/SlaveReceiver.h`.
-  A version bump forces both ends onto the same firmware — flash master **and**
-  slave together, or the link goes silent (all frame types gate on `kVersion`).
+  nothing). Wire format `lib/slavelink/SlaveLink.h` (**v6**; v3 +solar W/V, dc-dc V,
+  consumed Ah, v4 capacity, v5 master clock, **v6 environment** — temp/humidity/
+  pressure/gas + `V_ENV`/`V_ENVGAS` validity bits), shared receiver
+  `lib/slavelink/SlaveReceiver.h`. A version bump forces both ends onto the same
+  firmware — flash master **and** slave together, or the link goes silent (all
+  telemetry frame types gate on `kVersion`). The **OTA-clone frames deliberately do
+  NOT**, which is what lets a newer unit push across a telemetry bump to rescue an
+  old one — that is how v6 was rolled out to a 0.7.0 Capsule wirelessly.
+  `HistSample`/`HistPointW` also grew 12→20 B for v6, so `kHistChunkPts` dropped
+  18→11 to keep `HistChunk` under the 250 B ESP-NOW payload limit (the native test
+  `test_fits_espnow` now asserts this for **every** frame type, not just Snapshot),
+  and the LittleFS history file version went `kHistVer` 2→3 so stale files are
+  discarded rather than misread.
 - **Extra frames** (same file, dispatched by length + magic): a low-rate
   **StatsFrame** (`V T`) carries the Today/Trip/Total energy meters + runtime-day
   bars for the slave's Week page **and the master's UTC clock** (`utcNow`, v5) so
@@ -138,7 +158,8 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 | Original dev board | **ESP32 WROOM-32** | Used for Phase-1 bring-up; dropped off USB mid-session (CP210x). `wroom` env still builds the Phase-1 scanner. |
 | Master w/ display | **Guition JC3248W535** | ESP32-S3, 16MB/8MB PSRAM, 3.5" 320×480 IPS, cap touch. ✅ verified. |
 | Display w/ buttons | **LilyGo T-Display-S3** | ESP32-S3, 1.9" 320×170, two buttons. ✅ verified. |
-| Headless peripheral | **M5Stack M5Capsule** (StampS3) | ESP32-S3FN8, no PSRAM. BM8563 RTC (I2C 0x51 on SDA=8/SCL=10) as clock source, buzzer GPIO2, microSD SPI (SCK14/MOSI12/MISO39/CS11), power-hold GPIO46, WS2812 GPIO21. ✅ verified. |
+| Headless peripheral | **M5Stack M5Capsule** (StampS3) | ESP32-S3FN8, no PSRAM. BM8563 RTC (I2C 0x51 on SDA=8/SCL=10) as clock source, buzzer GPIO2, microSD SPI (SCK14/MOSI12/MISO39/CS11), power-hold GPIO46, WS2812 GPIO21 (**v1.1: LED power rail GPIO38 must be driven HIGH** or it stays dark and silently ignores every write), button GPIO42 (active LOW). ✅ verified. |
+| Environment sensor | **M5Stack Unit ENV Pro** (BME688) | On the Capsule's Grove Port A — `Wire1`, SDA=GPIO13/SCL=GPIO15 @100 kHz, I2C 0x77. Temperature / humidity / pressure / gas resistance. ✅ verified. |
 | Victron devices (test) | **BMV/SmartShunt** + **Orion XS 1400 DC-DC** + **SmartSolar MPPT** | BMV, Orion XS & solar decode verified vs VictronConnect. |
 
 ## Repository layout (actual)
@@ -166,8 +187,9 @@ vicmon/
 │   │   ├── web.cpp         # WiFi-AP web app: pages, JSON, handlers, setupServer (+ registry mutex)
 │   │   ├── web_assets.h    # embedded HTML/CSS/JS (mimic / energy / diag pages)
 │   │   ├── display.cpp     # Guition dashboard glue: display task, DashData collection, touch (VICMON_DISPLAY)
-│   │   ├── display_lilygo.cpp # LilyGo ST7789 6-page renderer + 2-button nav (VICMON_HAS_LILYGO)
-│   │   ├── capsule.cpp     # M5Capsule peripherals: BM8563 RTC, buzzer, microSD log, power-hold (VICMON_HAS_M5CAPSULE)
+│   │   ├── display_lilygo.cpp # LilyGo ST7789 7-page renderer (incl. Environment) + 2-button nav (VICMON_HAS_LILYGO)
+│   │   ├── capsule.cpp     # M5Capsule peripherals: RTC, buzzer, microSD log, power-hold, button+LED task (VICMON_HAS_M5CAPSULE)
+│   │   ├── env_sensor.cpp  # Unit ENV Pro (BME688) on Grove Port A: non-blocking forced-mode sampling (VICMON_HAS_ENVPRO)
 │   │   ├── espnow.cpp      # ESP-NOW broadcaster + StatsFrame + history-pull responder
 │   │   ├── ble_ingest.cpp  # BLE scan → decrypt/parse → registry (loop task, under the registry mutex)
 │   │   ├── Registry.h      # DeviceSlot (key, type, latest values, mac, staleness)
@@ -182,7 +204,7 @@ vicmon/
 │   ├── GfxDashboard.{h,cpp} # public API + tab bar + page-descriptor registry / dispatch
 │   ├── gfx_internal.h      # shared palette / layout / primitives + per-page render decls
 │   ├── gfx_common.cpp      # shared primitives (gtext / numOr / modeColor / ttgLabel)
-│   └── gfx_{dash,flow,graph,week,settings}.cpp  # one file per page
+│   └── gfx_{dash,flow,graph,env,week,settings}.cpp  # one file per page (env = 2 dual-axis charts)
 ├── test/test_victron/      # native unit tests (pio test -e native)
 ├── test/test_slavelink/    # native wire-format round-trip tests
 └── tools/monitor.py        # TTY-less serial reader (pio monitor needs a TTY)
@@ -378,6 +400,31 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   the slave hops channels to acquire rather than hard-pinning channel 1.
 - **Cached values held 5 min** so the mimic isn't blank on join and the chart
   line is continuous (gaps were null samples from devices not heard at tick time).
+- **Never use `window.confirm()` (or alert/prompt) in the web UI.** The device
+  runs a captive-portal DNS, so a phone joining its AP opens the UI in the OS
+  captive-portal WebView (Android CaptivePortalLogin / iOS CNA) — and those
+  routinely suppress native dialogs, returning `false` with nothing shown. Every
+  confirm-guarded action then *silently did nothing* while unguarded ones worked,
+  which is exactly how "Switch to Slave" looked broken. Use the two-step
+  `cfm(btn, fn)` helper in `systemCard()` instead: first tap arms + relabels,
+  second acts, auto-disarms after 4 s.
+- **Capsule v1.1 gates its RGB LED behind GPIO38.** The LED is on GPIO21, but on
+  the v1.1 board (Stamp-S3A) an electronic power switch on **GPIO38 must be driven
+  HIGH** first or the LED is unpowered and ignores every write — indistinguishable
+  by eye from a dead LED, a wrong pin or a broken driver. M5Unified's pin table
+  lists GPIO21 and says nothing about the rail; check the board-revision docs.
+- **Widening a struct that is also a wire format: grep every brace-init.**
+  `HistSample` grew from 6 to 10 channels; a `HistSample s{a,b,c,d,e,f}` in the
+  slave's `applyPulledHistory()` kept compiling and silently *value-initialised*
+  the four new members to 0, so every synced history point read 0 hPa / 0 °C
+  instead of "n/a" and wrecked the chart's auto-scale. A `static_assert` on size
+  guards the memcpy path but is blind to a partial aggregate init. Copy whole
+  points, don't list fields.
+- **Overlapping LCD hit-tests fail silently.** The Diag menu's pinned "Restart"
+  button overlapped the 5th menu row on a master, and its hit-test ran first, so
+  every tap meant for "Switch to Slave" returned Restart. Fixed by making Restart
+  an ordinary row and paginating the menu. When adding a fixed control to a list
+  screen, check it against the *longest* list the screen can show.
 
 ## Open items / unverified
 
@@ -394,6 +441,17 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
 - Master display + touch: verified on hardware (the Guition ships as the master
   panel and has been driven live all through Phase 3/4, incl. OTA from the LCD).
 - Display brightness **is** persisted (NVS `vicdisp/bright`) — restored on boot.
+- **LCD Environment pages rendered but not yet eyeballed** (fw 0.7.2). The data
+  is confirmed on both boards (live values + a zeros-free history backlog over
+  ESP-NOW) and neither crashes, but the *layouts* have not been looked at —
+  particularly the pressure axis labels ("1019.3"), the widest thing on either
+  page, in the Guition's 52 px gutter and the LilyGo's 34 px one.
+- **Unit ENV Pro is M5Capsule-only by design.** Grove Port A pins differ per
+  board (Capsule/StampS3/Dial/DinMeter = SDA 13/SCL 15; CoreS3/AtomS3/Cardputer =
+  SDA 2/SCL 1), and anything that isn't a Guition/LilyGo/Capsule is `HW_HEADLESS`
+  with no way to know which pair to use. Extending it means probing pin pairs the
+  way the sensor address is already probed — cheap, but it means driving I2C on an
+  unidentified board.
 
 ## Phases (remaining)
 
@@ -438,7 +496,10 @@ format on the host.
   `Arduino_ESP32LCD8`; landscape rot=3.
 - **Driver in the app** (`lib/lilygo/`, `src/master/display_lilygo.cpp`). A canvas-buffered
   compact renderer with page parity to the Guition build — Dashboard, Power Flow, Graph,
-  Week, Status, Settings — fed from the same per-role `collectDashForRole()`. Two-button
+  Environment, Week, Status, Settings — fed from the same per-role `collectDashForRole()`.
+  The Environment page shows ONE channel pair at a time (B cycles temp+humidity /
+  pressure+gas, hold-B cycles the shared zoom); 320x170 cannot fit four axis gutters
+  legibly, which is why it differs from the Guition's stacked pair of charts. Two-button
   nav (A next/prev via short/long, B page-action/secondary) polled in a dedicated 60Hz
   task so it stays responsive under BLE load. FreeSans/FreeSansBold fonts; charge green /
   discharge red state colouring; shared `ttgLabel`. Settings tab cycles items (B) with

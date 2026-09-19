@@ -50,7 +50,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.6.2";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.3";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -85,6 +85,24 @@ bool pairingActive() {
 int pairSecsLeft() {
     return pairingActive() ? (int)((gPairUntilMs - millis()) / 1000) : 0;
 }
+// Close the window early (a second press of the pair button = "never mind").
+void stopPairing() { gPairUntilMs = 0; }
+
+// Role-aware pairing, for the callers that just want "the pair button" and don't
+// care which end of the link this board is. Pairing is two-sided: a MASTER opens
+// an advertising window, a SLAVE arms adoption of whichever master it hears
+// advertising. The web Pair button already branches this way (web.cpp); these two
+// wrap it so the physical button and the LED agree with it.
+bool pairingModeActive() {
+    return gRole == ROLE_SLAVE ? gRx.isAdopting() : pairingActive();
+}
+void togglePairingMode() {
+    if (gRole == ROLE_SLAVE) {
+        if (gRx.isAdopting()) gRx.stopAdopt(); else gRx.startAdopt();
+    } else {
+        if (pairingActive()) stopPairing(); else startPairing();
+    }
+}
 
 // ---- display hardware detection (Guition vs LilyGo) ------------------------
 // The universal image compiles both display backends; pick the right one at boot
@@ -116,6 +134,23 @@ void detectBoard() {
             return;
         }
     }
+#if defined(VICMON_HAS_GUITION) && defined(VICMON_HAS_LILYGO)
+    // Sample GPIO4 BEFORE any I2C probing. The M5Capsule probe below clocks GPIO8,
+    // which is the Guition's touch I2C SCL; a partial transaction there can leave the
+    // touch controller holding SDA (= GPIO4) low, so a read taken afterwards sees ~0 mV
+    // and misdetects a Guition as a LilyGo. Taken first, the level is the one the
+    // board's own pull-up/divider sets:
+    //   • Guition: GPIO4 = touch I2C SDA, pulled up to ~3.3V   -> ~3100 mV
+    //   • LilyGo:  GPIO4 = VBAT/2 battery divider              -> ~1800..2300 mV
+    // Average a few ADC reads; > threshold => the pulled-up Guition line.
+    pinMode(4, INPUT);
+    uint32_t gpio4mv = 0;
+    for (int i = 0; i < 8; ++i) gpio4mv += analogReadMilliVolts(4);
+    gpio4mv /= 8;
+    // Release GPIO4 from the ADC so the Guition touch's Wire.begin(4,8) can claim it
+    // cleanly — without this the pin stays attached to ADC1 and I2C touch init fails.
+    gpio_reset_pin((gpio_num_t)4);
+#endif
 #ifdef VICMON_HAS_M5CAPSULE
     // Positive probe first: the M5Capsule's BM8563 RTC ACKs at 0x51 on the internal
     // I2C bus (SDA=8/SCL=10); nothing on the Guition or LilyGo answers there. On a
@@ -131,23 +166,14 @@ void detectBoard() {
     gpio_reset_pin((gpio_num_t)10);
 #endif
 #if defined(VICMON_HAS_GUITION) && defined(VICMON_HAS_LILYGO)
-    // Distinguish by the DC level on GPIO4 — a genuine hardware difference between
-    // the two boards, unlike an I2C probe (GPIO4 is the LilyGo's battery-ADC pin,
-    // which fakes ACKs and reads back as 0x00 just like an idle Guition touch):
-    //   • Guition: GPIO4 = touch I2C SDA, pulled up to ~3.3V   -> ~3300 mV
-    //   • LilyGo:  GPIO4 = VBAT/2 battery divider              -> ~1800..2200 mV
-    // Average a few ADC reads; > threshold => the pulled-up Guition line.
-    pinMode(4, INPUT);
-    uint32_t mv = 0;
-    for (int i = 0; i < 8; ++i) mv += analogReadMilliVolts(4);
-    mv /= 8;
-    // Release GPIO4 from the ADC so the Guition touch's Wire.begin(4,8) can claim it
-    // cleanly — without this the pin stays attached to ADC1 and I2C touch init fails.
-    gpio_reset_pin((gpio_num_t)4);
-    bool guition = (mv > 2800);
+    // Distinguish by the DC level on GPIO4, sampled above before any I2C probing —
+    // a genuine hardware difference between the two boards, unlike an I2C probe
+    // (GPIO4 is the LilyGo's battery-ADC pin, which fakes ACKs and reads back as
+    // 0x00 just like an idle Guition touch).
+    bool guition = (gpio4mv > 2800);
     gHwBoard = guition ? HW_GUITION : HW_LILYGO;
     Serial.printf("[board] auto-detect: %s (GPIO4 = %lu mV)\n",
-                  guition ? "GUITION" : "LILYGO", (unsigned long)mv);
+                  guition ? "GUITION" : "LILYGO", (unsigned long)gpio4mv);
 #elif defined(VICMON_HAS_GUITION)
     gHwBoard = HW_GUITION;  Serial.println("[board] compile-time: GUITION");
 #elif defined(VICMON_HAS_LILYGO)
@@ -262,6 +288,12 @@ static void serviceMasterSerial() {
                     Serial.println("[cap] test beep");
                 } else if (!strcmp(line, "sd")) {
                     capsuleDumpSd();  // list the microSD log files
+                } else if (!strcmp(line, "led")) {
+                    capsuleLedTest();  // is the WS2812 alive on GPIO21 at all?
+#endif
+#ifdef VICMON_HAS_ENVPRO
+                } else if (!strcmp(line, "env")) {
+                    envDump();  // scan Grove Port A + print the live ENV Pro reading
 #endif
                 }
             }
@@ -435,6 +467,11 @@ HistRing gFine, gCoarse;
 static int16_t encA(bool v, float a) {
     return v ? static_cast<int16_t>(lroundf(a * 10.0f)) : -32768;
 }
+// Number of series buildHistoryJson emits, and which one is the gas channel (the
+// only one not held as *10 fixed-point).
+static const int kHistSeries = 10;
+static const int kHistGasIdx = 9;
+
 static int16_t sampleField(const HistSample& s, int idx) {
     switch (idx) {
         case 0: return s.battery;
@@ -442,7 +479,32 @@ static int16_t sampleField(const HistSample& s, int idx) {
         case 2: return s.charger;
         case 3: return s.dcdc;
         case 4: return s.load;
-        default: return s.soc;
+        case 5: return s.soc;
+        case 6: return s.envT;
+        case 7: return s.envH;
+        case 8: return s.envP;
+        default: return s.envG;
+    }
+}
+
+// Encode the live Unit ENV Pro reading into a history sample. Temperature,
+// humidity and pressure share the *10 fixed-point convention of the electrical
+// channels; gas is recorded in whole kilo-ohms because its useful range spans
+// three orders of magnitude and a tenth of an ohm is noise. Gas carries its own
+// validity — the heater needs a few cycles from cold before its number means
+// anything, while T/H/P are good from the first reading.
+static void encodeEnv(HistSample& s) {
+    const EnvReading& e = envReading();
+    s.envT = e.valid ? static_cast<int16_t>(lroundf(e.tempC * 10.0f)) : -32768;
+    s.envH = e.valid ? static_cast<int16_t>(lroundf(e.humidity * 10.0f)) : -32768;
+    s.envP = e.valid ? static_cast<int16_t>(lroundf(e.pressureHpa * 10.0f)) : -32768;
+    if (e.gasValid) {
+        float k = e.gasOhm / 1000.0f;       // ohms -> kilo-ohms
+        if (k > 32000.0f) k = 32000.0f;     // very clean air can run away; clamp under INT16_MAX
+        if (k < 0.0f) k = 0.0f;
+        s.envG = static_cast<int16_t>(lroundf(k));
+    } else {
+        s.envG = -32768;
     }
 }
 
@@ -462,6 +524,7 @@ static void sampleHistory() {
     s.dcdc = encA(c.dV, c.dcdc);
     s.load = encA(c.lV, c.load);
     s.soc = encA(soc.valid, soc.value);  // deci-percent (same *10 encoding)
+    encodeEnv(s);
     if (dueFine) gFine.push(s, now);
     if (dueCoarse) gCoarse.push(s, now);
 }
@@ -485,6 +548,12 @@ static void sampleSlaveHistory() {
     s.dcdc    = f(V_DCDC, sn.dcdcA_da);
     s.load    = f(V_LOAD, sn.loadA_da);
     s.soc     = f(V_SOC, sn.soc_d);
+    // Environment mirrors the master's sensor: T/H/P share one validity bit, gas
+    // has its own (see slavelink::V_ENV / V_ENVGAS).
+    s.envT    = f(V_ENV, sn.envTemp_dc);
+    s.envH    = f(V_ENV, sn.envHum_dp);
+    s.envP    = f(V_ENV, (int16_t)sn.envPress_dhpa);
+    s.envG    = f(V_ENVGAS, (int16_t)sn.envGas_kohm);
     if (dueFine) gFine.push(s, now);
     if (dueCoarse) gCoarse.push(s, now);
 }
@@ -496,7 +565,7 @@ static void sampleSlaveHistory() {
 // reloaded samples continue seamlessly at the "now" edge.
 
 bool gFsOk = false;
-static const uint8_t kHistVer = 2;  // bumped when HistSample gained `soc`
+static const uint8_t kHistVer = 3;  // 2: HistSample gained `soc`; 3: + environment (T/H/P/gas)
 // How often the history is flushed to flash. At ~26 KB/save (full buffers) this
 // is ~7.5 MB/day; LittleFS wear-levels it across the ~1.5 MB FS partition, so at
 // 100k erase cycles/block the flash lasts decades. Raise it to lose less to
@@ -593,19 +662,25 @@ String buildHistoryJson(int mins) {
     if (want > static_cast<int>(r.count)) want = r.count;
     if (want < 0) want = 0;
     size_t start = (r.head + r.cap - want) % r.cap;
-    const char* names[6] = {"battery", "solar", "charger", "dcdc", "load", "soc"};
+    // Series order must match sampleField()'s indices. The electrical channels and
+    // the first three environment ones are *10 fixed-point; gas is already whole
+    // kilo-ohms, so it is emitted as an integer rather than divided.
+    const char* names[kHistSeries] = {"battery", "solar", "charger", "dcdc", "load",
+                                      "soc", "temp", "humidity", "pressure", "gas"};
     String j = "{\"interval\":" + String(r.intervalMs / 1000) +
                ",\"mins\":" + String(mins) + ",\"series\":{";
-    for (int f = 0; f < 6; ++f) {
+    for (int f = 0; f < kHistSeries; ++f) {
+        bool whole = (f == kHistGasIdx);
         j += "\"" + String(names[f]) + "\":[";
         for (int k = 0; k < want; ++k) {
             size_t idx = (start + k) % r.cap;
             int16_t v = sampleField(r.buf[idx], f);
             if (k) j += ",";
-            j += (v == -32768) ? "null" : String(v / 10.0f, 1);
+            if (v == -32768) j += "null";
+            else j += whole ? String(v) : String(v / 10.0f, 1);
         }
         j += "]";
-        if (f < 5) j += ",";
+        if (f < kHistSeries - 1) j += ",";
     }
     j += "}}";
     return j;
@@ -901,8 +976,13 @@ static void updateLed(int worst, ChargeMode mode) {
     else if (mode == ChargeMode::Charging) { g = 30; }
     else if (mode == ChargeMode::Discharging) { g = 6; b = 22; }
     else { r = g = b = 2; }  // idle / unknown: faint white
-    // The M5Capsule's WS2812 sits on GPIO21 (StampS3), not the AtomS3's GPIO35.
-    neopixelWrite(capsulePresent() ? 21 : RGB_LED_PIN, r, g, b);
+#ifdef VICMON_HAS_M5CAPSULE
+    // The Capsule's WS2812 (GPIO21) is owned by its button/LED task, which overlays
+    // the pairing flash on top of this steady colour — publish, don't write, so the
+    // two tasks never drive the RMT peripheral at the same time.
+    if (capsulePresent()) { capsuleSetLed(r, g, b); return; }
+#endif
+    neopixelWrite(RGB_LED_PIN, r, g, b);
 }
 
 // Resolve a field from the first configured device of a given type. Used for
@@ -1067,24 +1147,34 @@ static void setupSlave() {
 // Load a completed history pull into the trend rings (chronological, native
 // resolution) so the Graph page is fully populated; live frames extend it after.
 static void applyPulledHistory() {
+    // HistPointW and HistSample are deliberately the same sequence of int16
+    // channels (asserted below, and relied on by sendHistChunk's memcpy), so copy
+    // the whole point rather than listing fields.
+    //
+    // This used to brace-init the six electrical fields by name. When the four
+    // environment channels were added, that init silently VALUE-INITIALISED them
+    // to 0 — so every pulled backlog sample arrived as 0 degC / 0 %RH / 0 hPa
+    // instead of "not available", and the Environment chart auto-scaled itself
+    // from 0 to 1019 hPa, burying the real data in a flat line at the top. A
+    // memcpy cannot silently drop a channel the next time one is added.
+    static_assert(sizeof(HistSample) == sizeof(slavelink::HistPointW),
+                  "HistSample and HistPointW must stay layout-compatible");
+    auto take = [](const slavelink::HistPointW& p) {
+        HistSample s;
+        memcpy(&s, &p, sizeof(s));
+        return s;
+    };
     // Only replace a ring the master actually sent samples for — otherwise keep
     // the slave's own live-accumulated ring (don't wipe 12h/24h when the master
     // has no coarse history yet).
     if (gRx.fineCount() > 0) {
         gFine.clear();
-        for (uint16_t i = 0; i < gRx.fineCount(); ++i) {
-            const slavelink::HistPointW& p = gRx.finePoint(i);
-            HistSample s{p.battery, p.solar, p.charger, p.dcdc, p.load, p.soc};
-            gFine.push(s, millis());
-        }
+        for (uint16_t i = 0; i < gRx.fineCount(); ++i) gFine.push(take(gRx.finePoint(i)), millis());
     }
     if (gRx.coarseCount() > 0) {
         gCoarse.clear();
-        for (uint16_t i = 0; i < gRx.coarseCount(); ++i) {
-            const slavelink::HistPointW& p = gRx.coarsePoint(i);
-            HistSample s{p.battery, p.solar, p.charger, p.dcdc, p.load, p.soc};
-            gCoarse.push(s, millis());
-        }
+        for (uint16_t i = 0; i < gRx.coarseCount(); ++i)
+            gCoarse.push(take(gRx.coarsePoint(i)), millis());
     }
 }
 
@@ -1214,6 +1304,15 @@ void setup() {
     Serial.printf("[boot] role: %s\n", gRole == ROLE_SLAVE ? "SLAVE" : "MASTER");
     if (gRole == ROLE_SLAVE) { setupSlave(); return; }
 
+#ifdef VICMON_HAS_ENVPRO
+    // Unit ENV Pro on Grove Port A — MASTER role only. A slave's history and panel
+    // are fed from the master's ESP-NOW snapshot (sampleSlaveHistory), so a locally
+    // attached sensor there would be overwritten a moment later by the remote
+    // reading; better to leave the bus alone than to fight over the same fields.
+    // After capsuleBringUp(), which owns the separate internal I2C bus (Wire).
+    if (gHwBoard == HW_M5CAPSULE) envBringUp();
+#endif
+
     loadClock();  // master owns the clock: restore the rough time saved before reboot
 
 #ifdef GUITION_NO_WIFI
@@ -1323,6 +1422,9 @@ void loop() {
     // a deferred profile switch.
     RegLock regLk;
     updateDerivedSmoothing();  // refresh median-smoothed derived signals
+#ifdef VICMON_HAS_ENVPRO
+    envService(millis());  // non-blocking: kicks off / collects a BME688 measurement
+#endif
     sampleHistory();  // continuous logging, regardless of any connected client
     sampleStats();    // integrate energy counters / trip stats
 

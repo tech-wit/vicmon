@@ -54,6 +54,18 @@ struct DashData {
   int16_t  histCharger[HIST_POINTS];  // deci-amps
   int16_t  histDcdc[HIST_POINTS];     // deci-amps (DC-DC output)
   int16_t  histLoad[HIST_POINTS];     // deci-amps
+  // Environment page (Unit ENV Pro / BME688 on the master's Grove port). Four
+  // unrelated units, so they are shown as two dual-axis charts rather than being
+  // forced onto the Graph page's shared Amps axis. Same fixed-point encodings as
+  // the firmware's HistSample: deci-degC / deci-%RH / deci-hPa / whole kilo-ohms.
+  bool     envPresent = false;     // a sensor has been seen (hide the page's content if not)
+  bool     envValid = false;       // the live T/H/P reading is good
+  bool     envGasValid = false;    // ...and the gas heater was stable for it
+  float    envTempC = 0, envHumidity = 0, envPressureHpa = 0, envGasKohm = 0;
+  int16_t  histEnvT[HIST_POINTS];  // deci-degrees C
+  int16_t  histEnvH[HIST_POINTS];  // deci-percent RH
+  int16_t  histEnvP[HIST_POINTS];  // deci-hectopascals
+  int16_t  histEnvG[HIST_POINTS];  // whole kilo-ohms
   int      histCount = 0;          // valid points (<= HIST_POINTS)
   uint16_t histWinMin = 60;        // selected window (minutes): 1/10/60/720/1440
   uint8_t  graphHidden = 0;        // bitfield: series hidden via the legend (bit 0=batt..5=soc)
@@ -107,6 +119,7 @@ struct DashData {
   uint8_t  bindPage = 0;           // bindings-list page (display-owned)
   uint8_t  menuPage = 0;           // source-picker page (display-owned)
   uint8_t  diagScreen = 0;         // Diag sub-screen: 0 menu / MON / DISC / DEBUG / DISPLAY / ROLE / LINK
+  uint8_t  diagPage = 0;           // Diag menu page (display-owned, like bindPage)
   bool     displayFlip = false;    // panel rotated 180° (display-owned; persisted in NVS)
 
   // Settings > Bindings. `srcLabels` is the shared list of selectable sources
@@ -156,7 +169,8 @@ struct DashData {
 };
 
 // Pages selectable via the bottom tab bar.
-enum Page : uint8_t { PAGE_DASH = 0, PAGE_FLOW, PAGE_GRAPH, PAGE_DAYS, PAGE_SETTINGS, PAGE_COUNT };
+enum Page : uint8_t { PAGE_DASH = 0, PAGE_FLOW, PAGE_GRAPH, PAGE_ENV, PAGE_DAYS, PAGE_SETTINGS,
+                      PAGE_COUNT };
 
 // Adjustable tunables on the Settings page (indices shared with the firmware's
 // apply logic). Index 0 (brightness) is handled locally by the display task.
@@ -196,13 +210,23 @@ enum DiagScreen : uint8_t {
 enum DiagAction : uint8_t {
   DIAG_NONE = 0, DIAG_BACK,
   DIAG_OPEN_MON, DIAG_OPEN_DISC, DIAG_OPEN_DEBUG, DIAG_OPEN_ROLE, DIAG_OPEN_LINK, DIAG_OPEN_FW,
-  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR, DIAG_RESTART, DIAG_OTA_PUSH, DIAG_OTA_PULL
+  DIAG_DEBUG_TOGGLE, DIAG_ROLE_TOGGLE, DIAG_UNPAIR, DIAG_RESTART, DIAG_OTA_PUSH, DIAG_OTA_PULL,
+  DIAG_MENU_PREV, DIAG_MENU_NEXT   // menu pagination (same nav column as the Bindings list)
 };
 
+// Rows per page in the paginated Diagnostics menu, and how many pages the current
+// role needs. "Restart device" is an ordinary row in this list: it used to be a
+// fixed button pinned to the bottom of the screen, which overlapped the 5th menu
+// row on a master and swallowed its taps (the Restart hit-test ran first), making
+// "Switch to Slave" unreachable from the LCD.
+static constexpr int DIAG_PERPAGE = 4;
+int diagMenuPages(int role);
+
 // Hit-test the Diagnostics sub-view given the current screen + role. Returns a
-// DiagAction (DIAG_NONE on a miss). On the menu it returns which screen to open;
+// DiagAction (DIAG_NONE on a miss). On the menu it returns which screen to open
+// (resolving the tapped row against `page`) or a DIAG_MENU_PREV/NEXT page step;
 // on a sub-screen it returns Back or the screen's control action.
-int diagHit(int tx, int ty, int role, int screen);
+int diagHit(int tx, int ty, int role, int screen, int page);
 
 // Rows per page in the paginated Bindings list and source-picker.
 static constexpr int BIND_PERPAGE = 6;
@@ -225,8 +249,9 @@ int bindVisible(int role, int srcCount, int* outShared, int max);
 // a miss. Add menuPage*BIND_PERPAGE to a slot to index the visible list.
 int bindMenuHit(int tx, int ty);
 
-// If (tx,ty) hit a Graph-page zoom pill, return its window in minutes
-// (1/10/60/720/1440); otherwise return -1. Call only when the Graph page is up.
+// If (tx,ty) hit a zoom pill, return its window in minutes (1/10/60/720/1440);
+// otherwise return -1. The Graph and Environment pages share the same pill row
+// (and the same selected window), so call this when either is up.
 int graphHitTest(int tx, int ty);
 
 // If (tx,ty) hit a Graph legend slot, return the series index 0..5 (batt/solar/
