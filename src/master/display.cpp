@@ -13,12 +13,22 @@
 
 #include <cmath>
 #include <cstring>
+#include <new>
 
 // ---- display state (task-owned unless noted) -------------------------------
 static guition::Display  gDisplay;
 static guition::Touch    gTouch;
 bool                     gDisplayOk = false;  // read by main loop (extern in app.h)
-static guition::DashData gDash;
+// Published snapshot plus the two working copies either side of it. All three
+// are 4.9KB. gDash used to be BSS (paid for by every board in the universal
+// image, headless M5Capsule included) and the two working copies were plain
+// function LOCALS — a 4.9KB stack frame in publishDash/publishSlaveDash on the
+// loop task and another in the display task, against 8KB stacks. They are now
+// heap, allocated once a panel is confirmed present, so a headless board
+// allocates none of them and no stack carries a 4.9KB frame.
+static guition::DashData* gDash = nullptr;     // published snapshot
+static guition::DashData* gPubBuf = nullptr;   // loop-side collection scratch
+static guition::DashData* gUiBuf = nullptr;    // display task's working copy
 static SemaphoreHandle_t gDashMux = nullptr;
 // Requests from the display task (Settings page) that must run on the loop task
 // (registry / NVS owner). -1 / 0 = idle.
@@ -372,11 +382,11 @@ void publishDash() {
 #ifdef VICMON_HAS_LILYGO
     if (gHwBoard == HW_LILYGO) { lilygoRender(); return; }
 #endif
-    if (!gDashMux) return;
-    guition::DashData tmp;
+    if (!gDashMux || !gPubBuf) return;
+    guition::DashData& tmp = *gPubBuf;
     collectDash(tmp);
     if (xSemaphoreTake(gDashMux, 0) == pdTRUE) {
-        gDash = tmp;
+        *gDash = tmp;
         xSemaphoreGive(gDashMux);
     }
 }
@@ -503,11 +513,11 @@ void publishSlaveDash() {
 #ifdef VICMON_HAS_LILYGO
     if (gHwBoard == HW_LILYGO) { lilygoRender(); return; }
 #endif
-    if (!gDashMux) return;
-    guition::DashData tmp;
+    if (!gDashMux || !gPubBuf) return;
+    guition::DashData& tmp = *gPubBuf;
     collectSlaveDash(tmp);
     if (xSemaphoreTake(gDashMux, 0) == pdTRUE) {
-        gDash = tmp;
+        *gDash = tmp;
         xSemaphoreGive(gDashMux);
     }
 }
@@ -824,9 +834,13 @@ static void displayTask(void*) {
         uint32_t uiInterval = (gPage == guition::PAGE_FLOW) ? 130 : 500;
         if (redraw || now - lastUi >= uiInterval) {
             lastUi = now;
-            guition::DashData d;
+            // On a mutex miss this now keeps the PREVIOUS frame rather than
+            // redrawing from a default-constructed one — better to repeat a frame
+            // than to blank the panel, and a fresh temporary would put the 4.9KB
+            // back on the stack, which is what we are removing.
+            guition::DashData& d = *gUiBuf;
             if (xSemaphoreTake(gDashMux, pdMS_TO_TICKS(50)) == pdTRUE) {
-                d = gDash;
+                d = *gDash;
                 xSemaphoreGive(gDashMux);
             }
             lastSrcCount = d.srcCount;               // for the next menu-hit mapping
@@ -914,6 +928,15 @@ void bringUpDisplay() {
     Serial.printf("Display: %dx%d\n", gDisplay.width(), gDisplay.height());
     gDisplay.setBrightness(loadDisplayBright());  // restore the saved backlight level
     gTouch.begin(flipRotation());
+    gDash = new (std::nothrow) guition::DashData();
+    gPubBuf = new (std::nothrow) guition::DashData();
+    gUiBuf = new (std::nothrow) guition::DashData();
+    if (!gDash || !gPubBuf || !gUiBuf) {
+        Serial.println("[display] out of memory for dash buffers — running headless");
+        delete gDash; delete gPubBuf; delete gUiBuf;
+        gDash = gPubBuf = gUiBuf = nullptr;
+        return;
+    }
     gDashMux = xSemaphoreCreateMutex();
     if (gRole == ROLE_SLAVE) publishSlaveDash(); else publishDash();  // seed
     // Priority 2 (above the Arduino loop's 1) so touch polling preempts the loop's

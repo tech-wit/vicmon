@@ -32,6 +32,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "LilygoDisplay.h"
 #include <fonts/FreeSans9pt7b.h>
@@ -120,8 +121,18 @@ static volatile uint8_t gBrightIdx = 0;
 
 static volatile bool gForce = true;      // request an immediate redraw
 
-// Published snapshot (loop writes under mutex; display task reads).
-static DashData gSnap;
+// Published snapshot (loop writes under mutex; display task reads), plus the two
+// working copies either side of it.
+//
+// These are 4.9KB each and used to be BSS, which meant EVERY board in the
+// universal image paid for all three — including the headless M5Capsule, which
+// has no panel, no PSRAM and the tightest heap of the three boards. They are now
+// allocated at panel bring-up, so a board with no screen never allocates them at
+// all (~14.7KB of static RAM handed back to the Capsule's heap) while a board
+// with a screen pays exactly the same total as before, just from the heap.
+static DashData* gSnap = nullptr;        // published snapshot
+static DashData* gTaskBuf = nullptr;     // display task's working copy
+static DashData* gRenderBuf = nullptr;   // loop side's collection scratch
 static SemaphoreHandle_t gSnapMux = nullptr;
 static volatile bool gHaveSnap = false;
 
@@ -956,7 +967,7 @@ static void pollButton(bool downNow, bool& down, uint32_t& tDown, bool& longFire
 
 // ---- display task: poll buttons ~60Hz, redraw from the snapshot ~4Hz --------
 static void lilygoTask(void*) {
-    static DashData local;
+    DashData& local = *gTaskBuf;  // allocated by lilygoBringUp before this task starts
     bool aDown = false, bDown = false, aLongF = false, bLongF = false;
     uint32_t aT = 0, bT = 0, lastDraw = 0;
     for (;;) {
@@ -967,7 +978,7 @@ static void lilygoTask(void*) {
             lastDraw = now;
             gForce = false;
             if (xSemaphoreTake(gSnapMux, pdMS_TO_TICKS(20)) == pdTRUE) {
-                memcpy(&local, &gSnap, sizeof(local));
+                memcpy(&local, gSnap, sizeof(DashData));
                 xSemaphoreGive(gSnapMux);
                 drawFrame(local);
             }
@@ -994,6 +1005,16 @@ bool lilygoBringUp() {
         if (gFlip) gLcd.setRotation(1);  // restore a saved 180° flip
     }
     setGraphWindowMinutes(kGraphWins[gGraphWinIdx]);
+    // Allocate the three DashData buffers now that a panel is confirmed present.
+    gSnap = new (std::nothrow) DashData();
+    gTaskBuf = new (std::nothrow) DashData();
+    gRenderBuf = new (std::nothrow) DashData();
+    if (!gSnap || !gTaskBuf || !gRenderBuf) {
+        Serial.println("[lilygo] out of memory for dash buffers — running headless");
+        delete gSnap; delete gTaskBuf; delete gRenderBuf;
+        gSnap = gTaskBuf = gRenderBuf = nullptr;
+        return false;
+    }
     gSnapMux = xSemaphoreCreateMutex();
     // Priority 2 (above the Arduino loop) on core 1 so button polling preempts the
     // loop's BLE work; it sleeps 16ms/iter so it never starves the loop.
@@ -1004,11 +1025,11 @@ bool lilygoBringUp() {
 
 // Loop side (registry owner): publish a fresh DashData snapshot for the task.
 void lilygoRender() {
-    if (!gSnapMux) return;
-    static DashData tmp;
+    if (!gSnapMux || !gRenderBuf) return;
+    DashData& tmp = *gRenderBuf;
     collectDashForRole(tmp);
     if (xSemaphoreTake(gSnapMux, pdMS_TO_TICKS(20)) == pdTRUE) {
-        memcpy(&gSnap, &tmp, sizeof(gSnap));
+        memcpy(gSnap, &tmp, sizeof(DashData));
         xSemaphoreGive(gSnapMux);
         gHaveSnap = true;
     }

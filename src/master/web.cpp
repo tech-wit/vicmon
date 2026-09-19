@@ -251,12 +251,15 @@ static String pageHead(const char* active) {
         const char* href;
         const char* name;
     } links[] = {{"/", "Mimic"}, {"/stats", "Stats"}, {"/devices", "Devices"},
-                 {"/bindings", "Settings"}, {"/diag", "Diag"}};
+                 {"/bindings", "Settings"}, {"/network", "Network"}, {"/diag", "Diag"}};
     for (auto& l : links) {
         // A slave has no BLE devices of its own — hide those pages. It DOES get the
         // energy stats from the master (ESP-NOW StatsFrame), so /stats stays. Leaves
         // the live Mimic + Stats + Settings (System card: pair / role / unpair).
+        // A slave owns no devices/bindings of its own; what it DOES control
+        // (pair, role, its AP, OTA) all lives on /network.
         if (gRole == ROLE_SLAVE && (strcmp(l.href, "/devices") == 0 ||
+                                    strcmp(l.href, "/bindings") == 0 ||
                                     strcmp(l.href, "/diag") == 0))
             continue;
         h += "<a href='";
@@ -345,31 +348,76 @@ static String jsEsc(String s) {
 // String (+ the copy req->send(String) makes) either came back BLANK or, when
 // pre-allocated big, crashed the AsyncTCP task and dropped WiFi. Pieces stay small
 // and non-contiguous, so they fit the fragmented heap and need no copy.
+// A page is a list of segments, each either a pointer straight INTO FLASH or a
+// small heap String for the generated bits.
+//
+// Every static literal in these pages already lives in .rodata (flash is
+// memory-mapped on the ESP32, so it can be memcpy'd from directly). The old
+// version copied each one into a heap String while building, so a 24KB page
+// needed 24KB of heap before a single byte went out — and that peak is what took
+// the master's minimum free heap under 3KB and wedged it. Referencing the
+// literal instead costs one pointer.
+//
+// Literals shorter than the threshold still batch into `cur`: a segment carries
+// ~28 bytes of bookkeeping, so referencing a 2-byte "'" would cost more than
+// copying it.
+struct Seg {
+    const char* lit = nullptr;  // non-null => `len` bytes of flash, never copied
+    size_t len = 0;
+    String dyn;                 // used when lit == nullptr
+    const char* data() const { return lit ? lit : dyn.c_str(); }
+    size_t size() const { return lit ? len : dyn.length(); }
+};
+
 struct HtmlOut {
-    std::vector<String>* pieces;
+    std::vector<Seg>* pieces;
     String cur;
+    static const size_t kMinLit = 48;  // below this, copying beats a segment
+    void flushCur() {
+        if (!cur.length()) return;
+        pieces->emplace_back();
+        pieces->back().dyn = cur;
+        cur = "";
+    }
     void add(const String& s) {
         cur += s;
-        if (cur.length() >= 1400) { pieces->push_back(cur); cur = ""; }
+        if (cur.length() >= 1400) flushCur();
+    }
+    void lit(const char* s, size_t n) {
+        flushCur();
+        pieces->emplace_back();
+        pieces->back().lit = s;
+        pieces->back().len = n;
     }
     HtmlOut& operator+=(const String& s) { add(s); return *this; }
-    HtmlOut& operator+=(const char* s)   { add(String(s)); return *this; }
-    void flush() { if (cur.length()) { pieces->push_back(cur); cur = ""; } }
+    HtmlOut& operator+=(const char* s) {
+        size_t n = strlen(s);
+        if (n < kMinLit) add(String(s)); else lit(s, n);
+        return *this;
+    }
+    // F("...") is a flash literal too — stream it rather than inflating a String.
+    HtmlOut& operator+=(const __FlashStringHelper* f) {
+        const char* s = reinterpret_cast<const char*>(f);
+        size_t n = strlen(s);
+        if (n < kMinLit) add(String(s)); else lit(s, n);
+        return *this;
+    }
+    void flush() { flushCur(); }
 };
 
 // Chunked-transfer the collected pieces so nothing large is held contiguously and
 // there is no second copy. The shared_ptr keeps the pieces alive for the async
 // response's lifetime and frees them when it completes.
-static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<String>> pieces) {
+static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<Seg>> pieces) {
     req->send(req->beginChunkedResponse("text/html",
         [pieces](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
             size_t pos = 0;
-            for (const String& s : *pieces) {
-                size_t len = s.length();
+            for (const Seg& sg : *pieces) {
+                size_t len = sg.size();
                 if (index < pos + len) {
                     size_t off = index - pos;
                     size_t n = (maxLen < len - off) ? maxLen : (len - off);
-                    memcpy(buf, s.c_str() + off, n);
+                    memcpy(buf, sg.data() + off, n);
                     return n;
                 }
                 pos += len;
@@ -505,10 +553,7 @@ static void bindingsPage(HtmlOut& h) {
     // its config AP, and OTA. The master-only cards (profiles, panel signals, system
     // tunables, alerts, WiFi-join, backup) would be empty or would break the link
     // (joining a router moves the SoftAP off ch1), so they're hidden.
-    if (gRole == ROLE_SLAVE) {
-        h += systemCard();
-        h += apCard();
-        h += otaCard();
+    if (gRole == ROLE_SLAVE) {  // nothing here belongs to a slave — see /network
         h += pageFoot();
         return;
     }
@@ -519,39 +564,48 @@ static void bindingsPage(HtmlOut& h) {
          "measured sources: <b>charge unexplained</b> = battery charge beyond "
          "solar/charger/DC-DC; <b>load</b> = consumption (sources offset by net "
          "battery flow).</p>"
-         "<form method=post action=/bind>";
+         "<form method=post action=/bind><div id=sigs></div>";
 
+    // The option catalogue is emitted ONCE and the twelve selects are built in the
+    // browser. Emitting it per role meant this page grew as roles x devices x
+    // fields — 24KB of heap for two devices, the largest allocation the firmware
+    // made, and the one that pushed free heap to the floor. The catalogue is ~1KB
+    // and the builder below is a literal, so it streams from flash.
+    h += "<script>var DEV=[";
+    for (size_t i = 0; i < gConfig.count(); ++i) {
+        DeviceSlot& sl = gConfig.slots()[i];
+        sig::Field fields[8];
+        size_t nf = sig::fieldsForType(sl.type, fields, 8);
+        for (size_t k = 0; k < nf; ++k)
+            h += "[\"" + String(sl.name) + "|" + String(static_cast<int>(fields[k])) + "\",\"" +
+                 String(sl.name) + " &middot; " + sig::fieldLabel(fields[k]) + "\"],";
+    }
+    h += "];var DRV=[[\"(charge_only)|0\",\"Derived: charge unexplained by sources\"],"
+         "[\"(load_only)|0\",\"Derived: load (sources &minus; battery)\"]];var ROLES=[";
     for (size_t r = 0; r < sig::kRoleCount; ++r) {
         sig::Role role = static_cast<sig::Role>(r);
         const sig::Binding& cur = gSignals.binding(role);
-        h += "<div style='margin-bottom:.7em'><label>" + String(sig::roleLabel(role)) +
-             "</label><select name=" + sig::roleKey(role) + " style='min-width:240px'>";
-        h += "<option value=''>&mdash; none &mdash;</option>";
+        // A legacy "(derived)" binding means the load half; normalise it here so the
+        // browser only has to string-compare against the two canonical values.
+        String sel = cur.device[0] ? String(cur.device) + "|" + String(static_cast<int>(cur.field))
+                                   : String("");
+        if (strcmp(cur.device, sig::kDerived) == 0) sel = "(load_only)|0";
         bool currentRole = (role == sig::Role::SolarA || role == sig::Role::ChargerA ||
                             role == sig::Role::DcDcInA || role == sig::Role::DcDcOutA ||
                             role == sig::Role::LoadA);
-        if (currentRole) {
-            bool selC = strcmp(cur.device, sig::kChargeOnly) == 0;
-            bool selL = strcmp(cur.device, sig::kLoadOnly) == 0 ||
-                        strcmp(cur.device, sig::kDerived) == 0;
-            h += String("<option value='(charge_only)|0'") + (selC ? " selected" : "") +
-                 ">Derived: charge unexplained by sources</option>";
-            h += String("<option value='(load_only)|0'") + (selL ? " selected" : "") +
-                 ">Derived: load (sources &minus; battery)</option>";
-        }
-        for (size_t i = 0; i < gConfig.count(); ++i) {
-            DeviceSlot& s = gConfig.slots()[i];
-            sig::Field fields[8];
-            size_t nf = sig::fieldsForType(s.type, fields, 8);
-            for (size_t k = 0; k < nf; ++k) {
-                String val = String(s.name) + "|" + String(static_cast<int>(fields[k]));
-                bool sel = (strcmp(cur.device, s.name) == 0 && cur.field == fields[k]);
-                h += "<option value='" + val + "'" + (sel ? " selected" : "") + ">" +
-                     String(s.name) + " &middot; " + sig::fieldLabel(fields[k]) + "</option>";
-            }
-        }
-        h += "</select></div>";
+        h += "[\"" + String(sig::roleKey(role)) + "\",\"" + String(sig::roleLabel(role)) +
+             "\",\"" + sel + "\"," + (currentRole ? "1" : "0") + "],";
     }
+    h += "];";
+    h += "(function(){var o='';for(var i=0;i<ROLES.length;i++){var r=ROLES[i];"
+         "o+=\"<div style='margin-bottom:.7em'><label>\"+r[1]+\"</label>\";"
+         "o+=\"<select name=\"+r[0]+\" style='min-width:240px'>\";"
+         "o+=\"<option value=''>&mdash; none &mdash;</option>\";"
+         "var L=(r[3]?DRV:[]).concat(DEV);"
+         "for(var j=0;j<L.length;j++){o+=\"<option value='\"+L[j][0]+\"'\"+"
+         "(L[j][0]==r[2]?' selected':'')+\">\"+L[j][1]+\"</option>\";}"
+         "o+=\"</select></div>\";}"
+         "document.getElementById('sigs').innerHTML=o;})();</script>";
     h += "<button>save bindings</button></form></div>";
 
     h += "<div class=card><h3>System settings</h3>"
@@ -626,11 +680,21 @@ static void bindingsPage(HtmlOut& h) {
          "A configured device that stops broadcasting also raises a warning. On an "
          "M5Capsule the buzzer chirps while the battery is SoC-critical.</p></div>";
 
+    h += pageFoot();
+}
+
+// Connectivity and system control, split off /bindings so neither page has to be
+// built whole in RAM at once. That page reached 24KB of heap for a two-device
+// setup — the largest allocation the firmware made, and the one that walked free
+// heap down to nothing. Splitting halves the peak again on top of building the
+// selects client-side, and it is also where a slave's own controls live.
+static void networkPage(HtmlOut& h) {
+    h += pageHead("/network");
     h += systemCard();
     h += apCard();
-    h += wifiCard();
+    if (gRole != ROLE_SLAVE) h += wifiCard();  // joining a router moves the AP off ch1
     h += otaCard();
-    h += backupCard();
+    if (gRole != ROLE_SLAVE) h += backupCard();
     h += pageFoot();
 }
 
@@ -640,15 +704,19 @@ static void bindingsPage(HtmlOut& h) {
 void webSelfTest() {
     for (int which = 0; which < 2; ++which) {
         uint32_t h0 = ESP.getFreeHeap();
-        auto pieces = std::make_shared<std::vector<String>>();
+        auto pieces = std::make_shared<std::vector<Seg>>();
         HtmlOut h{pieces.get()};
         if (which == 0) bindingsPage(h); else devicesPage(h);
         h.flush();
-        size_t total = 0, mx = 0;
-        for (const String& s : *pieces) { total += s.length(); if (s.length() > mx) mx = s.length(); }
-        Serial.printf("[webtest] %s: %u pieces, %u bytes (max piece %u), heap %u->%u maxblk %u\n",
+        size_t total = 0, mx = 0, heapBytes = 0;
+        for (const Seg& sg : *pieces) {
+            total += sg.size();
+            if (sg.size() > mx) mx = sg.size();
+            if (!sg.lit) heapBytes += sg.size();  // what the page actually cost the heap
+        }
+        Serial.printf("[webtest] %s: %u pieces, %u bytes (%u heap, rest flash), heap %u->%u maxblk %u\n",
                       which == 0 ? "bindings" : "devices", (unsigned)pieces->size(),
-                      (unsigned)total, (unsigned)mx, (unsigned)h0,
+                      (unsigned)total, (unsigned)heapBytes, (unsigned)h0,
                       (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     }
     // The JSON endpoints the pages poll. On a headless board (the M5Capsule) there
@@ -822,7 +890,7 @@ static void handleApCfg(AsyncWebServerRequest* req) {
         saveApCfg("", "");  // clear -> Vicmon-<mac3> / default password at next boot
     } else {
         String ssid = param(req, "ssid"), pass = param(req, "pass");
-        if (ssid.length() == 0) { req->redirect("/bindings"); return; }
+        if (ssid.length() == 0) { req->redirect("/network"); return; }
         if (pass.length() && pass.length() < 8) {
             req->send(200, "text/html", "AP password must be at least 8 characters. "
                                         "<a href=/bindings>back</a>");
@@ -844,7 +912,7 @@ static void handleWifi(AsyncWebServerRequest* req) {
         saveWifiCreds("", "");
         gStaSsid = ""; gStaPass = "";
         WiFi.disconnect();
-        req->redirect("/bindings");
+        req->redirect("/network");
         return;
     }
     if (pass.length() == 0) pass = gStaPass;  // keep existing when blank
@@ -853,7 +921,7 @@ static void handleWifi(AsyncWebServerRequest* req) {
     WiFi.mode(WIFI_AP_STA);
     WiFi.begin(gStaSsid.c_str(), gStaPass.c_str());
     configTime(0, 0, "pool.ntp.org");  // sync clock for daily-stats rollover
-    req->redirect("/bindings");
+    req->redirect("/network");
 }
 
 static String profilesCard() {
@@ -1373,16 +1441,23 @@ void setupServer() {
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
         // Build into small pieces + chunk-serve (see HtmlOut/servePieces) so the big
         // page never needs a large contiguous allocation on the fragmented heap.
-        auto pieces = std::make_shared<std::vector<String>>();
+        auto pieces = std::make_shared<std::vector<Seg>>();
         HtmlOut h{pieces.get()};
         devicesPage(h);
         h.flush();
         servePieces(req, pieces);
     });
     gServer.on("/bindings", HTTP_GET, [](AsyncWebServerRequest* req) {
-        auto pieces = std::make_shared<std::vector<String>>();
+        auto pieces = std::make_shared<std::vector<Seg>>();
         HtmlOut h{pieces.get()};
         bindingsPage(h);
+        h.flush();
+        servePieces(req, pieces);
+    });
+    gServer.on("/network", HTTP_GET, [](AsyncWebServerRequest* req) {
+        auto pieces = std::make_shared<std::vector<Seg>>();
+        HtmlOut h{pieces.get()};
+        networkPage(h);
         h.flush();
         servePieces(req, pieces);
     });
