@@ -373,15 +373,16 @@ static const char kStatsPage[] = R"HTML(
   <span style="color:#facc15">&#9632; Solar</span>
   <span style="color:#a78bfa">&#9632; DC-DC</span>
   <span style="color:#60a5fa">&#9632; Charger</span>
-  <span style="color:#f87171">&#9632; Load out</span>
-  <span class=muted>Ah in (stacked) vs out, per day</span>
+  <span style="color:#94a3b8">&#9632; Other in</span>
+  <span style="color:#f87171">&#9632; Out</span>
+  <span class=muted>Net Ah in (stacked by source) vs out, per day</span>
  </div>
  <div id="dayEmpty" class="muted" style="font-size:.82em"></div>
 </div>
 <div class=mgrid id=meters></div>
 <script>
 var SC=[['today','Today'],['trip','Trip'],['total','Total']];
-var COL={solar:'#facc15',dcdc:'#a78bfa',charger:'#60a5fa'};
+var COL={solar:'#facc15',dcdc:'#a78bfa',charger:'#60a5fa',other:'#94a3b8'};
 var data=null;
 function ah(v){v=Math.abs(v);return v>=10000?(v/1000).toFixed(1)+'k':v.toFixed(0);}
 function durStr(s){s=Math.round(s);var d=Math.floor(s/86400);s-=d*86400;var h=Math.floor(s/3600);s-=h*3600;var m=Math.floor(s/60);if(d>0)return d+'d '+h+'h';if(h>0)return h+'h '+m+'m';return m+'m';}
@@ -414,11 +415,20 @@ function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getConte
  ctx.clearRect(0,0,W,H);
  var real=(data&&data.days)?data.days.slice(-6):[],rd=(data&&data.run_day)||1;
  var days=[];for(var pi=real.length;pi<6;pi++)days.push({empty:1,idx:rd-(6-days.length)}); // 7-wide frame
- real.forEach(function(d){days.push({stamp:d.stamp,s:d.solar_ah,d:d.dcdc_ah,c:d.charger_ah,o:d.load_ah});});
- if(data&&data.today){var t=data.today;days.push({now:1,s:t.solar_ah,d:t.dcdc_ah,c:t.charger_ah,o:t.discharged_ah});}else days.push({empty:1});
+ // n/o are the NET battery flow for the day; s/d/c only say which monitored
+ // source claimed part of it. Charge from anything the master cannot see lands
+ // in n and nowhere else, which is why a day could read +44Ah on the meter and
+ // draw an empty bar here. Days archived before those fields existed carry 0,
+ // so the max() below falls back to the old source/load columns for them.
+ real.forEach(function(d){days.push({stamp:d.stamp,s:d.solar_ah,d:d.dcdc_ah,c:d.charger_ah,
+   n:d.charged_ah||0,o:Math.max(d.discharged_ah||0,d.load_ah||0)});});
+ if(data&&data.today){var t=data.today;days.push({now:1,s:t.solar_ah,d:t.dcdc_ah,c:t.charger_ah,
+   n:t.charged_ah||0,o:Math.max(t.discharged_ah||0,t.load_ah||0)});}else days.push({empty:1});
+ days.forEach(function(d){if(d.empty)return;
+   d.known=(d.s||0)+(d.d||0)+(d.c||0); d.tot=Math.max(d.n||0,d.known); d.un=d.tot-d.known;});
  var em=document.getElementById('dayEmpty');
  em.textContent=real.length?'':'Day 1 accruing &mdash; bars fill in as days roll over.';
- var mx=1;days.forEach(function(d){if(d.empty)return;var i=d.s+d.d+d.c;if(i>mx)mx=i;if(d.o>mx)mx=d.o;});
+ var mx=1;days.forEach(function(d){if(d.empty)return;if(d.tot>mx)mx=d.tot;if(d.o>mx)mx=d.o;});
  function Y(v){return padT+(H-padT-padB)*(1-v/mx);}
  ctx.fillStyle='#7d8da1';ctx.font='9px system-ui';ctx.textAlign='right';
  [mx,mx/2,0].forEach(function(v){var y=Y(v);ctx.strokeStyle='#1f2c3a';ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(v.toFixed(0),padL-4,y+3);});
@@ -426,6 +436,7 @@ function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getConte
  ctx.textAlign='center';
  days.forEach(function(d,i){var cx=padL+slot*(i+0.5),xi=cx-bw-1,xo=cx+1,acc=0;
   if(!d.empty){[['s',COL.solar],['d',COL.dcdc],['c',COL.charger]].forEach(function(p){var v=d[p[0]]||0;if(v<=0)return;var y0=Y(acc),y1=Y(acc+v);ctx.fillStyle=p[1];ctx.fillRect(xi,y1,bw,y0-y1);acc+=v;});
+  if(d.un>0.05){var yu0=Y(acc),yu1=Y(acc+d.un);ctx.fillStyle=COL.other;ctx.fillRect(xi,yu1,bw,yu0-yu1);acc+=d.un;}
   ctx.fillStyle='#f87171';var yo=Y(d.o);ctx.fillRect(xo,yo,bw,base-yo);}
   ctx.fillStyle=d.now?'#e6edf3':'#7d8da1';ctx.fillText(lbl(d),cx,H-5);});
 }

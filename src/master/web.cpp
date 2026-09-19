@@ -226,6 +226,8 @@ static String buildStatsJson() {
              ",\"dcdc_ah\":" + String(d.dcdcAh, 1) +
              ",\"charger_ah\":" + String(d.chargerAh, 1) +
              ",\"load_ah\":" + String(d.loadAh, 1) +
+             ",\"charged_ah\":" + String(d.chargedAh, 1) +
+             ",\"discharged_ah\":" + String(d.dischargedAh, 1) +
              ",\"soc_min\":" + jopt(d.socMin) + ",\"soc_max\":" + jopt(d.socMax) + "}";
     }
     j += "]}";

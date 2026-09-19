@@ -42,9 +42,36 @@ void Stats::load() {
     }
     // Daily history is stored under its own keys (independent of the bucket
     // version) so adding it didn't reset anyone's lifetime totals.
-    DayRecord dtmp[kDays];
-    if (p.getBytes("days", dtmp, sizeof(dtmp)) == sizeof(dtmp)) {
-        for (int i = 0; i < kDays; ++i) days_[i] = dtmp[i];
+    bool gotDays = false;
+    {
+        DayRecord dtmp[kDays];
+        if (p.getBytes("days2", dtmp, sizeof(dtmp)) == sizeof(dtmp)) {
+            for (int i = 0; i < kDays; ++i) days_[i] = dtmp[i];
+            gotDays = true;
+        }
+    }
+    if (!gotDays) {
+        // Upconvert the v1 layout. getBytes is all-or-nothing on size, so simply
+        // widening DayRecord would have silently thrown away every archived day;
+        // the pre-net columns are copied across and the two new ones stay zero
+        // (unknown for days recorded before they existed, not "no charge").
+        DayRecordV1 v1[kDays];
+        if (p.getBytes("days", v1, sizeof(v1)) == sizeof(v1)) {
+            for (int i = 0; i < kDays; ++i) {
+                days_[i] = DayRecord();
+                days_[i].dayStamp = v1[i].dayStamp;
+                days_[i].solarAh = v1[i].solarAh;
+                days_[i].dcdcAh = v1[i].dcdcAh;
+                days_[i].chargerAh = v1[i].chargerAh;
+                days_[i].loadAh = v1[i].loadAh;
+                days_[i].socMin = v1[i].socMin;
+                days_[i].socMax = v1[i].socMax;
+            }
+            gotDays = true;
+            dirty_ = true;  // rewrite in the new layout on the next persist
+        }
+    }
+    if (gotDays) {
         dayCount_ = p.getUInt("dayn", 0);
         dayHead_ = p.getUInt("dayh", 0);
         if (dayCount_ > kDays) dayCount_ = kDays;
@@ -59,7 +86,7 @@ void Stats::save() {
     p.begin(ns().c_str(), false);
     p.putUInt("ver", kBlobVer);
     p.putBytes("buckets", b_, sizeof(b_));
-    p.putBytes("days", days_, sizeof(days_));
+    p.putBytes("days2", days_, sizeof(days_));  // v2 layout: + net charged/discharged
     p.putUInt("dayn", dayCount_);
     p.putUInt("dayh", dayHead_);
     p.putDouble("runsec", runSecs_);
@@ -77,6 +104,8 @@ void Stats::captureDay(const Bucket& f) {
     d.loadAh = f.loadAh;
     d.socMin = f.socMin;
     d.socMax = f.socMax;
+    d.chargedAh = (float)f.chargedAh;
+    d.dischargedAh = (float)f.dischargedAh;
     days_[dayHead_] = d;
     dayHead_ = (dayHead_ + 1) % kDays;
     if (dayCount_ < (size_t)kDays) ++dayCount_;

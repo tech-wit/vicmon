@@ -45,6 +45,21 @@ struct DayRecord {
     float solarAh = 0, dcdcAh = 0, chargerAh = 0;  // Ah in, by source
     float loadAh = 0;                              // Ah out (load)
     float socMin = NAN, socMax = NAN;
+    // NET battery flow for the day. The per-source columns above only account for
+    // what a monitored device claimed; charge from anything the master cannot see
+    // (an unbound source, a mains charger with no Bluetooth) appears here and
+    // nowhere else. Without these a day can show +44 Ah on the meter and an empty
+    // bar on the chart. Appended after v1 — see the migration in load().
+    float chargedAh = 0, dischargedAh = 0;
+};
+
+// The pre-migration on-disk layout, read once to upconvert an existing history
+// rather than discarding it (getBytes is all-or-nothing on size).
+struct DayRecordV1 {
+    uint32_t dayStamp;
+    float solarAh, dcdcAh, chargerAh;
+    float loadAh;
+    float socMin, socMax;
 };
 static const int kDays = 14;  // ring capacity; the UI shows the last 7
 
