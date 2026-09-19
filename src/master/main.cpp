@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.20";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.21";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -340,14 +340,15 @@ void saveApCfg(const String& ssid, const String& pass) {
 // valid, their range, and the amp-hours they integrate to. The Week page reads
 // the Stats integrator while the Graph page reads these rings, so when the two
 // disagree this says which one is empty.
-static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0;
+static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0, gHistLoadedEnvF = 0;
+static uint32_t gHistGapSec = 0;   // downtime bridged with n/a samples at the last load
 static uint32_t gLastHistSaveMs = 0;  // 0 = not saved since boot
 static bool gLastHistSaveOk = false;
 static const uint32_t kHistSaveMs = 2 * 60 * 1000;
 static void dumpHist() {
     static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
-    Serial.printf("[hist] restored at boot: fine=%u coarse=%u env=%u | last save %s%s | next in %lus\n",
-                  (unsigned)gHistLoadedFine, (unsigned)gHistLoadedCoarse, (unsigned)gHistLoadedEnv,
+    Serial.printf("[hist] restored at boot: fine=%u coarse=%u env=%u envfine=%u (gap bridged %lus) | last save %s%s | next in %lus\n",
+                  (unsigned)gHistLoadedFine, (unsigned)gHistLoadedCoarse, (unsigned)gHistLoadedEnv, (unsigned)gHistLoadedEnvF, (unsigned long)gHistGapSec,
                   gLastHistSaveMs ? (String((millis() - gLastHistSaveMs) / 1000) + "s ago").c_str() : "none since boot",
                   gLastHistSaveMs ? (gLastHistSaveOk ? " (ok)" : " (FAILED)") : "",
                   (unsigned long)((kHistSaveMs - (millis() - gLastHistSaveMs) % kHistSaveMs) / 1000));
@@ -820,7 +821,7 @@ static void sampleSlaveHistory() {
 // reloaded samples continue seamlessly at the "now" edge.
 
 bool gFsOk = false;
-static const uint8_t kHistVer = 4;  // 2: +soc; 3: +environment in HistSample; 4: environment on its own 5-min ring
+static const uint8_t kHistVer = 5;  // 2: +soc; 3: +env in HistSample; 4: env on its own 5-min ring; 5: +60s env ring, +save time (downtime gap on load)
 // How often the history is flushed to flash. At ~26 KB/save (full buffers) this
 // is ~7.5 MB/day; LittleFS wear-levels it across the ~1.5 MB FS partition, so at
 // 100k erase cycles/block the flash lasts decades. Raise it to lose less to
@@ -870,7 +871,7 @@ static void readRing(File& f, HistRing& r, uint16_t n) {
 
 void saveHistFile(int profile) {
     if (!gFsOk) return;
-    if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse || gEnv.count < gHistLoadedEnv) return;
+    if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse || gEnv.count < gHistLoadedEnv || gEnvFine.count < gHistLoadedEnvF) return;
     // Write to a temp file and rename over the old one. LittleFS rename is
     // atomic, so a reset or reflash landing mid-write (every 5 min, so not rare
     // across a day of flashing) leaves the previous complete file in place
@@ -879,18 +880,21 @@ void saveHistFile(int profile) {
     File f = LittleFS.open(tmp, "w");
     if (!f) return;
     uint8_t hdr[4] = {'V', 'H', kHistVer, 0};
-    uint16_t fc = gFine.count, cc = gCoarse.count, ec = gEnv.count;
+    uint16_t fc = gFine.count, cc = gCoarse.count, ec = gEnv.count, efc = gEnvFine.count;
+    uint32_t savedUtc = currentUtcEpoch();   // 0 = no clock; the load then cannot size the gap
     bool ok = f.write(hdr, 4) == 4 &&
               f.write(reinterpret_cast<uint8_t*>(&fc), 2) == 2 &&
               f.write(reinterpret_cast<uint8_t*>(&cc), 2) == 2 &&
-              f.write(reinterpret_cast<uint8_t*>(&ec), 2) == 2;
-    if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); writeEnvRing(f, gEnv); }
+              f.write(reinterpret_cast<uint8_t*>(&ec), 2) == 2 &&
+              f.write(reinterpret_cast<uint8_t*>(&efc), 2) == 2 &&
+              f.write(reinterpret_cast<uint8_t*>(&savedUtc), 4) == 4;
+    if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); writeEnvRing(f, gEnv); writeEnvRing(f, gEnvFine); }
     f.close();
     // Verify the length on a fresh handle. Checking size() on the still-open
     // handle read the pre-flush length, judged every save short, and silently
     // discarded it — so the file on flash stayed the previous version and every
     // boot "started fresh". A failed save is now loud, never silent.
-    const size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
+    const size_t expect = 16 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)(ec + efc) * sizeof(EnvSample);
     size_t got = 0;
     { File v = LittleFS.open(tmp, "r"); if (v) { got = v.size(); v.close(); } }
     if (!ok || got != expect) {
@@ -912,12 +916,14 @@ static void loadHistFile(int profile) {
         f.close();
         return;
     }
-    uint16_t fc = 0, cc = 0, ec = 0;
+    uint16_t fc = 0, cc = 0, ec = 0, efc = 0; uint32_t savedUtc = 0;
     f.read(reinterpret_cast<uint8_t*>(&fc), 2);
     f.read(reinterpret_cast<uint8_t*>(&cc), 2);
     f.read(reinterpret_cast<uint8_t*>(&ec), 2);
-    size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
-    if (fc > gFine.cap || cc > gCoarse.cap || ec > gEnv.cap || f.size() != expect) {
+    f.read(reinterpret_cast<uint8_t*>(&efc), 2);
+    f.read(reinterpret_cast<uint8_t*>(&savedUtc), 4);
+    size_t expect = 16 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)(ec + efc) * sizeof(EnvSample);
+    if (fc > gFine.cap || cc > gCoarse.cap || ec > gEnv.cap || efc > gEnvFine.cap || f.size() != expect) {
         Serial.printf("[hist] %s: bad length (%u, expected %u) — ignoring\n",
                       histPath(profile).c_str(), (unsigned)f.size(), (unsigned)expect);
         f.close();
@@ -926,11 +932,27 @@ static void loadHistFile(int profile) {
     readRing(f, gFine, fc);
     readRing(f, gCoarse, cc);
     readEnvRing(f, gEnv, ec);
-    gHistLoadedFine = gFine.count;    // what the file now represents
+    readEnvRing(f, gEnvFine, efc);
+    f.close();
+    // The rings carry no timestamps: a sample is assumed one interval before the
+    // next, ending now. Restored as-is, the saved history would butt straight up
+    // against the new samples and the downtime would vanish — a night off would
+    // show yesterday evening glued to this morning, and every reboot compressed
+    // the timeline a little more. Bridge the gap with n/a samples instead.
+    uint32_t nowUtc = currentUtcEpoch();
+    gHistGapSec = (savedUtc && nowUtc > savedUtc) ? nowUtc - savedUtc : 0;
+    auto bridge = [&](HistRing& r) { HistSample na; na.battery = na.solar = na.charger = na.dcdc = na.load = na.soc = -32768;
+        uint32_t k = gHistGapSec * 1000 / r.intervalMs; if (k > r.cap) k = r.cap; for (uint32_t i = 0; i < k; ++i) r.push(na, 0); };
+    auto bridgeE = [&](EnvRing& r) { EnvSample na; na.t = na.h = na.p = na.g = -32768;
+        uint32_t k = gHistGapSec * 1000 / r.intervalMs; if (k > r.cap) k = r.cap; for (uint32_t i = 0; i < k; ++i) r.push(na, 0); };
+    if (gHistGapSec) { bridge(gFine); bridge(gCoarse); bridgeE(gEnv); bridgeE(gEnvFine); }
+    gHistLoadedFine = gFine.count;    // what the file now represents (incl. the bridged gap)
     gHistLoadedCoarse = gCoarse.count;
     gHistLoadedEnv = gEnv.count;
-    f.close();
-    Serial.printf("[hist] restored fine=%u coarse=%u env=%u\n", (unsigned)fc, (unsigned)cc, (unsigned)ec);
+    gHistLoadedEnvF = gEnvFine.count;
+    Serial.printf("[hist] restored fine=%u coarse=%u env=%u envfine=%u; %s\n", (unsigned)fc, (unsigned)cc, (unsigned)ec, (unsigned)efc,
+                  gHistGapSec ? (String("bridged ") + String(gHistGapSec) + "s of downtime").c_str()
+                              : (savedUtc ? "no downtime gap" : "no clock at save or load — gap unknown, history butted"));
     gFine.lastMs = 0;  // take a fresh sample promptly after a reload
     gCoarse.lastMs = 0;
 }
@@ -1005,13 +1027,17 @@ void buildHistoryInto(int mins, OutSink& h) {
     const size_t startE = (er.head + er.cap - static_cast<size_t>(wantE)) % er.cap;
     // The sample just before the window seeds the level, so a window shorter than
     // the cadence draws the current reading across it instead of nothing.
-    const bool haveSeed = static_cast<int>(er.count) > wantE;
-    const size_t seedIdx = (startE + er.cap - 1) % er.cap;
+    bool haveSeed = static_cast<int>(er.count) > wantE;
+    const EnvRing* seedRing = &er;
+    size_t seedIdx = (startE + er.cap - 1) % er.cap;
+    if (!haveSeed && &er == &gEnvFine && gEnv.count) {   // 60s ring has nothing earlier: use the newest 5-min sample
+        haveSeed = true; seedRing = &gEnv; seedIdx = (gEnv.head + gEnv.cap - 1) % gEnv.cap;
+    }
     for (int f = 0; f < kHistSeries; ++f) {
         const bool whole = (f == kHistGasIdx);
         const bool env = (f >= 6);
         h.f("\"%s\":[", names[f]);
-        int16_t hold = (env && haveSeed) ? envField(er.buf[seedIdx], f) : (int16_t)-32768;
+        int16_t hold = (env && haveSeed) ? envField(seedRing->buf[seedIdx], f) : (int16_t)-32768;
         for (int k = 0; k < n; ++k) {
             int16_t best = -32768;
             if (env) {

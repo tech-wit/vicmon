@@ -167,6 +167,9 @@ static void collectHistory(guition::DashData& d) {
     if ((int)er.count > wantE) {   // seed from the sample just before the window
         const EnvSample& sd = er.buf[(startE + er.cap - 1) % er.cap];
         holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
+    } else if (&er == &gEnvFine && gEnv.count) {   // nothing earlier on the 60s ring: newest 5-min sample
+        const EnvSample& sd = gEnv.buf[(gEnv.head + gEnv.cap - 1) % gEnv.cap];
+        holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
     }
     // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
     // Nearest-sample aliases — every column jumps as the window slides. Mean is
