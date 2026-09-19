@@ -348,79 +348,95 @@ static String jsEsc(String s) {
 // String (+ the copy req->send(String) makes) either came back BLANK or, when
 // pre-allocated big, crashed the AsyncTCP task and dropped WiFi. Pieces stay small
 // and non-contiguous, so they fit the fragmented heap and need no copy.
-// A page is a list of segments, each either a pointer straight INTO FLASH or a
-// small heap String for the generated bits.
+// ---- boot-allocated build arena ---------------------------------------------
+// Every page and the history JSON are built into ONE buffer allocated at boot,
+// with a fixed table of segments that either point straight into flash (the
+// literals, never copied) or into the arena (the generated text). Nothing in
+// this path is allocated per request any more: no vector, no retained String,
+// no per-page new. The cost is fixed and known at boot, one build runs at a
+// time (the mutex is held until the response has fully gone out), and a second
+// concurrent build gets a 503 rather than a second buffer.
 //
-// Every static literal in these pages already lives in .rodata (flash is
-// memory-mapped on the ESP32, so it can be memcpy'd from directly). The old
-// version copied each one into a heap String while building, so a 24KB page
-// needed 24KB of heap before a single byte went out — and that peak is what took
-// the master's minimum free heap under 3KB and wedged it. Referencing the
-// literal instead costs one pointer.
-//
-// Literals shorter than the threshold still batch into `cur`: a segment carries
-// ~28 bytes of bookkeeping, so referencing a 2-byte "'" would cost more than
-// copying it.
-struct Seg {
-    const char* lit = nullptr;  // non-null => `len` bytes of flash, never copied
-    size_t len = 0;
-    String dyn;                 // used when lit == nullptr
-    const char* data() const { return lit ? lit : dyn.c_str(); }
-    size_t size() const { return lit ? len : dyn.length(); }
-};
+// Sizing: the largest generated content is the history JSON at kWebHistPts
+// columns x 10 series, ~12KB; pages generate 1-5KB on top of their literals.
+static const size_t kArenaSize = 16 * 1024;
+static const int kMaxSegs = 160;
+struct Seg { const char* p = nullptr; size_t len = 0; };
+static uint8_t* gArena = nullptr;
+static Seg gSegs[kMaxSegs];
+static int gSegN = 0;
+static size_t gArenaUsed = 0, gArenaHigh = 0;   // high-water for the diag line
+static bool gArenaOverflow = false;
+static SemaphoreHandle_t gArenaMux = nullptr;
 
-struct HtmlOut {
-    std::vector<Seg>* pieces;
-    String cur;
-    static const size_t kMinLit = 48;  // below this, copying beats a segment
-    void flushCur() {
-        if (!cur.length()) return;
-        pieces->emplace_back();
-        pieces->back().dyn = cur;
-        cur = "";
-    }
-    void add(const String& s) {
-        cur += s;
-        if (cur.length() >= 1400) flushCur();
-    }
-    void lit(const char* s, size_t n) {
-        flushCur();
-        pieces->emplace_back();
-        pieces->back().lit = s;
-        pieces->back().len = n;
-    }
-    HtmlOut& operator+=(const String& s) { add(s); return *this; }
-    HtmlOut& operator+=(const char* s) {
-        size_t n = strlen(s);
-        if (n < kMinLit) add(String(s)); else lit(s, n);
-        return *this;
-    }
-    // F("...") is a flash literal too — stream it rather than inflating a String.
-    HtmlOut& operator+=(const __FlashStringHelper* f) {
-        const char* s = reinterpret_cast<const char*>(f);
-        size_t n = strlen(s);
-        if (n < kMinLit) add(String(s)); else lit(s, n);
-        return *this;
-    }
-    void flush() { flushCur(); }
-};
+void webPreallocate() {
+    gArena = static_cast<uint8_t*>(malloc(kArenaSize));
+    gArenaMux = xSemaphoreCreateMutex();
+    Serial.printf("[mem] web arena %uB: %s\n", (unsigned)kArenaSize, gArena ? "ok" : "FAILED");
+}
+// Waits briefly: a browser fetches the page, then its CSS and first API call
+// within milliseconds, and the page response may still be draining. Blocking
+// the TCP task for up to 30ms is far cheaper than a 503 the chart has to retry.
+static bool arenaTake() {
+    if (!gArena || !gArenaMux) return false;
+    if (xSemaphoreTake(gArenaMux, pdMS_TO_TICKS(30)) != pdTRUE) return false;
+    gSegN = 0; gArenaUsed = 0; gArenaOverflow = false;
+    return true;
+}
+static void arenaGive() { if (gArenaMux) xSemaphoreGive(gArenaMux); }
 
-// Chunked-transfer the collected pieces so nothing large is held contiguously and
-// there is no second copy. The shared_ptr keeps the pieces alive for the async
-// response's lifetime and frees them when it completes.
-// Chunk-serve a list of ready-made strings (the history JSON). Same reason as
-// servePieces: nothing large is ever held contiguously.
-static void serveStrings(AsyncWebServerRequest* req, const char* type,
-                         std::shared_ptr<std::vector<String>> parts) {
-    req->send(req->beginChunkedResponse(
-        type, [parts](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+struct HtmlOut : OutSink {
+    static const size_t kMinLit = 48;  // shorter literals are copied; a segment costs a table slot
+    // Append generated text at the arena tail, extending the open arena segment
+    // if the last segment is one (so runs of small appends share a slot).
+    void put(const char* src, size_t n) override {
+        if (gArenaOverflow) return;
+        if (gArenaUsed + n > kArenaSize) { gArenaOverflow = true; return; }
+        const char* tailEnd = reinterpret_cast<char*>(gArena) + gArenaUsed;
+        Seg* tail = (gSegN && gSegs[gSegN - 1].p + gSegs[gSegN - 1].len == tailEnd) ? &gSegs[gSegN - 1] : nullptr;
+        if (!tail) {
+            if (gSegN >= kMaxSegs) { gArenaOverflow = true; return; }
+            tail = &gSegs[gSegN++]; tail->p = tailEnd; tail->len = 0;
+        }
+        memcpy(gArena + gArenaUsed, src, n);
+        tail->len += n; gArenaUsed += n;
+        if (gArenaUsed > gArenaHigh) gArenaHigh = gArenaUsed;
+    }
+    void lit(const char* p, size_t n) {   // flash literal: reference, never copy
+        if (gArenaOverflow) return;
+        if (gSegN >= kMaxSegs) { gArenaOverflow = true; return; }
+        gSegs[gSegN].p = p; gSegs[gSegN].len = n; ++gSegN;
+    }
+    HtmlOut& operator+=(const String& s) { put(s.c_str(), s.length()); return *this; }
+    HtmlOut& operator+=(const char* s) { size_t n = strlen(s); if (n < kMinLit) put(s, n); else lit(s, n); return *this; }
+    HtmlOut& operator+=(const __FlashStringHelper* f) { return operator+=(reinterpret_cast<const char*>(f)); }
+    void flush() {}
+};
+// printf straight into whichever sink — the allocation-free way to emit numbers.
+void OutSink::f(const char* fmt, ...) {
+    char b[96]; va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
+    if (n > 0) put(b, static_cast<size_t>(n) < sizeof(b) ? n : sizeof(b) - 1);
+}
+
+// Stream the segment table. The token's deleter releases the arena when the
+// response is destroyed, i.e. after the last chunk has gone out.
+static void serveArena(AsyncWebServerRequest* req, const char* type) {
+    if (gArenaOverflow) {
+        arenaGive();
+        req->send(507, "text/plain", "page exceeds build arena");
+        return;
+    }
+    std::shared_ptr<void> token(nullptr, [](void*) { arenaGive(); });
+    req->send(req->beginChunkedResponse(type,
+        [token](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
             size_t pos = 0;
-            for (const String& s : *parts) {
-                const size_t len = s.length();
+            for (int i = 0; i < gSegN; ++i) {
+                const size_t len = gSegs[i].len;
                 if (index < pos + len) {
                     const size_t off = index - pos;
                     const size_t n = (maxLen < len - off) ? maxLen : (len - off);
-                    memcpy(buf, s.c_str() + off, n);
+                    memcpy(buf, gSegs[i].p + off, n);
                     return n;
                 }
                 pos += len;
@@ -428,77 +444,31 @@ static void serveStrings(AsyncWebServerRequest* req, const char* type,
             return 0;
         }));
 }
+// Static page = nav head + one flash literal + foot, through the same path.
+static void serveStatic(AsyncWebServerRequest* req, const char* active, const char* body) {
+    HtmlOut h;
+    h += pageHead(active);
+    h.lit(body, strlen(body));
+    h += pageFoot();
+    serveArena(req, "text/html");
+}
 
 // Answer 503 instead of building anything when the heap is already low. A
 // browser click-through drives free heap down through connection concurrency,
 // not any one payload; refusing the next page while short costs the user one
 // retry and costs the board nothing, where building it anyway is how it wedges.
 static bool shedIfLow(AsyncWebServerRequest* req) {
-    if (ESP.getMaxAllocHeap() >= 20 * 1024 && ESP.getFreeHeap() >= 28 * 1024) return false;
+    // Retuned for the reserved arena: page builds no longer come out of this
+    // pool, so what is left to shed is library churn (lwIP / AsyncTCP / NimBLE),
+    // and the supervisor's own floors sit at 12KB / 16KB.
+    if (ESP.getMaxAllocHeap() >= 14 * 1024 && ESP.getFreeHeap() >= 22 * 1024) return false;
     AsyncWebServerResponse* r = req->beginResponse(503, "text/plain", "busy");
     r->addHeader("Retry-After", "2");
     req->send(r);
     return true;
 }
 
-static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<Seg>> pieces) {
-    req->send(req->beginChunkedResponse("text/html",
-        [pieces](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
-            size_t pos = 0;
-            for (const Seg& sg : *pieces) {
-                size_t len = sg.size();
-                if (index < pos + len) {
-                    size_t off = index - pos;
-                    size_t n = (maxLen < len - off) ? maxLen : (len - off);
-                    memcpy(buf, sg.data() + off, n);
-                    return n;
-                }
-                pos += len;
-            }
-            return 0;  // all pieces sent
-        }));
-}
 
-// Serve a static page (nav head + one big flash literal + foot) as a chunked
-// response that reads the literal STRAIGHT OUT OF FLASH.
-//
-// The obvious `pageHead() + kPage + pageFoot()` needs two contiguous heap blocks
-// the size of the whole page at the same time: one for the first concat, one for
-// the second while the first is still alive. kMimicPage is 17KB, so that asks for
-// ~36KB contiguous against a largest-free-block that sits near 35KB on a master
-// with BLE up. When it fails, String yields an EMPTY string and the browser gets
-// a 200 with no body — a blank page, no error anywhere. The Environment card is
-// what pushed the mimic page over that line.
-//
-// This copies nothing: the head and foot are small, and the body streams from
-// flash a chunk at a time.
-static void serveStatic(AsyncWebServerRequest* req, const char* active, const char* body) {
-    auto head = std::make_shared<String>(pageHead(active));
-    auto foot = std::make_shared<String>(pageFoot());
-    const size_t bodyLen = strlen(body);
-    req->send(req->beginChunkedResponse(
-        "text/html",
-        [head, foot, body, bodyLen](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
-            const size_t hl = head->length(), fl = foot->length();
-            const char* src;
-            size_t avail;
-            if (index < hl) {
-                src = head->c_str() + index;
-                avail = hl - index;
-            } else if (index < hl + bodyLen) {
-                src = body + (index - hl);
-                avail = hl + bodyLen - index;
-            } else if (index < hl + bodyLen + fl) {
-                src = foot->c_str() + (index - hl - bodyLen);
-                avail = hl + bodyLen + fl - index;
-            } else {
-                return 0;  // whole page sent
-            }
-            const size_t n = maxLen < avail ? maxLen : avail;
-            memcpy(buf, src, n);
-            return n;
-        }));
-}
 
 static void devicesPage(HtmlOut& h) {
     uint32_t now = millis();
@@ -735,39 +705,28 @@ static void networkPage(HtmlOut& h) {
 // and report piece count / total size / heap, WITHOUT serving. Lets us verify the
 // memory behaviour on the no-PSRAM Capsule when no HTTP client is reachable here.
 void webSelfTest() {
-    for (int which = 0; which < 2; ++which) {
-        uint32_t h0 = ESP.getFreeHeap();
-        auto pieces = std::make_shared<std::vector<Seg>>();
-        HtmlOut h{pieces.get()};
-        if (which == 0) bindingsPage(h); else devicesPage(h);
-        h.flush();
-        size_t total = 0, mx = 0, heapBytes = 0;
-        for (const Seg& sg : *pieces) {
-            total += sg.size();
-            if (sg.size() > mx) mx = sg.size();
-            if (!sg.lit) heapBytes += sg.size();  // what the page actually cost the heap
-        }
-        Serial.printf("[webtest] %s: %u pieces, %u bytes (%u heap, rest flash), heap %u->%u maxblk %u\n",
-                      which == 0 ? "bindings" : "devices", (unsigned)pieces->size(),
-                      (unsigned)total, (unsigned)heapBytes, (unsigned)h0,
-                      (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    // Build each page and the widest history window into the arena and report
+    // how much of it they used: with a fixed arena the number that matters is
+    // the high-water mark against kArenaSize, not the heap.
+    struct { const char* name; void (*fn)(HtmlOut&); } pages[] = {
+        {"devices", devicesPage}, {"bindings", bindingsPage}, {"network", networkPage}};
+    for (auto& pg : pages) {
+        if (!arenaTake()) { Serial.println("[webtest] arena busy"); return; }
+        HtmlOut h; pg.fn(h);
+        size_t total = 0; for (int i = 0; i < gSegN; ++i) total += gSegs[i].len;
+        Serial.printf("[webtest] %s: %u bytes, %u generated into arena, %d segments%s\n", pg.name,
+                      (unsigned)total, (unsigned)gArenaUsed, gSegN, gArenaOverflow ? " OVERFLOW" : "");
+        arenaGive();
     }
-    // The JSON endpoints the pages poll. On a headless board (the M5Capsule) there
-    // is no screen and no way to reach the AP without disconnecting from whatever
-    // network you are on, so being able to read the exact API payloads over the
-    // serial console is the only practical way to check them.
-    Serial.printf("[webtest] /api/panel: %s\n", buildPanelJson().c_str());
-    // Exercise the widest window too — that is the one that used to fail outright.
     for (int mins : {1, 1440}) {
-        uint32_t h0 = ESP.getFreeHeap();
-        std::vector<String> parts;
-        buildHistoryChunks(mins, parts);
-        size_t total = 0, mx = 0;
-        for (const String& s : parts) { total += s.length(); if (s.length() > mx) mx = s.length(); }
-        Serial.printf("[webtest] /api/history?mins=%d: %u chunks, %u bytes (max chunk %u), "
-                      "heap %u->%u\n", mins, (unsigned)parts.size(), (unsigned)total,
-                      (unsigned)mx, (unsigned)h0, (unsigned)ESP.getFreeHeap());
+        if (!arenaTake()) return;
+        HtmlOut h; buildHistoryInto(mins, h);
+        Serial.printf("[webtest] /api/history?mins=%d: %u bytes into arena%s\n", mins,
+                      (unsigned)gArenaUsed, gArenaOverflow ? " OVERFLOW" : "");
+        arenaGive();
     }
+    Serial.printf("[webtest] arena high-water %u / %u\n", (unsigned)gArenaHigh, (unsigned)kArenaSize);
+    Serial.printf("[webtest] /api/panel: %s\n", buildPanelJson().c_str());
 }
 
 // ---- handlers --------------------------------------------------------------
@@ -1050,10 +1009,10 @@ String jsonEsc(const String& s) {  // shared: buildAlerts() in main.cpp calls it
 // a permanent 2KB+ of RAM for two operations a user runs a few times a year.
 // Each caller now allocates one on the heap for the call and frees it after.
 struct TmpCfg { DeviceConfig cfg; sig::SignalMap sig; };
+static TmpCfg gTmp;  // allocated at boot, used by backup/restore only
 
 static String buildExportJson() {
-    std::unique_ptr<TmpCfg> tmp(new (std::nothrow) TmpCfg());
-    if (!tmp) return String("");
+    TmpCfg* tmp = &gTmp;
     String j = "{\"version\":1,\"active\":" + String(gProfiles.active()) + ",";
     j += "\"wifi\":{\"ssid\":\"" + jsonEsc(gStaSsid) + "\",\"pass\":\"" + jsonEsc(gStaPass) +
          "\"},\"profiles\":[";
@@ -1103,8 +1062,7 @@ static String buildExportJson() {
 // Restores profiles present in the backup (overwriting them); profiles absent
 // from the file are left untouched.
 static bool applyImport(const String& body) {
-    std::unique_ptr<TmpCfg> tmp(new (std::nothrow) TmpCfg());
-    if (!tmp) return false;
+    TmpCfg* tmp = &gTmp;
     JsonDocument doc;
     if (deserializeJson(doc, body)) return false;
     JsonArray profs = doc["profiles"].as<JsonArray>();
@@ -1488,40 +1446,38 @@ void setupServer() {
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         serveStatic(req, "/", kMimicPage);
     });
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        // Build into small pieces + chunk-serve (see HtmlOut/servePieces) so the big
-        // page never needs a large contiguous allocation on the fragmented heap.
-        auto pieces = std::make_shared<std::vector<Seg>>();
-        HtmlOut h{pieces.get()};
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
         devicesPage(h);
-        h.flush();
-        servePieces(req, pieces);
+        serveArena(req, "text/html");
     });
     gServer.on("/bindings", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        auto pieces = std::make_shared<std::vector<Seg>>();
-        HtmlOut h{pieces.get()};
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
         bindingsPage(h);
-        h.flush();
-        servePieces(req, pieces);
+        serveArena(req, "text/html");
     });
     gServer.on("/network", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
-        auto pieces = std::make_shared<std::vector<Seg>>();
-        HtmlOut h{pieces.get()};
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
         networkPage(h);
-        h.flush();
-        servePieces(req, pieces);
+        serveArena(req, "text/html");
     });
     gServer.on("/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         serveStatic(req, "/stats", kStatsPage);
     });
     gServer.on("/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         serveStatic(req, "/diag", kDiagPage);
     });
     gServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -1552,6 +1508,7 @@ void setupServer() {
                    ",\"minheap\":" + String(ESP.getMinFreeHeap()) +
                    ",\"uptime\":" + String(millis() / 1000) +
                    ",\"psram\":" + String(ESP.getPsramSize()) +
+                   ",\"arena_high\":" + String(gArenaHigh) + ",\"arena\":" + String(kArenaSize) +
                    ",\"boots\":" + String(gBootCount) +
                    ",\"heap_restarts\":" + String(gHeapRestarts) +
                    ",\"reset\":\"" + String(gResetReason) + "\"}";
@@ -1564,9 +1521,10 @@ void setupServer() {
     gServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
         int mins = req->hasParam("mins") ? req->getParam("mins")->value().toInt() : 10;
-        auto parts = std::make_shared<std::vector<String>>();
-        buildHistoryChunks(mins, *parts);
-        serveStrings(req, "application/json", parts);
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
+        HtmlOut h;
+        buildHistoryInto(mins, h);
+        serveArena(req, "application/json");
     });
     gServer.on("/api/config/export", HTTP_GET, [](AsyncWebServerRequest* req) {
         AsyncWebServerResponse* res =
@@ -1595,6 +1553,7 @@ void setupServer() {
     gServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) { req->send(204); });
     gServer.onNotFound([](AsyncWebServerRequest* req) {
         if (shedIfLow(req)) return;
+        if (!arenaTake()) { req->send(503, "text/plain", "busy"); return; }
         serveStatic(req, "/", kMimicPage);
     });
     gServer.begin();

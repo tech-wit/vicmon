@@ -51,13 +51,14 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.12";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.13";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
 ProfileManager gProfiles;
 stats::Stats gStats;
 NimBLEScan* gScan = nullptr;
+extern NimBLEAdvertisedDeviceCallbacks& gIngestCb;  // ble_ingest.cpp
 AsyncWebServer gServer(80);
 DNSServer gDns;
 SemaphoreHandle_t gRegMux = nullptr;  // registry mutex (see app.h RegLock)
@@ -910,9 +911,11 @@ static void sampleStats() {
 // kept) so current spikes survive, matching what the LCD does. `interval` is
 // reported as the EFFECTIVE column spacing so the chart's right-aligned x-axis
 // still lands each column in the right place.
-static const int kWebHistPts = 240;
+static const int kWebHistPts = 180;
 
-void buildHistoryChunks(int mins, std::vector<String>& out) {
+// Writes the JSON straight into the web arena with h.f(): no String, no vector,
+// no per-request allocation of any size.
+void buildHistoryInto(int mins, OutSink& h) {
     if (mins < 1) mins = 1;
     if (mins > 1440) mins = 1440;
     const HistRing& r = mins > 60 ? gCoarse : gFine;
@@ -924,20 +927,12 @@ void buildHistoryChunks(int mins, std::vector<String>& out) {
     if (n > 0) ivSec = static_cast<int>(static_cast<long>(want) * ivSec / n);
     if (ivSec < 1) ivSec = 1;
     const size_t start = (r.head + r.cap - static_cast<size_t>(want)) % r.cap;
-
-    String cur;
-    cur.reserve(1600);
-    auto push = [&](const String& s) {
-        cur += s;
-        if (cur.length() >= 1400) { out.push_back(cur); cur = ""; }
-    };
-    // Series order must match sampleField()'s indices.
-    const char* names[kHistSeries] = {"battery", "solar", "charger", "dcdc", "load",
-                                      "soc", "temp", "humidity", "pressure", "gas"};
-    push("{\"interval\":" + String(ivSec) + ",\"mins\":" + String(mins) + ",\"series\":{");
+    static const char* const names[kHistSeries] = {"battery", "solar", "charger", "dcdc", "load",
+                                                   "soc", "temp", "humidity", "pressure", "gas"};
+    h.f("{\"interval\":%d,\"mins\":%d,\"series\":{", ivSec, mins);
     for (int f = 0; f < kHistSeries; ++f) {
-        const bool whole = (f == kHistGasIdx);  // gas is whole kilo-ohms, not *10
-        push("\"" + String(names[f]) + "\":[");
+        const bool whole = (f == kHistGasIdx);
+        h.f("\"%s\":[", names[f]);
         for (int k = 0; k < n; ++k) {
             int lo = static_cast<int>(static_cast<long>(k) * want / n);
             int hi = static_cast<int>(static_cast<long>(k + 1) * want / n);
@@ -951,15 +946,13 @@ void buildHistoryChunks(int mins, std::vector<String>& out) {
                 const int av = v < 0 ? -v : v, ab = best < 0 ? -best : best;
                 if (av > ab) best = v;
             }
-            String tok = k ? "," : "";
-            if (best == -32768) tok += "null";
-            else tok += whole ? String(best) : String(best / 10.0f, 1);
-            push(tok);
+            if (best == -32768) h.f("%snull", k ? "," : "");
+            else if (whole)     h.f("%s%d", k ? "," : "", (int)best);
+            else                h.f("%s%s%d.%d", k ? "," : "", best < 0 ? "-" : "", (int)(best < 0 ? -best : best) / 10, (int)(best < 0 ? -best : best) % 10);
         }
-        push(f < kHistSeries - 1 ? "]," : "]");
+        h.f(f < kHistSeries - 1 ? "]," : "]");
     }
-    push("}}");
-    if (cur.length()) out.push_back(cur);
+    h.f("}}");
 }
 
 // ---- WiFi STA (join an existing network) -----------------------------------
@@ -1569,6 +1562,7 @@ void setup() {
 
     Serial.printf("[mem] boot: %u\n", (unsigned)ESP.getFreeHeap());
     gFsOk = LittleFS.begin(/*formatOnFail=*/true);
+    webPreallocate();  // fixed build arena, carved BEFORE WiFi/BLE take their share
     Serial.printf("LittleFS: %s\n", gFsOk ? "mounted" : "unavailable (history not persisted)");
     Serial.printf("[mem] post-LittleFS: %u\n", (unsigned)ESP.getFreeHeap());
 
@@ -1668,7 +1662,11 @@ void setup() {
     // Every device seen in a scan window is held as a heap object until the
     // results are cleared. Measured 13-18 devices / 2.4-8.7KB here; a car park or
     // marina could be several times that on a board with ~70KB free. Cap it.
-    gScan->setMaxResults(40);
+    // Decode in the callback and store NOTHING: with maxResults 0 the library
+    // never allocates a per-device object, so a scan window costs no heap at all
+    // regardless of how many devices are advertising nearby.
+    gScan->setAdvertisedDeviceCallbacks(&gIngestCb, /*wantDuplicates=*/false);
+    gScan->setMaxResults(0);
 #endif
 
 #ifdef VICMON_DISPLAY

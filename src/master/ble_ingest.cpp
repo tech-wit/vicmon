@@ -52,6 +52,21 @@ int gScanVictron = 0, gScanDecoded = 0;  // per-scan diagnostics
 int gScanResults = 0;        // ALL adverts seen in the last scan window, not just Victron
 uint32_t gScanHeapCost = 0;  // heap those results occupied at their peak
 
+static int gCbResults = 0;  // adverts seen in the current window (callback count)
+static void ingest(NimBLEAdvertisedDevice* dev);
+// Runs on the NimBLE host task for every advertisement in the window. RegLock is
+// a recursive mutex, and ingest() only copies into the registry, so holding it
+// here for one advert is as brief as the old per-result loop was.
+struct IngestCb : public NimBLEAdvertisedDeviceCallbacks {
+    void onResult(NimBLEAdvertisedDevice* d) override {
+        ++gCbResults;
+        RegLock lk;
+        ingest(d);
+    }
+};
+static IngestCb gIngestCbObj;
+NimBLEAdvertisedDeviceCallbacks& gIngestCb = gIngestCbObj;
+
 static void ingest(NimBLEAdvertisedDevice* dev) {
     if (!dev->haveManufacturerData()) return;
     std::string md = dev->getManufacturerData();
@@ -105,20 +120,17 @@ void pollBle() {
     gScanVictron = 0;
     gScanDecoded = 0;
     uint32_t heapBefore = ESP.getFreeHeap();
-    NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
+    gCbResults = 0;
+    NimBLEScanResults results = gScan->start(2 /*seconds*/, false);  // blocks; decode happens in onResult
     // Every device seen in the window is held as a heap object until
     // clearResults(); in a busy RF environment that is a real transient on a
     // no-PSRAM board, so the state line reports it alongside the Victron count.
-    gScanResults = results.getCount();
+    gScanResults = gCbResults;  // results are not stored (maxResults 0); counted in the callback
     gScanHeapCost = heapBefore > ESP.getFreeHeap() ? heapBefore - ESP.getFreeHeap() : 0;
     {
         // Hold the registry lock only for the decode pass, never across the ~2 s
         // scan above, so a config write from the web task waits at most one pass.
-        RegLock lk;
-        for (int i = 0; i < results.getCount(); ++i) {
-            NimBLEAdvertisedDevice d = results.getDevice(i);
-            ingest(&d);
-        }
+        // (decoded per advertisement in IngestCb::onResult, under RegLock)
     }
     gScan->clearResults();
 }

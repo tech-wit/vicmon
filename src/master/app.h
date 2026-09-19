@@ -237,7 +237,16 @@ int buildAlerts(uint32_t now, String* outArr);
 // a few hundred columns. Replaces the old single-String builder, which could not
 // allocate a 60-minute window (~35KB) let alone 24h (~70KB) and so answered with
 // an empty body — see buildHistoryChunks in main.cpp.
-void buildHistoryChunks(int mins, std::vector<String>& out);
+// Minimal write sink for builders that live outside web.cpp (the history JSON).
+// put() appends bytes; f() is printf straight into the sink with no String.
+// web.cpp's arena-backed HtmlOut implements it.
+struct OutSink {
+    virtual void put(const char* s, size_t n) = 0;
+    void f(const char* fmt, ...);
+    virtual ~OutSink() {}
+};
+void buildHistoryInto(int mins, OutSink& out);  // writes into the web build arena
+void webPreallocate();                         // allocate the arena at boot (web.cpp)
 ChargeMode chargeMode(const sig::Resolved& ba);
 const char* chargeModeName(ChargeMode m);
 const char* chargeModeDisplayName(ChargeMode m);
