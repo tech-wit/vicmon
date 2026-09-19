@@ -223,6 +223,8 @@ extern uint32_t gEspNowLastOkMs;     // last successful broadcast (espnow.cpp); 
 void cleanRestart(const char* why);  // flush stats + history, log, restart
 void serviceSupervisor(uint32_t now);
 
+extern int gScanResults;
+extern uint32_t gScanHeapCost;
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
 
 // ---- cross-module function prototypes --------------------------------------

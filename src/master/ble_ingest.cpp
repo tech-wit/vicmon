@@ -49,6 +49,8 @@ static void noteDiscovered(const char* mac, const char* name, uint16_t model, in
 }
 
 int gScanVictron = 0, gScanDecoded = 0;  // per-scan diagnostics
+int gScanResults = 0;        // ALL adverts seen in the last scan window, not just Victron
+uint32_t gScanHeapCost = 0;  // heap those results occupied at their peak
 
 static void ingest(NimBLEAdvertisedDevice* dev) {
     if (!dev->haveManufacturerData()) return;
@@ -102,7 +104,13 @@ static void ingest(NimBLEAdvertisedDevice* dev) {
 void pollBle() {
     gScanVictron = 0;
     gScanDecoded = 0;
+    uint32_t heapBefore = ESP.getFreeHeap();
     NimBLEScanResults results = gScan->start(2 /*seconds*/, false);
+    // Every device seen in the window is held as a heap object until
+    // clearResults(); in a busy RF environment that is a real transient on a
+    // no-PSRAM board, so the state line reports it alongside the Victron count.
+    gScanResults = results.getCount();
+    gScanHeapCost = heapBefore > ESP.getFreeHeap() ? heapBefore - ESP.getFreeHeap() : 0;
     {
         // Hold the registry lock only for the decode pass, never across the ~2 s
         // scan above, so a config write from the web task waits at most one pass.

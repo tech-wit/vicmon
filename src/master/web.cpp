@@ -429,6 +429,18 @@ static void serveStrings(AsyncWebServerRequest* req, const char* type,
         }));
 }
 
+// Answer 503 instead of building anything when the heap is already low. A
+// browser click-through drives free heap down through connection concurrency,
+// not any one payload; refusing the next page while short costs the user one
+// retry and costs the board nothing, where building it anyway is how it wedges.
+static bool shedIfLow(AsyncWebServerRequest* req) {
+    if (ESP.getMaxAllocHeap() >= 20 * 1024 && ESP.getFreeHeap() >= 28 * 1024) return false;
+    AsyncWebServerResponse* r = req->beginResponse(503, "text/plain", "busy");
+    r->addHeader("Retry-After", "2");
+    req->send(r);
+    return true;
+}
+
 static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<Seg>> pieces) {
     req->send(req->beginChunkedResponse("text/html",
         [pieces](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
@@ -668,7 +680,7 @@ static void bindingsPage(HtmlOut& h) {
          "local date &amp; time and press <b>Set</b>.</p>"
          "<script>(function(){function g(i){return document.getElementById(i);}"
          "function p(n){return(n<10?'0':'')+n;}"
-         "function show(){fetch('/api/time').then(function(r){return r.json();}).then(function(t){"
+         "function show(){if(document.hidden)return;fetch('/api/time').then(function(r){return r.json();}).then(function(t){"
          "var e=g('clockNow');if(!e)return;"
          "if(t.epoch>0){var d=new Date(t.epoch*1000);"
          "e.textContent='Device clock: '+d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes())+':'+p(d.getUTCSeconds());"
@@ -1033,11 +1045,15 @@ String jsonEsc(const String& s) {  // shared: buildAlerts() in main.cpp calls it
     return o;
 }
 
-// Reusable temporaries kept off the (small) async-task stack.
-static DeviceConfig gTmpCfg;
-static sig::SignalMap gTmpSig;
+// Scratch config + signal map for backup/restore. These used to be file-scope
+// statics "kept off the async-task stack", which is right, but that made them
+// a permanent 2KB+ of RAM for two operations a user runs a few times a year.
+// Each caller now allocates one on the heap for the call and frees it after.
+struct TmpCfg { DeviceConfig cfg; sig::SignalMap sig; };
 
 static String buildExportJson() {
+    std::unique_ptr<TmpCfg> tmp(new (std::nothrow) TmpCfg());
+    if (!tmp) return String("");
     String j = "{\"version\":1,\"active\":" + String(gProfiles.active()) + ",";
     j += "\"wifi\":{\"ssid\":\"" + jsonEsc(gStaSsid) + "\",\"pass\":\"" + jsonEsc(gStaPass) +
          "\"},\"profiles\":[";
@@ -1046,8 +1062,8 @@ static String buildExportJson() {
         if (!gProfiles.used(pid)) continue;
         if (!firstP) j += ",";
         firstP = false;
-        gTmpCfg.begin(pid);
-        gTmpSig.begin(gTmpCfg.slots(), gTmpCfg.count(), pid);
+        tmp->cfg.begin(pid);
+        tmp->sig.begin(tmp->cfg.slots(), tmp->cfg.count(), pid);
         j += "{\"id\":" + String(pid) + ",\"name\":\"" + jsonEsc(gProfiles.name(pid)) + "\",";
         Preferences p;
         p.begin(settingsNs(pid).c_str(), true);
@@ -1061,16 +1077,16 @@ static String buildExportJson() {
         j += "\"vhigh\":" + String(p.getFloat("vhigh", 15.0f), 2) + "},";
         p.end();
         j += "\"devices\":[";
-        for (size_t i = 0; i < gTmpCfg.count(); ++i) {
+        for (size_t i = 0; i < tmp->cfg.count(); ++i) {
             if (i) j += ",";
-            DeviceSlot& s = gTmpCfg.slots()[i];
+            DeviceSlot& s = tmp->cfg.slots()[i];
             j += "{\"name\":\"" + jsonEsc(s.name) + "\",\"type\":\"" + typeName(s.type) +
                  "\",\"key\":\"" + keyHex(s.key) + "\"}";
         }
         j += "],\"bindings\":[";
         bool firstB = true;
         for (size_t r = 0; r < sig::kRoleCount; ++r) {
-            const sig::Binding& b = gTmpSig.binding(static_cast<sig::Role>(r));
+            const sig::Binding& b = tmp->sig.binding(static_cast<sig::Role>(r));
             if (!b.device[0]) continue;
             if (!firstB) j += ",";
             firstB = false;
@@ -1087,6 +1103,8 @@ static String buildExportJson() {
 // Restores profiles present in the backup (overwriting them); profiles absent
 // from the file are left untouched.
 static bool applyImport(const String& body) {
+    std::unique_ptr<TmpCfg> tmp(new (std::nothrow) TmpCfg());
+    if (!tmp) return false;
     JsonDocument doc;
     if (deserializeJson(doc, body)) return false;
     JsonArray profs = doc["profiles"].as<JsonArray>();
@@ -1098,27 +1116,27 @@ static bool applyImport(const String& body) {
         gProfiles.setName(pid, pr["name"] | "Profile");
         wipeProfile(pid);
 
-        gTmpCfg.begin(pid);
-        gTmpCfg.clear();  // drop any seeded defaults; install exactly the backup
+        tmp->cfg.begin(pid);
+        tmp->cfg.clear();  // drop any seeded defaults; install exactly the backup
         for (JsonObject d : pr["devices"].as<JsonArray>()) {
             const char* dn = d["name"] | "";
             uint8_t k[16];
             if (dn[0] && DeviceConfig::parseHexKey(String((const char*)(d["key"] | "")), k))
-                gTmpCfg.add(dn, parseType(String((const char*)(d["type"] | "battery"))), k);
+                tmp->cfg.add(dn, parseType(String((const char*)(d["type"] | "battery"))), k);
         }
-        gTmpCfg.save();
+        tmp->cfg.save();
 
-        gTmpSig.begin(gTmpCfg.slots(), gTmpCfg.count(), pid);
+        tmp->sig.begin(tmp->cfg.slots(), tmp->cfg.count(), pid);
         for (size_t r = 0; r < sig::kRoleCount; ++r)
-            gTmpSig.set(static_cast<sig::Role>(r), "", sig::Field::None);
+            tmp->sig.set(static_cast<sig::Role>(r), "", sig::Field::None);
         for (JsonObject bd : pr["bindings"].as<JsonArray>()) {
             const char* rk = bd["role"] | "";
             for (size_t r = 0; r < sig::kRoleCount; ++r)
                 if (strcmp(sig::roleKey(static_cast<sig::Role>(r)), rk) == 0)
-                    gTmpSig.set(static_cast<sig::Role>(r), bd["device"] | "",
+                    tmp->sig.set(static_cast<sig::Role>(r), bd["device"] | "",
                                 static_cast<sig::Field>(bd["field"] | 0));
         }
-        gTmpSig.save();
+        tmp->sig.save();
 
         JsonObject st = pr["settings"];
         Preferences p;
@@ -1393,7 +1411,7 @@ static String systemCard() {
          "and it answers only if its firmware is newer. Either way the target reboots into the new "
          "firmware only if the whole image validates, so an interrupted transfer is harmless.</p>";
     h += "<script>"
-         "function otaPoll(){fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
+         "function otaPoll(){if(document.hidden)return;fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
          "var v=document.getElementById('otaVer');if(v&&s.version){var pt=s.peerKnown?(' \\u00b7 paired: '+s.peer+' ('+s.peerRel+')'):' \\u00b7 paired: not heard yet';v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built+pt;}"
          "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
@@ -1412,7 +1430,9 @@ static String systemCard() {
 
 void setupServer() {
     gServer.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/css", kStyle);
+        // Streams straight from flash; send(const char*) would copy it into a
+        // heap String on every page load.
+        req->send(req->beginResponse_P(200, "text/css", (const uint8_t*)kStyle, strlen(kStyle)));
     });
     // Pairing / role / debug — parity with the on-screen Diag controls.
     gServer.on("/api/pair", HTTP_POST, [](AsyncWebServerRequest* req) {
@@ -1467,9 +1487,11 @@ void setupServer() {
         req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         serveStatic(req, "/", kMimicPage);
     });
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         // Build into small pieces + chunk-serve (see HtmlOut/servePieces) so the big
         // page never needs a large contiguous allocation on the fragmented heap.
         auto pieces = std::make_shared<std::vector<Seg>>();
@@ -1479,6 +1501,7 @@ void setupServer() {
         servePieces(req, pieces);
     });
     gServer.on("/bindings", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         auto pieces = std::make_shared<std::vector<Seg>>();
         HtmlOut h{pieces.get()};
         bindingsPage(h);
@@ -1486,6 +1509,7 @@ void setupServer() {
         servePieces(req, pieces);
     });
     gServer.on("/network", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         auto pieces = std::make_shared<std::vector<Seg>>();
         HtmlOut h{pieces.get()};
         networkPage(h);
@@ -1493,12 +1517,15 @@ void setupServer() {
         servePieces(req, pieces);
     });
     gServer.on("/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         serveStatic(req, "/stats", kStatsPage);
     });
     gServer.on("/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         serveStatic(req, "/diag", kDiagPage);
     });
     gServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         req->send(200, "application/json", buildDiagJson());
     });
     gServer.on("/api/panel", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -1513,6 +1540,7 @@ void setupServer() {
         req->send(200, "application/json", j);
     });
     gServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         req->send(200, "application/json", buildStatsJson());
     });
     gServer.on("/api/sys", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -1530,9 +1558,11 @@ void setupServer() {
         req->send(200, "application/json", j);
     });
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         req->send(200, "application/json", buildDataJson());
     });
     gServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         int mins = req->hasParam("mins") ? req->getParam("mins")->value().toInt() : 10;
         auto parts = std::make_shared<std::vector<String>>();
         buildHistoryChunks(mins, *parts);
@@ -1559,7 +1589,12 @@ void setupServer() {
     gServer.on("/alerts", HTTP_POST, handleAlerts);
     gServer.on("/stats/reset", HTTP_POST, handleStatsReset);
     gServer.on("/api/ota", HTTP_POST, handleOtaDone, handleOtaUpload);
+    // Browsers request this on every page load (and retry after a 404). It used
+    // to fall through to onNotFound and get the ENTIRE mimic page back — a full
+    // page render per click, on top of the page actually being loaded.
+    gServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) { req->send(204); });
     gServer.onNotFound([](AsyncWebServerRequest* req) {
+        if (shedIfLow(req)) return;
         serveStatic(req, "/", kMimicPage);
     });
     gServer.begin();

@@ -107,7 +107,8 @@ function ttgStr(m){
  if(m>=1440){var d=Math.floor(m/1440),h=Math.round((m%1440)/60);return d+'d'+(h?' '+h+'h':'');}
  if(m>=60){var hh=Math.floor(m/60),mm=Math.round(m%60);return hh+'h'+(mm?' '+mm+'m':'');}
  return Math.round(m)+'m';}
-async function tick(){
+let busy_tick=false;async function tick(){if(busy_tick||document.hidden)return;busy_tick=true;try{await tick_();}finally{busy_tick=false;}}
+async function tick_(){
  let p; try{p=await(await fetch('/api/panel')).json();}catch(e){return;}
  var av=document.getElementById('alerts');
  var ah='';
@@ -210,7 +211,8 @@ function setWin(m){chartWin=m;
  var bs=document.querySelectorAll('.winbtn');for(var i=0;i<bs.length;i++)
   bs[i].classList.toggle('active',+bs[i].dataset.m===m);
  loadChart();}
-async function loadChart(){
+let busy_loadChart=false;async function loadChart(){if(busy_loadChart||document.hidden)return;busy_loadChart=true;try{await loadChart_();}finally{busy_loadChart=false;}}
+async function loadChart_(){
  try{chartData=await(await fetch('/api/history?mins='+chartWin)).json();}catch(e){return;}
  drawChart();drawEnvCharts();}
 function drawChart(){
@@ -440,7 +442,8 @@ function drawDays(){var c=document.getElementById('dayChart');if(!c||!c.getConte
   ctx.fillStyle='#f87171';var yo=Y(d.o);ctx.fillRect(xo,yo,bw,base-yo);}
   ctx.fillStyle=d.now?'#e6edf3':'#7d8da1';ctx.fillText(lbl(d),cx,H-5);});
 }
-async function load(){try{data=await(await fetch('/api/stats')).json();}catch(e){return;}render();drawDays();}
+let busy_load=false;async function load(){if(busy_load||document.hidden)return;busy_load=true;try{await load_();}finally{busy_load=false;}}
+async function load_(){try{data=await(await fetch('/api/stats')).json();}catch(e){return;}render();drawDays();}
 meters();load();setInterval(load,5000);
 </script>
 )HTML";
@@ -465,7 +468,8 @@ async function loadSys(){var e=document.getElementById('sys');if(!e)return;
   '<div style="display:flex;justify-content:space-between"><span>Min free (ever)</span><b>'+kb(s.minheap)+'</b></div>'+
   (s.psram>0?'<div style="display:flex;justify-content:space-between"><span>PSRAM</span><b>'+kb(s.psram)+'</b></div>':'')+
   '<div style="display:flex;justify-content:space-between"><span>Uptime</span><b>'+dur(s.uptime)+'</b></div>';}
-async function load(){let d;try{d=await(await fetch('/api/diag')).json();}catch(e){return;}
+let busy_dload=false;async function load(){if(busy_dload||document.hidden)return;busy_dload=true;try{await dload_();}finally{busy_dload=false;}}
+async function dload_(){let d;try{d=await(await fetch('/api/diag')).json();}catch(e){return;}
  var el=document.getElementById('diag');
  if(!d.length){el.innerHTML='<p class=muted>No devices configured.</p>';return;}
  el.innerHTML=d.map(function(dev){
@@ -481,6 +485,6 @@ async function load(){let d;try{d=await(await fetch('/api/diag')).json();}catch(
    '<div class=muted style="font-size:.74em;word-break:break-all;margin-top:.3em">raw: '+
    (dev.raw||'(none)')+'</div></div>';
  }).join('');}
-load();loadSys();setInterval(function(){load();loadSys();},2000);
+load();loadSys();setInterval(function(){load();loadSys();},3000);
 </script>
 )HTML";

@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.11";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.12";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -1665,6 +1665,10 @@ void setup() {
     // AP unjoinable; 30% was very safe). 50:50 is a deliberate middle ground.
     gScan->setInterval(160);
     gScan->setWindow(80);
+    // Every device seen in a scan window is held as a heap object until the
+    // results are cleared. Measured 13-18 devices / 2.4-8.7KB here; a car park or
+    // marina could be several times that on a board with ~70KB free. Cap it.
+    gScan->setMaxResults(40);
 #endif
 
 #ifdef VICMON_DISPLAY
@@ -1758,9 +1762,9 @@ void loop() {
     // isn't bottlenecked by this loop's ~2s BLE scan.
 #endif
 
-    Serial.printf("[state] heap=%u/%u victron_adverts=%d decoded=%d |",
+    Serial.printf("[state] heap=%u/%u scan=%d(%uB) victron_adverts=%d decoded=%d |",
                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
-                  gScanVictron, gScanDecoded);
+                  gScanResults, (unsigned)gScanHeapCost, gScanVictron, gScanDecoded);
     for (size_t i = 0; i < gConfig.count(); ++i) {
         const DeviceSlot& s = gConfig.slots()[i];
         Serial.printf(" %s=%s", s.name, s.stale(now) ? "stale" : "ok");
