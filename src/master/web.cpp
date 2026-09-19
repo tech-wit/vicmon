@@ -376,6 +376,47 @@ static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<
         }));
 }
 
+// Serve a static page (nav head + one big flash literal + foot) as a chunked
+// response that reads the literal STRAIGHT OUT OF FLASH.
+//
+// The obvious `pageHead() + kPage + pageFoot()` needs two contiguous heap blocks
+// the size of the whole page at the same time: one for the first concat, one for
+// the second while the first is still alive. kMimicPage is 17KB, so that asks for
+// ~36KB contiguous against a largest-free-block that sits near 35KB on a master
+// with BLE up. When it fails, String yields an EMPTY string and the browser gets
+// a 200 with no body — a blank page, no error anywhere. The Environment card is
+// what pushed the mimic page over that line.
+//
+// This copies nothing: the head and foot are small, and the body streams from
+// flash a chunk at a time.
+static void serveStatic(AsyncWebServerRequest* req, const char* active, const char* body) {
+    auto head = std::make_shared<String>(pageHead(active));
+    auto foot = std::make_shared<String>(pageFoot());
+    const size_t bodyLen = strlen(body);
+    req->send(req->beginChunkedResponse(
+        "text/html",
+        [head, foot, body, bodyLen](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            const size_t hl = head->length(), fl = foot->length();
+            const char* src;
+            size_t avail;
+            if (index < hl) {
+                src = head->c_str() + index;
+                avail = hl - index;
+            } else if (index < hl + bodyLen) {
+                src = body + (index - hl);
+                avail = hl + bodyLen - index;
+            } else if (index < hl + bodyLen + fl) {
+                src = foot->c_str() + (index - hl - bodyLen);
+                avail = hl + bodyLen + fl - index;
+            } else {
+                return 0;  // whole page sent
+            }
+            const size_t n = maxLen < avail ? maxLen : avail;
+            memcpy(buf, src, n);
+            return n;
+        }));
+}
+
 static void devicesPage(HtmlOut& h) {
     uint32_t now = millis();
     h += pageHead("/devices");
@@ -1325,7 +1366,7 @@ void setupServer() {
         req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());
+        serveStatic(req, "/", kMimicPage);
     });
     gServer.on("/devices", HTTP_GET, [](AsyncWebServerRequest* req) {
         // Build into small pieces + chunk-serve (see HtmlOut/servePieces) so the big
@@ -1344,10 +1385,10 @@ void setupServer() {
         servePieces(req, pieces);
     });
     gServer.on("/stats", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", pageHead("/stats") + kStatsPage + pageFoot());
+        serveStatic(req, "/stats", kStatsPage);
     });
     gServer.on("/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", pageHead("/diag") + kDiagPage + pageFoot());
+        serveStatic(req, "/diag", kDiagPage);
     });
     gServer.on("/api/diag", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", buildDiagJson());
@@ -1406,7 +1447,7 @@ void setupServer() {
     gServer.on("/stats/reset", HTTP_POST, handleStatsReset);
     gServer.on("/api/ota", HTTP_POST, handleOtaDone, handleOtaUpload);
     gServer.onNotFound([](AsyncWebServerRequest* req) {
-        req->send(200, "text/html", pageHead("/") + kMimicPage + pageFoot());
+        serveStatic(req, "/", kMimicPage);
     });
     gServer.begin();
 }
