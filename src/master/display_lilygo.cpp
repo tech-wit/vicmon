@@ -145,6 +145,23 @@ static void TR(int xr, int y, const GFXfont* f, uint16_t col, const char* fmt, .
     T(xr - textW(f, b), y, f, col, b);
 }
 
+// Classic built-in 5x7 GFX font for axis ticks: a fixed 6x8 cell, positioned by
+// its TOP-left corner (the FreeSans fonts above position by baseline). Chart
+// annotations are the one place the extra density beats the nicer glyphs — at
+// 9pt a signed amp label such as "-100" eats 36 of the screen's 320 columns,
+// which is gutter stolen from the plot itself.
+static int textWs(const char* s) { return (int)strlen(s) * 6; }
+static void Ts(int x, int yTop, uint16_t col, const char* fmt, ...) {
+    char b[24]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
+    Arduino_GFX* g = G();
+    g->setFont(nullptr); g->setTextSize(1);
+    g->setTextColor(col); g->setCursor(x, yTop); g->print(b);
+}
+static void TsR(int xr, int yTop, uint16_t col, const char* fmt, ...) {
+    char b[24]; va_list ap; va_start(ap, fmt); vsnprintf(b, sizeof(b), fmt, ap); va_end(ap);
+    Ts(xr - textWs(b), yTop, col, "%s", b);
+}
+
 static uint16_t socColor(const DashData& d) {
     if (!d.battValid) return C_DIM;
     if (d.socCrit > 0 && d.soc <= d.socCrit) return C_RED;
@@ -294,6 +311,57 @@ static void pageFlow(const DashData& d) {
     drawFooter(gFlowWatts ? "B: Amps" : "B: Watts");
 }
 
+// ---- shared chart chrome (Graph / Environment / Week) -----------------------
+// One geometry for every chart page, so the three read as the same instrument:
+// a 2px-margin frame, 6x8 tick labels in gutters sized to the numbers actually
+// drawn, a strip under the frame for the x-axis ends, and the legend on the row
+// just above the footer. At 320x170 the plot IS the page — gutters and padding
+// are the only things competing with it, so both are measured, never guessed.
+struct Chart {
+    int x0, y0, pw, ph;              // frame
+    int plotX, plotW, plotY, plotH;  // interior
+    int stripY;                      // top of the under-frame label strip
+};
+static Chart chartBegin(int gutL, int gutR, int frameH = 124) {
+    Chart c;
+    c.x0 = 2; c.y0 = 2; c.pw = W - 4; c.ph = frameH;
+    G()->drawRect(c.x0, c.y0, c.pw, c.ph, RGB565(45, 45, 56));
+    c.plotX = c.x0 + gutL;
+    c.plotW = c.pw - gutL - gutR;
+    c.plotY = c.y0 + 4;
+    c.plotH = c.ph - 8;
+    c.stripY = c.y0 + c.ph + 2;
+    return c;
+}
+// Tick cells are 8px tall and drawn from their TOP, so -3 centres one on its
+// gridline; the end ones are nudged back inside the frame.
+static int chartTickY(const Chart& c, int y) {
+    int ty = y - 3;
+    if (ty < c.y0 + 2) ty = c.y0 + 2;
+    if (ty > c.y0 + c.ph - 10) ty = c.y0 + c.ph - 10;
+    return ty;
+}
+// Widest of a set of tick strings, as a gutter width.
+static int chartGutter(const char* const* labels, int n, int pad) {
+    int w = 0;
+    for (int i = 0; i < n; ++i) { int t = textWs(labels[i]); if (t > w) w = t; }
+    return w + pad;
+}
+struct Leg { const char* n; uint16_t c; bool on; };
+static void chartLegend(const Leg* leg, int n) {
+    Arduino_GFX* g = G();
+    int lx = 4;
+    for (int i = 0; i < n; ++i) {
+        g->fillRect(lx, FOOT_Y - 15, 9, 9, leg[i].on ? leg[i].c : C_DIM);
+        T(lx + 12, FOOT_Y - 6, F_S, leg[i].on ? C_TEXT : C_DIM, leg[i].n);
+        lx += 12 + textW(F_S, leg[i].n) + 9;
+    }
+}
+// Centred message for a chart with nothing to draw yet.
+static void chartEmpty(const Chart& c, const char* msg) {
+    T((W - textW(F_S, msg)) / 2, c.y0 + c.ph / 2 + 4, F_S, C_LBL, msg);
+}
+
 // ---- Page: Graph -----------------------------------------------------------
 // Line plot of one deci-unit series across the plot rect, mapping [lo,hi] to the
 // height. Deliberately the same math as gfx_graph.cpp's linePlot (and the web
@@ -321,26 +389,18 @@ static void plotSeries(const int16_t* a, int n, float scale, int px0, int pw, in
 }
 static void pageGraph(const DashData& d) {
     Arduino_GFX* g = G();
-    const int x0 = 6, y0 = 4, pw = W - 12, ph = 112;
-    g->drawRect(x0, y0, pw, ph, RGB565(45, 45, 56));
+    const bool haveData = d.histCount >= 2;
+    const bool showSoc = !gGraphHideSoc;
+    const int16_t* series[5] = {d.histBatt, d.histSolar, d.histCharger, d.histDcdc, d.histLoad};
 
-    // Axis gutters — Amps labels left, SoC % right — as on the Env page. Wide
-    // enough for a signed label ("-100") without running into the frame.
-    const int GUTL = 40, GUTR = 34;
-    const int plotX = x0 + GUTL, plotW = pw - GUTL - GUTR;
-    const int plotY = y0 + 4, plotH = ph - 8;
-
-    if (d.histCount < 2) {
-        T(x0 + 96, y0 + ph / 2 + 4, F_S, C_LBL, d.graphSyncing ? "syncing..." : "no data yet");
-    } else {
-        // Auto-scale the Amps axis across the five current series exactly as
-        // gfx_graph.cpp and the web chart do: track the real min and max, always
-        // include zero, and never let the range close below 2A. A symmetric
-        // +/-peak axis (what this page used to do) draws the SAME samples with a
-        // different shape — an all-positive day lands entirely in the top half at
-        // half amplitude — so the small screen disagreed with every other view.
-        float mn = 0, mx = 0;
-        const int16_t* series[5] = {d.histBatt, d.histSolar, d.histCharger, d.histDcdc, d.histLoad};
+    // Auto-scale the Amps axis across the five current series exactly as
+    // gfx_graph.cpp and the web chart do: track the real min and max, always
+    // include zero, and never let the range close below 2A. A symmetric
+    // +/-peak axis (what this page used to do) draws the SAME samples with a
+    // different shape — an all-positive day lands entirely in the top half at
+    // half amplitude — so the small screen disagreed with every other view.
+    float mn = 0, mx = 0;
+    if (haveData) {
         for (int s = 0; s < 5; ++s)
             for (int i = 0; i < d.histCount; ++i) {
                 if (series[s][i] == -32768) continue;
@@ -349,46 +409,52 @@ static void pageGraph(const DashData& d) {
                 if (v > mx) mx = v;
             }
         if (mx - mn < 2) mx = mn + 2;
-        auto yA = [&](float v) {
-            return plotY + plotH - 1 - (int)lroundf((v - mn) / (mx - mn) * (plotH - 1));
-        };
+    }
 
+    const int dec = (mx - mn) >= 10 ? 0 : 1;
+    char tick[3][12];
+    const char* tp[3] = {tick[0], tick[1], tick[2]};
+    for (int gi = 0; gi <= 2; ++gi)
+        snprintf(tick[gi], sizeof(tick[gi]), "%.*f", dec, mn + (mx - mn) * gi / 2);
+    const int gutL = haveData ? chartGutter(tp, 3, 5) : 4;
+    const char* pct[3] = {"0", "50", "100"};
+    const int gutR = (haveData && showSoc) ? chartGutter(pct, 3, 6) : 4;
+    Chart c = chartBegin(gutL, gutR);
+
+    if (!haveData) {
+        chartEmpty(c, d.graphSyncing ? "syncing..." : "no data yet");
+    } else {
+        auto yA = [&](float v) {
+            return c.plotY + c.plotH - 1 - (int)lroundf((v - mn) / (mx - mn) * (c.plotH - 1));
+        };
         // Three gridlines (min / mid / max). Both axes span the full plot height,
         // so the 0/50/100 % ticks land on the same three lines.
-        int dec = (mx - mn) >= 10 ? 0 : 1;
         for (int gi = 0; gi <= 2; ++gi) {
-            float val = mn + (mx - mn) * gi / 2;
-            int y = yA(val);
-            g->drawFastHLine(plotX, y, plotW, RGB565(50, 50, 62));
-            TR(plotX - 2, y + 4, F_S, C_LBL, "%.*f", dec, val);
-            if (!gGraphHideSoc) Tf(plotX + plotW + 3, y + 4, F_S, C_DIM, "%d", gi * 50);
+            int y = yA(mn + (mx - mn) * gi / 2);
+            g->drawFastHLine(c.plotX, y, c.plotW, RGB565(50, 50, 62));
+            int ty = chartTickY(c, y);
+            TsR(c.plotX - 3, ty, C_LBL, "%s", tick[gi]);
+            if (showSoc) Ts(c.plotX + c.plotW + 4, ty, C_SOC, "%s", pct[gi]);
         }
-        if (mn < 0 && mx > 0) g->drawFastHLine(plotX, yA(0), plotW, RGB565(95, 95, 112));
+        if (mn < 0 && mx > 0) g->drawFastHLine(c.plotX, yA(0), c.plotW, RGB565(95, 95, 112));
 
         const uint16_t col[5] = {C_GREEN, C_SOLAR, C_CHG, C_ALT, C_LOAD};
         for (int s = 0; s < 5; ++s)
-            plotSeries(series[s], d.histCount, 10.0f, plotX, plotW, plotY, plotH,
+            plotSeries(series[s], d.histCount, 10.0f, c.plotX, c.plotW, c.plotY, c.plotH,
                        mn, mx, col[s], false);
-        if (!gGraphHideSoc)
-            plotSeries(d.histSoc, d.histCount, 10.0f, plotX, plotW, plotY, plotH,
+        if (showSoc)
+            plotSeries(d.histSoc, d.histCount, 10.0f, c.plotX, c.plotW, c.plotY, c.plotH,
                        0.0f, 100.0f, C_SOC, true);
     }
-    // Time axis under the frame: oldest .. now, as on the Guition and the web.
-    // The left end doubles as the zoom readout (page colour), so cycling the
-    // window with B still shows plainly which span is on screen.
-    Tf(plotX, y0 + ph + 10, F_S, kPageColor[LP_GRAPH], "-%s", kGraphWinName[gGraphWinIdx]);
-    TR(plotX + plotW, y0 + ph + 10, F_S, C_DIM, "now");
+    // Time axis in the strip under the frame: oldest .. now, as on the Guition
+    // and the web. The left end doubles as the zoom readout (page colour), so
+    // cycling the window with B still shows plainly which span is on screen.
+    Ts(c.plotX, c.stripY, kPageColor[LP_GRAPH], "-%s", kGraphWinName[gGraphWinIdx]);
+    TsR(c.plotX + c.plotW, c.stripY, C_DIM, "now");
 
-    // Legend. Six slots at this font only fit across 320px with tight gaps.
-    struct Leg { const char* n; uint16_t c; bool on; };
     Leg leg[6] = {{"Bat", C_GREEN, true}, {"Sol", C_SOLAR, true}, {"Chg", C_CHG, true},
-                  {"Alt", C_ALT, true}, {"Load", C_LOAD, true}, {"SoC", C_SOC, !gGraphHideSoc}};
-    int lx = 6;
-    for (int i = 0; i < 6; ++i) {
-        g->fillRect(lx, 128, 9, 9, leg[i].on ? leg[i].c : C_DIM);
-        T(lx + 12, 138, F_S, leg[i].on ? C_TEXT : C_DIM, leg[i].n);
-        lx += 12 + textW(F_S, leg[i].n) + 9;
-    }
+                  {"Alt", C_ALT, true}, {"Load", C_LOAD, true}, {"SoC", C_SOC, showSoc}};
+    chartLegend(leg, 6);
     drawFooter("B:zoom  hold:SoC");
 }
 
@@ -450,11 +516,9 @@ static void plotEnv(const EnvCh& c, int n, int px0, int pw, int py0, int ph,
 
 static void pageEnv(const DashData& d) {
     Arduino_GFX* g = G();
-    const int x0 = 6, y0 = 4, pw = W - 12, ph = 112;
-    g->drawRect(x0, y0, pw, ph, RGB565(45, 45, 56));
-
     if (!d.envPresent) {
-        T(x0 + 54, y0 + ph / 2 + 4, F_S, C_LBL, "no environment sensor");
+        Chart c = chartBegin(4, 4);
+        chartEmpty(c, "no environment sensor");
         drawFooter("A:page");
         return;
     }
@@ -468,85 +532,150 @@ static void pageEnv(const DashData& d) {
         R = {d.histEnvG, 1.0f,  "Gas",   "k",   0, C_ENV_G, 10.0f, d.envGasValid, d.envGasKohm};
     }
 
-    // Plot rect, inset to leave an axis gutter on each side.
-    const int GUT = 34;
-    const int plotX = x0 + GUT, plotW = pw - 2 * GUT;
-    const int plotY = y0 + 4, plotH = ph - 8;
-
-    float lLo, lHi, rLo, rHi;
+    float lLo = 0, lHi = 0, rLo = 0, rHi = 0;
     bool haveL = envSpan(L, d.histCount, lLo, lHi);
     bool haveR = envSpan(R, d.histCount, rLo, rHi);
 
-    if (d.histCount < 2) {
-        T(x0 + 96, y0 + ph / 2 + 4, F_S, C_LBL, d.graphSyncing ? "syncing..." : "no data yet");
-    } else {
-        for (int gi = 0; gi <= 2; ++gi) {   // 3 gridlines, labelled on both sides
-            int y = plotY + plotH - 1 - gi * (plotH - 1) / 2;
-            g->drawFastHLine(plotX, y, plotW, RGB565(50, 50, 62));
-            if (haveL) TR(plotX - 2, y + 4, F_S, L.col, "%.*f", L.dp, lLo + (lHi - lLo) * gi / 2);
-            if (haveR) Tf(plotX + plotW + 3, y + 4, F_S, R.col, "%.*f", R.dp, rLo + (rHi - rLo) * gi / 2);
-        }
-        if (haveL) plotEnv(L, d.histCount, plotX, plotW, plotY, plotH, lLo, lHi, false);
-        if (haveR) plotEnv(R, d.histCount, plotX, plotW, plotY, plotH, rLo, rHi, true);
+    // Gutters sized to the ticks each channel actually needs. Pressure's
+    // "1019.3" is the widest label any chart page can produce, and at 9pt it did
+    // not fit the old fixed 34px gutter at all — the tick font plus a measured
+    // gutter is what finally makes that pair legible.
+    char lt[3][12], rt[3][12];
+    const char* lp[3] = {lt[0], lt[1], lt[2]};
+    const char* rp[3] = {rt[0], rt[1], rt[2]};
+    for (int gi = 0; gi <= 2; ++gi) {
+        snprintf(lt[gi], sizeof(lt[gi]), "%.*f", L.dp, lLo + (lHi - lLo) * gi / 2);
+        snprintf(rt[gi], sizeof(rt[gi]), "%.*f", R.dp, rLo + (rHi - rLo) * gi / 2);
     }
+    Chart c = chartBegin(haveL ? chartGutter(lp, 3, 5) : 4,
+                         haveR ? chartGutter(rp, 3, 6) : 4);
 
-    // Live values + the shared zoom window.
-    char lv[16], rv[16];
-    if (L.nowOk) snprintf(lv, sizeof(lv), "%.*f%s", L.dp, L.now, L.unit); else snprintf(lv, sizeof(lv), "--");
-    if (R.nowOk) snprintf(rv, sizeof(rv), "%.*f%s", R.dp, R.now, R.unit); else snprintf(rv, sizeof(rv), "--");
-    g->fillRect(6, 128, 9, 9, L.col);
-    Tf(18, 138, F_S, C_TEXT, "%s %s", L.name, lv);
-    int mid = 6 + 12 + textW(F_S, L.name) + 6 + textW(F_S, lv) + 16;
-    g->fillRect(mid, 128, 9, 9, R.col);
-    Tf(mid + 12, 138, F_S, C_TEXT, "%s %s", R.name, rv);
-    TR(W - 6, 138, F_S, C_LBL, "%s", kGraphWinName[gGraphWinIdx]);
+    if (d.histCount < 2) {
+        chartEmpty(c, d.graphSyncing ? "syncing..." : "no data yet");
+    } else {
+        for (int gi = 0; gi <= 2; ++gi) {  // 3 gridlines, labelled on both sides
+            int y = c.plotY + c.plotH - 1 - gi * (c.plotH - 1) / 2;
+            g->drawFastHLine(c.plotX, y, c.plotW, RGB565(50, 50, 62));
+            int ty = chartTickY(c, y);
+            // Axis labels stay in the series colour: with two unrelated units
+            // sharing one frame, the colour is what says which axis is which.
+            if (haveL) TsR(c.plotX - 3, ty, L.col, "%s", lt[gi]);
+            if (haveR) Ts(c.plotX + c.plotW + 4, ty, R.col, "%s", rt[gi]);
+        }
+        if (haveL) plotEnv(L, d.histCount, c.plotX, c.plotW, c.plotY, c.plotH, lLo, lHi, false);
+        if (haveR) plotEnv(R, d.histCount, c.plotX, c.plotW, c.plotY, c.plotH, rLo, rHi, true);
+    }
+    // Same strip as the Graph page — this page shares the Graph's zoom window.
+    Ts(c.plotX, c.stripY, kPageColor[LP_ENV], "-%s", kGraphWinName[gGraphWinIdx]);
+    TsR(c.plotX + c.plotW, c.stripY, C_DIM, "now");
+
+    // The legend row doubles as the live readout for the pair on screen.
+    char ln[26], rn[26];
+    if (L.nowOk) snprintf(ln, sizeof(ln), "%s %.*f%s", L.name, L.dp, L.now, L.unit);
+    else         snprintf(ln, sizeof(ln), "%s --", L.name);
+    if (R.nowOk) snprintf(rn, sizeof(rn), "%s %.*f%s", R.name, R.dp, R.now, R.unit);
+    else         snprintf(rn, sizeof(rn), "%s --", R.name);
+    Leg leg[2] = {{ln, L.col, true}, {rn, R.col, true}};
+    chartLegend(leg, 2);
 
     drawFooter("B:channel  hold:zoom");
 }
 
 // ---- Page: Week ------------------------------------------------------------
+static const uint32_t kYmdMin = 20000000;  // dayStamp at/above this is a yyyymmdd date
+
 static void pageWeek(const DashData& d) {
     Arduino_GFX* g = G();
-    int x0 = 22, top = 8, chartH = 62, midY = top + chartH / 2;  // x0=22 leaves an axis gutter
+    // Seven slots: the last six ARCHIVED days plus TODAY's live bucket on the
+    // right, which is how the web chart and the Guition page build it. Plotting
+    // only the archive — what this page did — meant the newest bar was
+    // *yesterday*, wearing a "now" label, and nothing on the page moved until
+    // midnight. That is why the week stopped appearing to trend.
+    const int NS = 7;
+    float inAh[NS] = {0}, outAh[NS] = {0}, sol[NS] = {0}, dcd[NS] = {0}, chg[NS] = {0};
+    bool used[NS] = {false};
+    char lbl[NS][8];
+    for (int s = 0; s < NS; ++s) {
+        lbl[s][0] = '\0';
+        if (s == NS - 1) {
+            sol[s] = d.statToday.solarAh; dcd[s] = d.statToday.dcdcAh;
+            chg[s] = d.statToday.chargerAh; outAh[s] = d.statToday.outAh;
+            used[s] = true;
+            strcpy(lbl[s], "now");
+        } else {
+            int di = d.dayCount - (NS - 1 - s);
+            if (di < 0 || di >= d.dayCount) continue;
+            sol[s] = d.daySolarAh[di]; dcd[s] = d.dayDcdcAh[di];
+            chg[s] = d.dayChargerAh[di]; outAh[s] = d.dayLoadAh[di];
+            used[s] = true;
+            uint32_t st = d.dayStamp[di];
+            if (d.clockOk && st >= kYmdMin)
+                snprintf(lbl[s], sizeof(lbl[s]), "%u/%u", (unsigned)((st / 100) % 100),
+                         (unsigned)(st % 100));
+            else
+                snprintf(lbl[s], sizeof(lbl[s]), "%u", (unsigned)st);
+        }
+        inAh[s] = sol[s] + dcd[s] + chg[s];
+    }
     float mx = 1.0f;
-    for (int i = 0; i < d.dayCount; ++i) {
-        float in = d.daySolarAh[i] + d.dayDcdcAh[i] + d.dayChargerAh[i];
-        if (in > mx) mx = in;
-        if (d.dayLoadAh[i] > mx) mx = d.dayLoadAh[i];
+    for (int s = 0; s < NS; ++s) {
+        if (inAh[s] > mx) mx = inAh[s];
+        if (outAh[s] > mx) mx = outAh[s];
     }
-    // Value scale: +peak (in) at the top, -peak (out) at the bottom, 0 on the mid.
-    g->drawFastHLine(x0, midY, W - x0 - 6, RGB565(70, 70, 84));
-    g->drawFastHLine(x0, top, W - x0 - 6, RGB565(38, 38, 48));
-    g->drawFastHLine(x0, top + chartH, W - x0 - 6, RGB565(38, 38, 48));
-    TR(x0 - 3, top + 6, F_S, C_GREEN, "%.0f", mx);
-    T(2, midY + 4, F_S, C_DIM, "0");
-    TR(x0 - 3, top + chartH + 4, F_S, C_LOAD, "%.0f", mx);
-    T(W - 30, top - 1, F_S, C_DIM, "Ah");
-    int slot = (W - x0 - 6) / 7, bw = slot - 7;
-    for (int i = 0; i < d.dayCount; ++i) {
-        int x = x0 + i * slot + 3;
-        int inH = (int)((d.daySolarAh[i] + d.dayDcdcAh[i] + d.dayChargerAh[i]) / mx * (chartH / 2 - 2));
-        int outH = (int)(d.dayLoadAh[i] / mx * (chartH / 2 - 2));
-        if (inH > 0) g->fillRect(x, midY - inH, bw, inH, C_GREEN);
-        if (outH > 0) g->fillRect(x, midY + 1, bw, outH, C_LOAD);
-        char dl[6];
-        if (i == d.dayCount - 1) strcpy(dl, "now");
-        else snprintf(dl, sizeof(dl), "-%d", d.dayCount - 1 - i);
-        T(x + bw / 2 - textW(F_S, dl) / 2, top + chartH + 15, F_S, C_DIM, dl);
+
+    // Same chrome as the Graph and Environment pages, on a shorter frame so the
+    // scope meter keeps the bottom third.
+    char tick[12];
+    snprintf(tick, sizeof(tick), "%.0f", mx);
+    const char* tp[2] = {tick, "0"};
+    Chart c = chartBegin(chartGutter(tp, 2, 5), 4, 80);
+
+    const int midY = c.plotY + c.plotH / 2, halfH = c.plotH / 2 - 2;
+    g->drawFastHLine(c.plotX, c.plotY, c.plotW, RGB565(38, 38, 48));
+    g->drawFastHLine(c.plotX, c.plotY + c.plotH - 1, c.plotW, RGB565(38, 38, 48));
+    g->drawFastHLine(c.plotX, midY, c.plotW, RGB565(70, 70, 84));
+    // Coloured axis: the charge scale above the zero line, discharge below.
+    TsR(c.plotX - 3, chartTickY(c, c.plotY), C_GREEN, "%s", tick);
+    TsR(c.plotX - 3, chartTickY(c, c.plotY) + 9, C_DIM, "Ah");
+    TsR(c.plotX - 3, chartTickY(c, midY), C_DIM, "0");
+    TsR(c.plotX - 3, chartTickY(c, c.plotY + c.plotH - 1), C_LOAD, "%s", tick);
+
+    const int slot = c.plotW / NS, bw = slot - 8;
+    for (int s = 0; s < NS; ++s) {
+        int x = c.plotX + s * slot + 4;
+        if (used[s]) {
+            // Stack the charge sources in their own colours, as the web chart and
+            // the Guition page do, so a bar says WHERE the amp-hours came from.
+            const float src[3] = {sol[s], dcd[s], chg[s]};
+            const uint16_t sc[3] = {C_SOLAR, C_ALT, C_CHG};
+            int acc = 0;
+            for (int k = 0; k < 3; ++k) {
+                int h = (int)lroundf(src[k] / mx * halfH);
+                if (h <= 0) continue;
+                g->fillRect(x, midY - acc - h, bw, h, sc[k]);
+                acc += h;
+            }
+            int oh = (int)lroundf(outAh[s] / mx * halfH);
+            if (oh > 0) g->fillRect(x, midY + 1, bw, oh, C_LOAD);
+        }
+        if (lbl[s][0])
+            Ts(x + bw / 2 - textWs(lbl[s]) / 2, c.stripY, s == NS - 1 ? C_TEXT : C_DIM,
+               "%s", lbl[s]);
     }
-    // Scope meter.
-    const DashData::StatMeter& m = gWeekScope == 0 ? d.statToday : gWeekScope == 1 ? d.statTrip : d.statTotal;
-    int mx0 = 6, sy = 92;
-    g->drawFastHLine(mx0, sy - 4, W - 12, RGB565(45, 45, 56));
-    Tf(mx0, sy + 14, F_M, kPageColor[LP_WEEK], "%s", kScopeName[gWeekScope]);
+
+    // Scope meter under the chart (B cycles Today / Trip / Total).
+    const DashData::StatMeter& m =
+        gWeekScope == 0 ? d.statToday : gWeekScope == 1 ? d.statTrip : d.statTotal;
+    g->drawFastHLine(6, 94, W - 12, RGB565(45, 45, 56));
+    Tf(6, 112, F_M, kPageColor[LP_WEEK], "%s", kScopeName[gWeekScope]);
     int hh = (int)(m.durSecs / 3600), mm = (int)((m.durSecs % 3600) / 60);
-    TR(W - 6, sy + 12, F_S, C_LBL, "%dh%02dm", hh, mm);
-    Tf(mx0, sy + 34, F_S, C_GREEN, "In %.1f", m.inAh);
-    Tf(mx0, sy + 50, F_S, C_LOAD, "Out %.1f", m.outAh);
-    Tf(118, sy + 34, F_S, C_SOLAR, "Sol %.1f", m.solarAh);
-    Tf(118, sy + 50, F_S, C_ALT, "Alt %.1f", m.dcdcAh);
-    Tf(224, sy + 34, F_S, C_CHG, "Chg %.1f", m.chargerAh);
-    Tf(224, sy + 50, F_S, C_LOAD, "Ld %.1f", m.loadAh);
+    TR(W - 6, 110, F_S, C_LBL, "%dh%02dm", hh, mm);
+    Tf(6, 129, F_S, C_GREEN, "In %.1f", m.inAh);
+    Tf(6, 145, F_S, C_LOAD, "Out %.1f", m.outAh);
+    Tf(118, 129, F_S, C_SOLAR, "Sol %.1f", m.solarAh);
+    Tf(118, 145, F_S, C_ALT, "Alt %.1f", m.dcdcAh);
+    Tf(224, 129, F_S, C_CHG, "Chg %.1f", m.chargerAh);
+    Tf(224, 145, F_S, C_LOAD, "Ld %.1f", m.loadAh);
     drawFooter("B: scope");
 }
 

@@ -50,7 +50,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.3";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.4";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -237,6 +237,120 @@ void saveApCfg(const String& ssid, const String& pass) {
 }
 
 // Serial console commands (handy on a headless board / for testing): `pair`
+// Summarise the graph's own history rings: how many samples of each series are
+// valid, their range, and the amp-hours they integrate to. The Week page reads
+// the Stats integrator while the Graph page reads these rings, so when the two
+// disagree this says which one is empty.
+static void dumpHist() {
+    static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
+    for (int which = 0; which < 2; ++which) {
+        const HistRing& r = which ? gCoarse : gFine;
+        Serial.printf("[hist] %s ring: count=%u cap=%u interval=%lums (%lu min span)\n",
+                      which ? "coarse" : "fine", (unsigned)r.count, (unsigned)r.cap,
+                      (unsigned long)r.intervalMs,
+                      (unsigned long)(r.count * r.intervalMs / 60000));
+        if (!r.count) continue;
+        size_t start = (r.head + r.cap - r.count) % r.cap;
+        float hrs = r.intervalMs / 3600000.0f;
+        for (int f = 0; f < 5; ++f) {
+            int n = 0, nz = 0;
+            float mn = 0, mx = 0, pos = 0, neg = 0;
+            for (size_t i = 0; i < r.count; ++i) {
+                const HistSample& hs = r.buf[(start + i) % r.cap];
+                const int16_t v[5] = {hs.battery, hs.solar, hs.charger, hs.dcdc, hs.load};
+                if (v[f] == -32768) continue;
+                float a = v[f] / 10.0f;
+                if (!n) { mn = mx = a; }
+                else { if (a < mn) mn = a; if (a > mx) mx = a; }
+                ++n;
+                if (a != 0) ++nz;
+                if (a > 0) pos += a * hrs; else neg += -a * hrs;
+            }
+            Serial.printf("[hist]   %-5s valid=%4d nonzero=%4d min=%7.1f max=%7.1f "
+                          "+%.2fAh -%.2fAh\n", kName[f], n, nz, mn, mx, pos, neg);
+        }
+    }
+}
+
+// Dump the Week page's source data: the archived day records plus the live TODAY
+// bucket. On a slave these arrive in the master's StatsFrame, so this prints
+// exactly what the page is handed — the only way to tell an empty slot (no such
+// day) from a zero-energy one (a day that archived with nothing in it).
+static void dumpWeek() {
+    if (gRole == ROLE_SLAVE) {
+        if (!gRx.everStats()) { Serial.println("[week] no stats frame from master yet"); return; }
+        const slavelink::StatsFrame& f = gRx.stats();
+        Serial.printf("[week] slave: fresh=%u clockOk=%u dayNow=%lu dayCount=%u\n",
+                      gRx.hasStats() ? 1u : 0u, (unsigned)f.clockOk,
+                      (unsigned long)f.dayNow, (unsigned)f.dayCount);
+        for (int i = 0; i < (int)f.dayCount && i < 7; ++i)
+            Serial.printf("[week]   day[%d] stamp=%lu sol=%u dcdc=%u chg=%u load=%u\n", i,
+                          (unsigned long)f.dayStamp[i], (unsigned)f.daySolarAh[i],
+                          (unsigned)f.dayDcdcAh[i], (unsigned)f.dayChargerAh[i],
+                          (unsigned)f.dayLoadAh[i]);
+        Serial.printf("[week]   today in=%lu out=%lu sol=%lu dcdc=%lu chg=%lu load=%lu dur=%lus\n",
+                      (unsigned long)f.today.inAh, (unsigned long)f.today.outAh,
+                      (unsigned long)f.today.solarAh, (unsigned long)f.today.dcdcAh,
+                      (unsigned long)f.today.chargerAh, (unsigned long)f.today.loadAh,
+                      (unsigned long)f.today.durSecs);
+        // The live snapshot's validity bits say whether the master can SEE each
+        // source at all — an empty Week bar with a charging battery means the
+        // per-source signals are not resolving, not that the chart is broken.
+        const slavelink::Snapshot& sn = gRx.snapshot();
+        Serial.printf("[week]   live valid=0x%04x batt=%c%.1fA solar=%c%.1fA chg=%c%.1fA "
+                      "dcdc=%c%.1fA load=%c%.1fA\n",
+                      (unsigned)sn.valid,
+                      (sn.valid & slavelink::V_BATTA) ? '+' : '-', sn.battA_da / 10.0f,
+                      (sn.valid & slavelink::V_SOLAR) ? '+' : '-', sn.solarA_da / 10.0f,
+                      (sn.valid & slavelink::V_CHARGER) ? '+' : '-', sn.chargerA_da / 10.0f,
+                      (sn.valid & slavelink::V_DCDC) ? '+' : '-', sn.dcdcA_da / 10.0f,
+                      (sn.valid & slavelink::V_LOAD) ? '+' : '-', sn.loadA_da / 10.0f);
+        Serial.printf("[week]   master uptime=%lus seq=%u soc=%.1f%% battV=%.2f consumed=%.1fAh "
+                      "mode=%u\n",
+                      (unsigned long)sn.uptime_s, (unsigned)sn.seq, sn.soc_d / 10.0f,
+                      sn.battV_cv / 100.0f, sn.consumedAh_da / 10.0f, (unsigned)sn.mode);
+        return;
+    }
+    const stats::Bucket& b = gStats.bucket(stats::TODAY);
+    Serial.printf("[week] master: localEpoch=%lu runSecs=%lu runDay=%lu dayCount=%u todayStamp=%lu\n",
+                  (unsigned long)currentLocalEpoch(), (unsigned long)gStats.runSecs(),
+                  (unsigned long)gStats.runDay(), (unsigned)gStats.dayCount(),
+                  (unsigned long)b.dayStamp);
+    for (size_t i = 0; i < gStats.dayCount(); ++i) {
+        const stats::DayRecord& r = gStats.day(i);
+        Serial.printf("[week]   day[%u] stamp=%lu sol=%.1f dcdc=%.1f chg=%.1f load=%.1f\n",
+                      (unsigned)i, (unsigned long)r.dayStamp, r.solarAh, r.dcdcAh,
+                      r.chargerAh, r.loadAh);
+    }
+    Serial.printf("[week]   today sol=%.1f dcdc=%.1f chg=%.1f load=%.1f dur=%lus\n",
+                  (float)b.solarAh, (float)b.dcdcAh, (float)b.chargerAh, (float)b.loadAh,
+                  (unsigned long)b.durationSecs);
+}
+
+// The slave loop never reaches serviceMasterSerial(), so it gets its own tiny
+// console with just the read-only dumps.
+static void serviceSlaveSerial() {
+    static char line[16];
+    static uint8_t n = 0;
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\n' || c == '\r') {
+            line[n] = '\0';
+            if (n) {
+                if (!strcmp(line, "week")) dumpWeek();
+                else if (!strcmp(line, "hist")) dumpHist();
+                else if (!strcmp(line, "mem"))
+                    Serial.printf("[mem] free=%u largest=%u minfree-ever=%u\n",
+                                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+                                  (unsigned)ESP.getMinFreeHeap());
+            }
+            n = 0;
+        } else if (n < sizeof(line) - 1) {
+            line[n++] = c;
+        }
+    }
+}
+
 // opens the master pairing window; `role` toggles Master<->Slave (reboots).
 static void serviceMasterSerial() {
     static char line[16];
@@ -259,6 +373,10 @@ static void serviceMasterSerial() {
                                   (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
                                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                                   (unsigned)ESP.getFlashChipSize());
+                } else if (!strcmp(line, "hist")) {
+                    dumpHist();  // graph history rings: validity + integrated Ah
+                } else if (!strcmp(line, "week")) {
+                    dumpWeek();  // Week-page source data: archived days + TODAY
                 } else if (!strcmp(line, "webtest")) {
                     webSelfTest();  // build the big pages + report heap (no HTTP client needed)
                 } else if (!strcmp(line, "tasks")) {
@@ -1181,6 +1299,7 @@ static void applyPulledHistory() {
 static void slaveLoop() {
     gDns.processNextRequest();
     gRx.poll();
+    serviceSlaveSerial();  // `week` / `mem` dumps (the slave has no other console)
     serviceRole();  // "Switch to Master" (reboots)
     serviceOta();   // firmware clone push/receive state machine
     if (gOta.busy()) {  // dedicate the loop to the transfer
