@@ -18,6 +18,8 @@
 #include "Signals.h"
 #include "OtaLink.h"
 #include "SlaveLink.h"
+#include <vector>
+
 #include "SlaveReceiver.h"
 #include "Stats.h"
 #include "VictronTypes.h"
@@ -220,7 +222,11 @@ sig::Resolved R(sig::Role role, uint32_t now);
 sig::Resolved resolveSignal(sig::Role role, uint32_t now);
 PanelModel collectPanel(uint32_t now);
 int buildAlerts(uint32_t now, String* outArr);
-String buildHistoryJson(int mins);
+// Serialise a history window as JSON in ~1.4KB chunks, downsampled to at most
+// a few hundred columns. Replaces the old single-String builder, which could not
+// allocate a 60-minute window (~35KB) let alone 24h (~70KB) and so answered with
+// an empty body — see buildHistoryChunks in main.cpp.
+void buildHistoryChunks(int mins, std::vector<String>& out);
 ChargeMode chargeMode(const sig::Resolved& ba);
 const char* chargeModeName(ChargeMode m);
 const char* chargeModeDisplayName(ChargeMode m);

@@ -408,6 +408,27 @@ struct HtmlOut {
 // Chunked-transfer the collected pieces so nothing large is held contiguously and
 // there is no second copy. The shared_ptr keeps the pieces alive for the async
 // response's lifetime and frees them when it completes.
+// Chunk-serve a list of ready-made strings (the history JSON). Same reason as
+// servePieces: nothing large is ever held contiguously.
+static void serveStrings(AsyncWebServerRequest* req, const char* type,
+                         std::shared_ptr<std::vector<String>> parts) {
+    req->send(req->beginChunkedResponse(
+        type, [parts](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            size_t pos = 0;
+            for (const String& s : *parts) {
+                const size_t len = s.length();
+                if (index < pos + len) {
+                    const size_t off = index - pos;
+                    const size_t n = (maxLen < len - off) ? maxLen : (len - off);
+                    memcpy(buf, s.c_str() + off, n);
+                    return n;
+                }
+                pos += len;
+            }
+            return 0;
+        }));
+}
+
 static void servePieces(AsyncWebServerRequest* req, std::shared_ptr<std::vector<Seg>> pieces) {
     req->send(req->beginChunkedResponse("text/html",
         [pieces](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
@@ -724,7 +745,17 @@ void webSelfTest() {
     // network you are on, so being able to read the exact API payloads over the
     // serial console is the only practical way to check them.
     Serial.printf("[webtest] /api/panel: %s\n", buildPanelJson().c_str());
-    Serial.printf("[webtest] /api/history?mins=1: %s\n", buildHistoryJson(1).c_str());
+    // Exercise the widest window too — that is the one that used to fail outright.
+    for (int mins : {1, 1440}) {
+        uint32_t h0 = ESP.getFreeHeap();
+        std::vector<String> parts;
+        buildHistoryChunks(mins, parts);
+        size_t total = 0, mx = 0;
+        for (const String& s : parts) { total += s.length(); if (s.length() > mx) mx = s.length(); }
+        Serial.printf("[webtest] /api/history?mins=%d: %u chunks, %u bytes (max chunk %u), "
+                      "heap %u->%u\n", mins, (unsigned)parts.size(), (unsigned)total,
+                      (unsigned)mx, (unsigned)h0, (unsigned)ESP.getFreeHeap());
+    }
 }
 
 // ---- handlers --------------------------------------------------------------
@@ -1500,7 +1531,9 @@ void setupServer() {
     });
     gServer.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req) {
         int mins = req->hasParam("mins") ? req->getParam("mins")->value().toInt() : 10;
-        req->send(200, "application/json", buildHistoryJson(mins));
+        auto parts = std::make_shared<std::vector<String>>();
+        buildHistoryChunks(mins, *parts);
+        serveStrings(req, "application/json", parts);
     });
     gServer.on("/api/config/export", HTTP_GET, [](AsyncWebServerRequest* req) {
         AsyncWebServerResponse* res =

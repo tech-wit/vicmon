@@ -50,7 +50,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.9";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.10";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -770,38 +770,69 @@ static void sampleStats() {
     gStats.maybePersist(now);
 }
 
-String buildHistoryJson(int mins) {
+// Serialise the selected history window as JSON in ~1.4KB chunks.
+//
+// This used to build ONE String. A 60-minute window is 720 samples x 10 series
+// (~35KB) and 24h is ~70KB, so the allocation simply failed and the endpoint
+// answered 200 with an EMPTY BODY — the web chart was blank at every zoom above
+// 10 minutes — while the repeated reallocation churned the heap on the way
+// there. Chunking caps the largest single allocation at 1.4KB.
+//
+// The window is also downsampled to at most kWebHistPts columns: a 760px canvas
+// cannot show 1440 of them. Buckets are peak-preserving (largest magnitude, sign
+// kept) so current spikes survive, matching what the LCD does. `interval` is
+// reported as the EFFECTIVE column spacing so the chart's right-aligned x-axis
+// still lands each column in the right place.
+static const int kWebHistPts = 240;
+
+void buildHistoryChunks(int mins, std::vector<String>& out) {
     if (mins < 1) mins = 1;
     if (mins > 1440) mins = 1440;
-    // Windows over 60 min read the coarse (60 s) buffer; shorter ones the fine (5 s).
     const HistRing& r = mins > 60 ? gCoarse : gFine;
-
     int want = mins * 60 * 1000 / static_cast<int>(r.intervalMs);
     if (want > static_cast<int>(r.count)) want = r.count;
     if (want < 0) want = 0;
-    size_t start = (r.head + r.cap - want) % r.cap;
-    // Series order must match sampleField()'s indices. The electrical channels and
-    // the first three environment ones are *10 fixed-point; gas is already whole
-    // kilo-ohms, so it is emitted as an integer rather than divided.
+    const int n = want < kWebHistPts ? want : kWebHistPts;
+    int ivSec = static_cast<int>(r.intervalMs / 1000);
+    if (n > 0) ivSec = static_cast<int>(static_cast<long>(want) * ivSec / n);
+    if (ivSec < 1) ivSec = 1;
+    const size_t start = (r.head + r.cap - static_cast<size_t>(want)) % r.cap;
+
+    String cur;
+    cur.reserve(1600);
+    auto push = [&](const String& s) {
+        cur += s;
+        if (cur.length() >= 1400) { out.push_back(cur); cur = ""; }
+    };
+    // Series order must match sampleField()'s indices.
     const char* names[kHistSeries] = {"battery", "solar", "charger", "dcdc", "load",
                                       "soc", "temp", "humidity", "pressure", "gas"};
-    String j = "{\"interval\":" + String(r.intervalMs / 1000) +
-               ",\"mins\":" + String(mins) + ",\"series\":{";
+    push("{\"interval\":" + String(ivSec) + ",\"mins\":" + String(mins) + ",\"series\":{");
     for (int f = 0; f < kHistSeries; ++f) {
-        bool whole = (f == kHistGasIdx);
-        j += "\"" + String(names[f]) + "\":[";
-        for (int k = 0; k < want; ++k) {
-            size_t idx = (start + k) % r.cap;
-            int16_t v = sampleField(r.buf[idx], f);
-            if (k) j += ",";
-            if (v == -32768) j += "null";
-            else j += whole ? String(v) : String(v / 10.0f, 1);
+        const bool whole = (f == kHistGasIdx);  // gas is whole kilo-ohms, not *10
+        push("\"" + String(names[f]) + "\":[");
+        for (int k = 0; k < n; ++k) {
+            int lo = static_cast<int>(static_cast<long>(k) * want / n);
+            int hi = static_cast<int>(static_cast<long>(k + 1) * want / n);
+            if (hi <= lo) hi = lo + 1;
+            if (hi > want) hi = want;
+            int16_t best = -32768;
+            for (int si = lo; si < hi; ++si) {
+                const int16_t v = sampleField(r.buf[(start + static_cast<size_t>(si)) % r.cap], f);
+                if (v == -32768) continue;
+                if (best == -32768) { best = v; continue; }
+                const int av = v < 0 ? -v : v, ab = best < 0 ? -best : best;
+                if (av > ab) best = v;
+            }
+            String tok = k ? "," : "";
+            if (best == -32768) tok += "null";
+            else tok += whole ? String(best) : String(best / 10.0f, 1);
+            push(tok);
         }
-        j += "]";
-        if (f < kHistSeries - 1) j += ",";
+        push(f < kHistSeries - 1 ? "]," : "]");
     }
-    j += "}}";
-    return j;
+    push("}}");
+    if (cur.length()) out.push_back(cur);
 }
 
 // ---- WiFi STA (join an existing network) -----------------------------------
