@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.18";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.19";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -340,8 +340,15 @@ void saveApCfg(const String& ssid, const String& pass) {
 // valid, their range, and the amp-hours they integrate to. The Week page reads
 // the Stats integrator while the Graph page reads these rings, so when the two
 // disagree this says which one is empty.
+static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0;
+static uint32_t gLastHistSaveMs = 0;  // 0 = not saved since boot
+static const uint32_t kHistSaveMs = 2 * 60 * 1000;
 static void dumpHist() {
     static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
+    Serial.printf("[hist] restored at boot: fine=%u coarse=%u env=%u | last save %s | next in %lus\n",
+                  (unsigned)gHistLoadedFine, (unsigned)gHistLoadedCoarse, (unsigned)gHistLoadedEnv,
+                  gLastHistSaveMs ? (String((millis() - gLastHistSaveMs) / 1000) + "s ago").c_str() : "none since boot",
+                  (unsigned long)((kHistSaveMs - (millis() - gLastHistSaveMs) % kHistSaveMs) / 1000));
     Serial.printf("[hist] env-fine ring: count=%u cap=%u interval=%lums\n", (unsigned)gEnvFine.count, (unsigned)gEnvFine.cap, (unsigned long)gEnvFine.intervalMs);
     Serial.printf("[hist] env ring: count=%u cap=%u interval=%lums (%lu h span)\n", (unsigned)gEnv.count,
                   (unsigned)gEnv.cap, (unsigned long)gEnv.intervalMs, (unsigned long)(gEnv.count * gEnv.intervalMs / 3600000));
@@ -816,7 +823,9 @@ static const uint8_t kHistVer = 4;  // 2: +soc; 3: +environment in HistSample; 4
 // is ~7.5 MB/day; LittleFS wear-levels it across the ~1.5 MB FS partition, so at
 // 100k erase cycles/block the flash lasts decades. Raise it to lose less to
 // wear (at the cost of losing a little more recent history on an unclean reboot).
-static const uint32_t kHistSaveMs = 5 * 60 * 1000;
+// Anything newer than the last save is lost on a brownout or a USB reset (only
+// cleanRestart() flushes first). 2 minutes bounds that loss; the file is ~28KB,
+// so ~20MB/day on a wear-levelled LittleFS partition — decades, not years.
 
 static String histPath(int profile) { return "/hist" + String(profile) + ".bin"; }
 
@@ -855,7 +864,7 @@ static void readRing(File& f, HistRing& r, uint16_t n) {
 // boot, so an unconditional periodic save would overwrite a day of stored
 // history with a few seconds of it — which is exactly what repeated reflashing
 // did to the master's trend today. Refuse to shrink the file.
-static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0;
+
 
 void saveHistFile(int profile) {
     if (!gFsOk) return;
@@ -1848,9 +1857,8 @@ void loop() {
 #endif
 
 #ifndef VICMON_SIM
-    static uint32_t lastHistSave = 0;
-    if (gFsOk && now - lastHistSave >= kHistSaveMs) {
-        lastHistSave = now;
+    if (gFsOk && now - gLastHistSaveMs >= kHistSaveMs) {
+        gLastHistSaveMs = now;
         saveHistFile(gProfiles.active());
     }
 #endif
