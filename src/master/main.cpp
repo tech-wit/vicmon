@@ -42,7 +42,8 @@
 #include "VictronDecrypt.h"
 #include "VictronParser.h"
 #include "VictronTypes.h"
-#include "app.h"          // shared state/types + the board seam (VICMON_DISPLAY)
+#include "app.h"
+#include <rom/rtc.h>          // shared state/types + the board seam (VICMON_DISPLAY)
 #include "web_assets.h"  // kStyle / kMimicPage / kStatsPage / kDiagPage (HTML/CSS/JS)
 
 // AP SSID is made unique per device at boot (Vicmon-<last 3 MAC bytes>) so
@@ -50,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.10";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.11";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -206,14 +207,111 @@ static void applyRoleToggle() {
     p.begin("vicrole", false);
     p.putUChar("role", nr);
     p.end();
-    Serial.printf("[role] switching to %s, rebooting...\n", nr == ROLE_SLAVE ? "SLAVE" : "MASTER");
+    Serial.printf("[role] switching to %s\n", nr == ROLE_SLAVE ? "SLAVE" : "MASTER");
+    cleanRestart("role switch");
+}
+// ---- boot record + heap supervisor ------------------------------------------
+// Both of today's lockups had the same shape: every task still running, free
+// heap frozen at one value, the largest block collapsed, ESP-NOW returning
+// ESP_ERR_ESPNOW_NO_MEM for minutes, TCP refused while the AP kept beaconing —
+// and nothing recovered it. That is not a state a task watchdog can see (nothing
+// is stuck), so the loop watches for it directly and restarts CLEANLY: stats
+// and history flushed first, the cause recorded, and the counters below kept in
+// NVS so the event is visible on the next boot instead of being lost.
+uint32_t gBootCount = 0;
+uint32_t gHeapRestarts = 0;
+const char* gResetReason = "unknown";
+uint32_t gEspNowLastOkMs = 0;
+
+static const char* resetReasonStr(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:  return "power-on";
+        case ESP_RST_EXT:      return "external";
+        case ESP_RST_SW:       return "software";
+        case ESP_RST_PANIC:    return "PANIC";
+        case ESP_RST_INT_WDT:  return "INT-WDT";
+        case ESP_RST_TASK_WDT: return "TASK-WDT";
+        case ESP_RST_WDT:      return "WDT";
+        case ESP_RST_DEEPSLEEP:return "deep-sleep";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";
+        case ESP_RST_SDIO:     return "sdio";
+        default:               return "unknown";
+    }
+}
+
+// Runs once early in setup(): read + bump the boot record, log the reset cause.
+static void recordBoot() {
+    static char rr[24];
+    esp_reset_reason_t r = esp_reset_reason();
+    if (r == ESP_RST_UNKNOWN) {  // the SDK does not name every RTC code (a USB-CDC flash reset is 0x15)
+        snprintf(rr, sizeof(rr), "unknown(rtc 0x%x)", (unsigned)rtc_get_reset_reason(0));
+        gResetReason = rr;
+    } else {
+        gResetReason = resetReasonStr(r);
+    }
+    Preferences p;
+    p.begin("vicboot", false);
+    gBootCount = p.getUInt("boots", 0) + 1;
+    gHeapRestarts = p.getUInt("heaprb", 0);
+    const char* lastWhy = "";
+    static char whyBuf[32];
+    p.getString("why", whyBuf, sizeof(whyBuf)); lastWhy = whyBuf;
+    p.putUInt("boots", gBootCount);
+    p.putString("why", "");  // consumed
+    p.end();
+    Serial.printf("[boot] #%lu reset=%s heap-restarts=%lu%s%s\n", (unsigned long)gBootCount,
+                  gResetReason, (unsigned long)gHeapRestarts,
+                  lastWhy[0] ? " last-restart=" : "", lastWhy);
+}
+
+void cleanRestart(const char* why) {
+    Serial.printf("[restart] %s — flushing and rebooting\n", why);
+    gStats.maybePersist(millis(), true);
+#ifndef VICMON_SIM
+    if (gRole != ROLE_SLAVE) saveHistFile(gProfiles.active());
+#endif
+    Preferences p;
+    p.begin("vicboot", false);
+    p.putString("why", why);
+    p.end();
     delay(300);
     ESP.restart();
 }
+
+// Called from both loops. Three signals, each must persist for kSupervisorMs
+// before acting so a transient dip (a big page being served) never trips it:
+//   - largest free block below the floor          (fragmentation wedge)
+//   - free heap below the floor                    (outright exhaustion)
+//   - master only: no successful ESP-NOW send      (the symptom both lockups
+//     showed first; a healthy master succeeds every 250ms)
+void serviceSupervisor(uint32_t now) {
+    static const uint32_t kSupervisorMs = 60000;
+    static const uint32_t kMinBlock = 12 * 1024, kMinFree = 16 * 1024;
+    static uint32_t badSince = 0, lastCheck = 0;
+    if (now - lastCheck < 5000) return;
+    lastCheck = now;
+
+    const char* why = nullptr;
+    if (ESP.getMaxAllocHeap() < kMinBlock) why = "largest block below floor";
+    else if (ESP.getFreeHeap() < kMinFree) why = "free heap below floor";
+    else if (gRole != ROLE_SLAVE && gEspNowLastOkMs && now - gEspNowLastOkMs > kSupervisorMs)
+        why = "ESP-NOW sends failing";
+
+    if (!why) { badSince = 0; return; }
+    if (!badSince) { badSince = now; Serial.printf("[supervisor] %s (watching)\n", why); return; }
+    if (now - badSince < kSupervisorMs) return;
+
+    Preferences p;
+    p.begin("vicboot", false);
+    p.putUInt("heaprb", gHeapRestarts + 1);
+    p.end();
+    cleanRestart(why);
+}
+
 // Consume a role-toggle request (raised by the Diag tab). Called from both loops.
 void serviceRole() {
     if (gRoleReq) { gRoleReq = false; applyRoleToggle(); }
-    if (gRebootReq) { Serial.println("[cfg] rebooting to apply..."); delay(300); ESP.restart(); }
+    if (gRebootReq) cleanRestart("config apply");
 }
 
 // Custom SoftAP name/password (device-wide, NVS ns "vicap"). Empty = use the
@@ -339,6 +437,7 @@ static void serviceSlaveSerial() {
             if (n) {
                 if (!strcmp(line, "week")) dumpWeek();
                 else if (!strcmp(line, "hist")) dumpHist();
+                else if (!strcmp(line, "restart")) cleanRestart("console");
                 else if (!strcmp(line, "mem"))
                     Serial.printf("[mem] free=%u largest=%u minfree-ever=%u\n",
                                   (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
@@ -373,6 +472,8 @@ static void serviceMasterSerial() {
                                   (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL),
                                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                                   (unsigned)ESP.getFlashChipSize());
+                } else if (!strcmp(line, "restart")) {
+                    cleanRestart("console");  // flushes stats + history first; recorded in the boot log
                 } else if (!strcmp(line, "hist")) {
                     dumpHist();  // graph history rings: validity + integrated Ah
                 } else if (!strcmp(line, "week")) {
@@ -711,18 +812,34 @@ static void readRing(File& f, HistRing& r, uint16_t n) {
     r.head = k % r.cap;
 }
 
+// Sample counts the file held when it was loaded. A ring starts EMPTY on every
+// boot, so an unconditional periodic save would overwrite a day of stored
+// history with a few seconds of it — which is exactly what repeated reflashing
+// did to the master's trend today. Refuse to shrink the file.
+static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0;
+
 void saveHistFile(int profile) {
     if (!gFsOk) return;
-    File f = LittleFS.open(histPath(profile), "w");
+    if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse) return;
+    // Write to a temp file and rename over the old one. LittleFS rename is
+    // atomic, so a reset or reflash landing mid-write (every 5 min, so not rare
+    // across a day of flashing) leaves the previous complete file in place
+    // instead of a torn one that loads as a near-empty ring.
+    String path = histPath(profile), tmp = path + ".tmp";
+    File f = LittleFS.open(tmp, "w");
     if (!f) return;
     uint8_t hdr[4] = {'V', 'H', kHistVer, 0};
     uint16_t fc = gFine.count, cc = gCoarse.count;
-    f.write(hdr, 4);
-    f.write(reinterpret_cast<uint8_t*>(&fc), 2);
-    f.write(reinterpret_cast<uint8_t*>(&cc), 2);
-    writeRing(f, gFine);
-    writeRing(f, gCoarse);
+    bool ok = f.write(hdr, 4) == 4 &&
+              f.write(reinterpret_cast<uint8_t*>(&fc), 2) == 2 &&
+              f.write(reinterpret_cast<uint8_t*>(&cc), 2) == 2;
+    if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); }
+    size_t expect = 8 + (size_t)(fc + cc) * sizeof(HistSample);
+    ok = ok && f.size() == expect;
     f.close();
+    if (!ok) { LittleFS.remove(tmp); return; }
+    LittleFS.remove(path);
+    LittleFS.rename(tmp, path);
 }
 
 static void loadHistFile(int profile) {
@@ -737,9 +854,19 @@ static void loadHistFile(int profile) {
     uint16_t fc = 0, cc = 0;
     f.read(reinterpret_cast<uint8_t*>(&fc), 2);
     f.read(reinterpret_cast<uint8_t*>(&cc), 2);
+    size_t expect = 8 + (size_t)(fc + cc) * sizeof(HistSample);
+    if (fc > gFine.cap || cc > gCoarse.cap || f.size() != expect) {
+        Serial.printf("[hist] %s: bad length (%u, expected %u) — ignoring\n",
+                      histPath(profile).c_str(), (unsigned)f.size(), (unsigned)expect);
+        f.close();
+        return;
+    }
     readRing(f, gFine, fc);
     readRing(f, gCoarse, cc);
+    gHistLoadedFine = gFine.count;    // what the file now represents
+    gHistLoadedCoarse = gCoarse.count;
     f.close();
+    Serial.printf("[hist] restored fine=%u coarse=%u\n", (unsigned)fc, (unsigned)cc);
     gFine.lastMs = 0;  // take a fresh sample promptly after a reload
     gCoarse.lastMs = 0;
 }
@@ -1330,6 +1457,7 @@ static void applyPulledHistory() {
 static void slaveLoop() {
     gDns.processNextRequest();
     gRx.poll();
+    serviceSupervisor(millis());
     serviceSlaveSerial();  // `week` / `mem` dumps (the slave has no other console)
     serviceRole();  // "Switch to Master" (reboots)
     serviceOta();   // firmware clone push/receive state machine
@@ -1409,6 +1537,7 @@ void setup() {
         delay(left < 1000 ? left : 1000);
     }
     Serial.println("\nVicmon Master: BLE + WiFi AP + display");
+    recordBoot();
 
     // Stable per-chip id (low 32 bits of the factory MAC): identifies this master
     // in every ESP-NOW frame so slaves can filter/pair to it. Reads from efuse,
@@ -1546,6 +1675,7 @@ void setup() {
 
 void loop() {
     if (gRole == ROLE_SLAVE) { slaveLoop(); return; }
+    serviceSupervisor(millis());
     serviceMasterSerial();  // `pair` / `role` console commands
     serviceRole();          // consume a serial/web role-toggle on headless masters
     serviceOta();           // firmware clone push/receive state machine

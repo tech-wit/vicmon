@@ -1405,7 +1405,7 @@ static String systemCard() {
          "function otaPull(){"
          "fetch('/api/ota/pull',{method:'POST'}).then(r=>r.text()).then(t=>{"
          "var e=document.getElementById('otaStat');if(e)e.textContent=t;});}"
-         "otaPoll();setInterval(otaPoll,1500);"
+         "otaPoll();setInterval(otaPoll,4000);"
          "</script>";
     return h + "</div>";
 }
@@ -1523,7 +1523,10 @@ void setupServer() {
                    ",\"maxblk\":" + String(ESP.getMaxAllocHeap()) +
                    ",\"minheap\":" + String(ESP.getMinFreeHeap()) +
                    ",\"uptime\":" + String(millis() / 1000) +
-                   ",\"psram\":" + String(ESP.getPsramSize()) + "}";
+                   ",\"psram\":" + String(ESP.getPsramSize()) +
+                   ",\"boots\":" + String(gBootCount) +
+                   ",\"heap_restarts\":" + String(gHeapRestarts) +
+                   ",\"reset\":\"" + String(gResetReason) + "\"}";
         req->send(200, "application/json", j);
     });
     gServer.on("/api/data", HTTP_GET, [](AsyncWebServerRequest* req) {

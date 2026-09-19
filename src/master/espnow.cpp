@@ -179,6 +179,7 @@ static void broadcastTick(void*) {
     s.uptime_s = millis() / 1000;
     s.flags = pairingActive() ? slavelink::F_PAIRING : 0;
     esp_err_t e = esp_now_send(kBroadcastMac, (const uint8_t*)&s, sizeof(s));
+    if (e == ESP_OK) gEspNowLastOkMs = millis();  // the supervisor watches this go stale
     static uint32_t lastErrLog = 0;
     if (e != ESP_OK && millis() - lastErrLog > 3000) {
         lastErrLog = millis();

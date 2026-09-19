@@ -214,6 +214,15 @@ extern String gStaSsid, gStaPass;
 extern uint32_t gManualEpoch, gManualMillis;  // AP-set clock (see currentLocalEpoch)
 extern volatile bool gRebootReq;              // set to reboot from a web handler (loop applies)
 
+// Boot record + heap supervisor (main.cpp). Persisted in NVS "vicboot" so a
+// wedge that ends in a restart is visible afterwards instead of vanishing.
+extern uint32_t gBootCount;          // boots since first flash
+extern uint32_t gHeapRestarts;       // restarts the supervisor itself triggered
+extern const char* gResetReason;     // this boot's reset cause, as text
+extern uint32_t gEspNowLastOkMs;     // last successful broadcast (espnow.cpp); 0 = none yet
+void cleanRestart(const char* why);  // flush stats + history, log, restart
+void serviceSupervisor(uint32_t now);
+
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
 
 // ---- cross-module function prototypes --------------------------------------
