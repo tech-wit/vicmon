@@ -157,6 +157,11 @@ static void collectHistory(guition::DashData& d) {
     if (want < 2) { d.histCount = 0; return; }
     int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
     size_t start = (r.head + r.cap - (size_t)want) % r.cap;
+    const int depthSec = want * (int)(r.intervalMs / 1000);
+    int wantE = (depthSec + 299) / 300;
+    if (wantE > (int)gEnv.count) wantE = gEnv.count;
+    const size_t startE = (gEnv.head + gEnv.cap - (size_t)wantE) % gEnv.cap;
+    int16_t holdE[4] = {-32768, -32768, -32768, -32768};
     // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
     // Nearest-sample aliases — every column jumps as the window slides. Mean is
     // stable but flattens the transient current spikes that matter most (a 50A load
@@ -188,29 +193,21 @@ static void collectHistory(guition::DashData& d) {
         d.histLoad[k]    = val(4);
         d.histSoc[k]     = val(5);
 
-        // Environment downsamples by MEAN, not by the peak rule above. Peak-
-        // preserving exists to keep transient current spikes visible; temperature,
-        // humidity and pressure have no such transients, and picking the extreme
-        // sample of each bucket would just bias every column outward and make a
-        // steady reading look like it is drifting.
-        long sum[4] = {0, 0, 0, 0};
-        int cnt[4] = {0, 0, 0, 0};
-        for (int si = lo; si < hi; ++si) {
-            const HistSample& s = r.buf[(start + (size_t)si) % r.cap];
-            const int16_t ev[4] = {s.envT, s.envH, s.envP, s.envG};
-            for (int f = 0; f < 4; ++f) {
-                if (ev[f] == -32768) continue;
-                sum[f] += ev[f];
-                ++cnt[f];
+        // Environment comes from its own 5-min ring, aligned to the same depth in
+        // time as this column and averaged; a column with no env sample carries
+        // the previous value forward (a level, not a gap).
+        {
+            int loE = (int)((long)k * wantE / out), hiE = (int)((long)(k + 1) * wantE / out);
+            if (hiE > wantE) hiE = wantE;
+            long sum[4] = {0, 0, 0, 0}; int cnt[4] = {0, 0, 0, 0};
+            for (int si = loE; si < hiE; ++si) {
+                const EnvSample& e = gEnv.buf[(startE + (size_t)si) % gEnv.cap];
+                const int16_t ev[4] = {e.t, e.h, e.p, e.g};
+                for (int f = 0; f < 4; ++f) if (ev[f] != -32768) { sum[f] += ev[f]; ++cnt[f]; }
             }
+            for (int f = 0; f < 4; ++f) if (cnt[f]) holdE[f] = (int16_t)(sum[f] / cnt[f]);
+            d.histEnvT[k] = holdE[0]; d.histEnvH[k] = holdE[1]; d.histEnvP[k] = holdE[2]; d.histEnvG[k] = holdE[3];
         }
-        auto mean = [&](int f) -> int16_t {
-            return cnt[f] ? (int16_t)(sum[f] / cnt[f]) : (int16_t)-32768;
-        };
-        d.histEnvT[k] = mean(0);
-        d.histEnvH[k] = mean(1);
-        d.histEnvP[k] = mean(2);
-        d.histEnvG[k] = mean(3);
     }
     d.histCount = out;
 }
@@ -412,6 +409,7 @@ static void collectSlaveDash(guition::DashData& d) {
     // heard this master at all.
     if (!gRx.haveSnapshot()) { d.mode = "--"; d.battValid = false; d.linkStale = false; return; }
     d.linkStale = !gRx.live();
+    d.linkMismatch = gLinkMismatch;
     const Snapshot& s = gRx.snapshot();
     auto has = [&](uint16_t f) { return (s.valid & f) != 0; };
     switch (s.mode) {

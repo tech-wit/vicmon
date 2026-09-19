@@ -1447,7 +1447,7 @@ static void systemCard(HtmlOut& out) {
          "function otaPoll(){if(document.hidden)return;fetch('/api/ota/status').then(r=>r.json()).then(s=>{"
          "var a=document.getElementById('otaAllow');if(a)a.checked=s.allow;"
          "var v=document.getElementById('otaVer');if(v&&s.version){var pt=s.peerKnown?(' \\u00b7 paired: '+s.peer+' ('+s.peerRel+')'):' \\u00b7 paired: not heard yet';v.textContent='This unit: firmware '+s.version+' \\u00b7 built '+s.built+pt;}"
-         "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'');"
+         "var e=document.getElementById('otaStat');if(e)e.textContent=s.status+(s.busy?(' '+s.percent+'%'):'')+(s.mismatch?(' \u2014 '+s.mismatch):'');"
          "var pb=document.getElementById('pairBtn');if(pb){if(s.pairing){pb.textContent='Pairing\\u2026 '+s.pairSec+'s';pb.style.background='#22d3ee';pb.style.color='#001018';}else{pb.textContent=pb.dataset.lbl;pb.style.background='';pb.style.color='';}}"
          "}).catch(()=>{});}"
          "function otaPush(){"
@@ -1521,7 +1521,8 @@ void setupServer() {
         j += ",\"pairing\":";
         j += pairing ? "true" : "false";
         j += ",\"pairSec\":" + String(pairSec);
-        j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"}";
+        j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"";
+        j += ",\"mismatch\":\"" + String(gLinkMismatch == 1 ? "paired master is on newer firmware — pulling it" : gLinkMismatch == 2 ? "paired master is on older firmware — send it this one" : "") + "\"}";
         req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {

@@ -109,16 +109,20 @@ class Receiver {
   uint8_t histPercent() const {
     if (!fineGot_ || !coarseGot_) return 0;  // master (no staging allocated)
     uint16_t need = (fineTotal_ + kHistChunkPts - 1) / kHistChunkPts +
-                    (coarseTotal_ + kHistChunkPts - 1) / kHistChunkPts;
+                    (coarseTotal_ + kHistChunkPts - 1) / kHistChunkPts +
+                    (envTotal_ + kEnvChunkPts - 1) / kEnvChunkPts;
     if (need == 0) return 0;
     uint16_t got = 0;
     for (uint16_t i = 0; i < kFineChunks; ++i) got += fineGot_[i];
     for (uint16_t i = 0; i < kCoarseChunks; ++i) got += coarseGot_[i];
+    for (uint16_t i = 0; i < kEnvChunks; ++i) got += envGot_[i];
     uint32_t p = (uint32_t)got * 100 / need;
     return p > 100 ? 100 : (uint8_t)p;
   }
   uint16_t fineCount() const { return fineTotal_; }
   uint16_t coarseCount() const { return coarseTotal_; }
+  uint16_t envCount() const { return envTotal_; }
+  const EnvPointW& envPoint(uint16_t i) const { return envStage_ ? envStage_[i] : kNaEnv(); }
   const HistPointW& finePoint(uint16_t i) const { return fineStage_ ? fineStage_[i] : kNaPoint(); }
   const HistPointW& coarsePoint(uint16_t i) const { return coarseStage_ ? coarseStage_[i] : kNaPoint(); }
 
@@ -129,15 +133,17 @@ class Receiver {
   void requestHistory() {
     if (!haveMasterMac_ || paired_ == 0) return;
     allocHistBuffers();  // safety: normally already done in begin()
-    if (!fineStage_ || !coarseStage_ || !fineGot_ || !coarseGot_) return;  // OOM
-    fineTotal_ = coarseTotal_ = 0;
+    if (!fineStage_ || !coarseStage_ || !envStage_ || !fineGot_ || !coarseGot_ || !envGot_) return;  // OOM
+    fineTotal_ = coarseTotal_ = envTotal_ = 0;
     memset(fineGot_, 0, kFineChunks);      // pointer now — size explicitly, NOT sizeof(ptr)
     memset(coarseGot_, 0, kCoarseChunks);
+    memset(envGot_, 0, kEnvChunks);
     HistPointW na;  // init staging to n/a so not-yet-received points render as gaps
     na.battery = na.solar = na.charger = na.dcdc = na.load = na.soc = -32768;
-    na.envT = na.envH = na.envP = na.envG = -32768;
+    EnvPointW ne; ne.t = ne.h = ne.p = ne.g = -32768;
     for (uint16_t i = 0; i < kHistFineMax; ++i) fineStage_[i] = na;
     for (uint16_t i = 0; i < kHistCoarseMax; ++i) coarseStage_[i] = na;
+    for (uint16_t i = 0; i < kHistEnvMax; ++i) envStage_[i] = ne;
     histReady_ = false;
     histActive_ = true;
     histAttempts_ = 0;
@@ -263,16 +269,24 @@ class Receiver {
 
   // Stage one received history chunk into the pull buffers + mark it received.
   void stageChunk(const HistChunk& c) {
-    uint16_t cap = (c.ring == 0) ? kHistFineMax : kHistCoarseMax;
-    HistPointW* dst = (c.ring == 0) ? fineStage_ : coarseStage_;
-    uint8_t* got = (c.ring == 0) ? fineGot_ : coarseGot_;
-    if (!dst || !got) return;      // staging not allocated (never happens in slave role)
-    fineTotal_ = c.fineTotal;      // learn BOTH totals from any chunk, so a completed
-    coarseTotal_ = c.coarseTotal;  // fine ring doesn't prematurely mark us "ready"
-    if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
-    uint16_t idx = c.offset / kHistChunkPts;
-    bool isNew = !got[idx];
-    memcpy(&dst[c.offset], c.pts, c.count * sizeof(HistPointW));
+    fineTotal_ = c.fineTotal;      // learn ALL totals from any chunk, so a completed
+    coarseTotal_ = c.coarseTotal;  // ring doesn't prematurely mark us "ready"
+    envTotal_ = c.envTotal;
+    uint8_t* got; uint16_t idx; bool isNew;
+    if (c.ring == 2) {             // env: 8-byte points packed into the same byte area
+      if (!envStage_ || !envGot_) return;
+      if (c.offset + c.count > kHistEnvMax || c.count > kEnvChunkPts) return;
+      idx = c.offset / kEnvChunkPts; got = envGot_; isNew = !got[idx];
+      memcpy(&envStage_[c.offset], reinterpret_cast<const uint8_t*>(c.pts), c.count * sizeof(EnvPointW));
+    } else {
+      uint16_t cap = (c.ring == 0) ? kHistFineMax : kHistCoarseMax;
+      HistPointW* dst = (c.ring == 0) ? fineStage_ : coarseStage_;
+      got = (c.ring == 0) ? fineGot_ : coarseGot_;
+      if (!dst || !got) return;    // staging not allocated (never happens in slave role)
+      if (c.offset + c.count > cap || c.count > kHistChunkPts) return;
+      idx = c.offset / kHistChunkPts; isNew = !got[idx];
+      memcpy(&dst[c.offset], c.pts, c.count * sizeof(HistPointW));
+    }
     got[idx] = 1;
     lastChunkMs_ = millis();
     // Forward progress (a chunk we didn't have) refreshes the give-up budget, so a
@@ -292,7 +306,11 @@ class Receiver {
     // total==0 => that ring is trivially complete (master has no samples yet).
     bool fineDone = ringComplete(fineTotal_, fineGot_, kFineChunks);
     bool coarseDone = ringComplete(coarseTotal_, coarseGot_, kCoarseChunks);
-    if (fineDone && coarseDone) { histReady_ = true; histActive_ = false; }
+    bool envDone = true;
+    { uint16_t need = (envTotal_ + kEnvChunkPts - 1) / kEnvChunkPts;
+      if (need > kEnvChunks) need = kEnvChunks;
+      for (uint16_t i = 0; i < need; ++i) if (!envGot_ || !envGot_[i]) { envDone = false; break; } }
+    if (fineDone && coarseDone && envDone) { histReady_ = true; histActive_ = false; }
   }
   static void onRecvStatic(const uint8_t* mac, const uint8_t* data, int len) {
     if (self_) self_->onRecv(mac, data, len);
@@ -423,6 +441,7 @@ class Receiver {
   // Graph history pull (staging buffers + per-chunk received bitmaps).
   static const uint16_t kFineChunks = (kHistFineMax + kHistChunkPts - 1) / kHistChunkPts;
   static const uint16_t kCoarseChunks = (kHistCoarseMax + kHistChunkPts - 1) / kHistChunkPts;
+  static const uint16_t kEnvChunks = (kHistEnvMax + kEnvChunkPts - 1) / kEnvChunkPts;
   static const uint32_t kHistReqLostMs = 4000;  // no chunk yet -> request likely lost, resend
   static const uint32_t kHistStallMs = 8000;    // mid-transfer stall -> nudge a resend
   static const uint8_t kHistMaxAttempts = 20;   // plenty of passes; each backfills gaps
@@ -431,6 +450,9 @@ class Receiver {
   // RAM free — it never calls begin() and these stay null.
   HistPointW* fineStage_ = nullptr;
   HistPointW* coarseStage_ = nullptr;
+  EnvPointW* envStage_ = nullptr;
+  uint8_t* envGot_ = nullptr;
+  uint16_t envTotal_ = 0;
   uint8_t* fineGot_ = nullptr;
   uint8_t* coarseGot_ = nullptr;
   void allocHistBuffers() {
@@ -439,6 +461,8 @@ class Receiver {
     coarseStage_ = new (std::nothrow) HistPointW[kHistCoarseMax];
     fineGot_ = new (std::nothrow) uint8_t[kFineChunks]();
     coarseGot_ = new (std::nothrow) uint8_t[kCoarseChunks]();
+    envStage_ = new (std::nothrow) EnvPointW[kHistEnvMax];
+    envGot_ = new (std::nothrow) uint8_t[kEnvChunks]();
   }
   // Byte offsets into the Snapshot header, stable across every wire version since
   // v2 — see the cross-version pairing note in the receive path.
@@ -446,8 +470,11 @@ class Receiver {
 
   // Shared "no data" point returned by finePoint/coarsePoint before staging exists.
   static const HistPointW& kNaPoint() {
-    static const HistPointW na = { -32768, -32768, -32768, -32768, -32768,
-                                   -32768, -32768, -32768, -32768, -32768 };
+    static const HistPointW na = { -32768, -32768, -32768, -32768, -32768, -32768 };
+    return na;
+  }
+  static const EnvPointW& kNaEnv() {
+    static const EnvPointW na = { -32768, -32768, -32768, -32768 };
     return na;
   }
   // Last master heard on a DIFFERENT wire version (diagnostics / UI).

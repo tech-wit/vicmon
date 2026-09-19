@@ -196,11 +196,13 @@ static uint16_t socDisplayColor(const DashData& d) {
 }
 
 // ---- footer (page name · dots · B hint) ------------------------------------
+static uint8_t gFooterNotice = 0;   // from the snapshot: firmware mismatch with the master
 static void drawFooter(const char* bHint) {
     Arduino_GFX* g = G();
     g->fillRect(0, FOOT_Y, W, H - FOOT_Y, RGB565(22, 22, 28));
     g->drawFastHLine(0, FOOT_Y, W, RGB565(55, 55, 68));
-    T(6, H - 5, F_S, RGB565(205, 205, 216), kPageName[gPage]);
+    if (gFooterNotice) T(6, H - 5, F_S, C_AMBER, gFooterNotice == 1 ? "master newer: updating" : "master older: push update");
+    else T(6, H - 5, F_S, RGB565(205, 205, 216), kPageName[gPage]);
     int cx = W / 2 - (LP_COUNT - 1) * 7;
     for (int i = 0; i < LP_COUNT; ++i)
         g->fillCircle(cx + i * 14, FOOT_Y + 10, 3, i == gPage ? kPageColor[i] : RGB565(80, 80, 94));
@@ -1028,6 +1030,7 @@ void lilygoRender() {
     if (!gSnapMux || !gRenderBuf) return;
     DashData& tmp = *gRenderBuf;
     collectDashForRole(tmp);
+    gFooterNotice = tmp.linkMismatch;
     if (xSemaphoreTake(gSnapMux, pdMS_TO_TICKS(20)) == pdTRUE) {
         memcpy(gSnap, &tmp, sizeof(DashData));
         xSemaphoreGive(gSnapMux);

@@ -60,7 +60,8 @@ void renderFlow(Arduino_GFX* c, const DashData& d) {
   c->fillRect(kBrandW, 0, W - kBrandW, 38, d.linkStale ? kGrey : modeColor(d));
   gtext(c, &FreeSansBold12pt7b, kBrandW / 2, 26, "VICMON", kAccent, C);
   gtext(c, &FreeSansBold18pt7b, kBrandW + (W - kBrandW) / 2, 27, d.mode, d.linkStale ? kMuted : kBlack, C);
-  if (d.linkStale) gtext(c, &FreeSansBold12pt7b, W - 10, 26, "STALE", kAmber, R);
+  if (d.linkMismatch) gtext(c, &FreeSansBold12pt7b, W - 10, 26, d.linkMismatch == 1 ? "UPDATING" : "FW OLDER", kAmber, R);
+  else if (d.linkStale) gtext(c, &FreeSansBold12pt7b, W - 10, 26, "STALE", kAmber, R);
 
   // Battery in the centre.
   const int batx = 190, baty = 96, batw = 108, bath = 100;

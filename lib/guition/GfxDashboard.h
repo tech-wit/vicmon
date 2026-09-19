@@ -147,6 +147,7 @@ struct DashData {
   bool     otaPeerKnown = false;   // the paired device's version was heard recently
   bool     linkLive = false;       // slave: receiving frames from our master
   bool     linkStale = false;      // slave: link dropped but showing last-known values
+  uint8_t  linkMismatch = 0;       // slave: 1 = master on newer firmware (pulling it), 2 = master older (push from Network)
   uint32_t linkDrops = 0;          // slave: sequence gaps observed
   uint8_t  linkChannel = 0;        // slave: current listen channel
   bool     heardInvite = false;    // slave: a master is inviting pairing right now

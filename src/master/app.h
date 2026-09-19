@@ -133,13 +133,14 @@ struct EnvReading {
 // NOTE: the layout is memcpy'd straight onto slavelink::HistPointW when a slave
 // pulls the graph history, so the two structs must be changed together.
 struct HistSample {
-    int16_t battery, solar, charger, dcdc, load;  // deci-amps, -32768 = n/a
-    int16_t soc;                                   // deci-percent (0..1000), -32768 = n/a
-    // Environment (Unit ENV Pro / BME688), -32768 = n/a on each.
-    int16_t envT;   // temperature, deci-degrees C
-    int16_t envH;   // relative humidity, deci-percent
-    int16_t envP;   // barometric pressure, deci-hectopascals (3000..11000)
-    int16_t envG;   // gas resistance, whole kilo-ohms
+    int16_t battery, solar, charger, dcdc, load, soc;  // deci-amps / deci-percent, -32768 = n/a
+};
+// Environment is sampled on its own ring at 5-minute cadence. It used to ride
+// inside HistSample at 5s and 60s, which made it 8 of every 20 bytes in both
+// electrical rings (~15KB of static RAM) for readings that do not move in a
+// minute, let alone five seconds.
+struct EnvSample {
+    int16_t t, h, p, g;  // deci-degC, deci-%RH, deci-hPa, whole kilo-ohms; -32768 = n/a
 };
 struct HistRing {
     HistSample* buf = nullptr;
@@ -149,6 +150,20 @@ struct HistRing {
     void clear() { head = count = 0; lastMs = 0; }
     bool due(uint32_t now) const { return count == 0 || now - lastMs >= intervalMs; }
     void push(const HistSample& s, uint32_t now) {
+        lastMs = now;
+        buf[head] = s;
+        head = (head + 1) % cap;
+        if (count < cap) ++count;
+    }
+};
+struct EnvRing {
+    EnvSample* buf = nullptr;
+    size_t cap = 0, head = 0, count = 0;
+    uint32_t intervalMs = 0, lastMs = 0;
+    void init(EnvSample* b, size_t c, uint32_t iv) { buf = b; cap = c; intervalMs = iv; }
+    void clear() { head = count = 0; lastMs = 0; }
+    bool due(uint32_t now) const { return count == 0 || now - lastMs >= intervalMs; }
+    void push(const EnvSample& s, uint32_t now) {
         lastMs = now;
         buf[head] = s;
         head = (head + 1) % cap;
@@ -220,12 +235,14 @@ extern uint32_t gBootCount;          // boots since first flash
 extern uint32_t gHeapRestarts;       // restarts the supervisor itself triggered
 extern const char* gResetReason;     // this boot's reset cause, as text
 extern uint32_t gEspNowLastOkMs;     // last successful broadcast (espnow.cpp); 0 = none yet
+extern uint8_t gLinkMismatch;        // slave: 0 ok, 1 master on newer wire (pulling), 2 master older (push it)
 void cleanRestart(const char* why);  // flush stats + history, log, restart
 void serviceSupervisor(uint32_t now);
 
 extern int gScanResults;
 extern uint32_t gScanHeapCost;
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
+extern EnvRing gEnv;             // environment ring, 5-min cadence, 24h
 
 // ---- cross-module function prototypes --------------------------------------
 // Defined in main.cpp (the data/registry core), called from web.cpp etc.

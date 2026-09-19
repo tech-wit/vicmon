@@ -38,7 +38,7 @@ static volatile bool gHistReqPending = false;
 static uint8_t gHistReqMac[6] = {0};
 static bool gHistSending = false, gHistPeerAdded = false;
 static uint8_t gHistPeerMac[6] = {0};
-static uint8_t gHistRing = 0;      // 0 fine, 1 coarse
+static uint8_t gHistRing = 0;      // 0 fine, 1 coarse, 2 env
 static uint16_t gHistOffset = 0;
 
 // Receive callback (master role). Only handles the tiny history request; the
@@ -258,27 +258,32 @@ static void ensureHistPeer(const uint8_t* mac) {
 
 // Serialize one chunk of a ring (chronological order, oldest first) and unicast
 // it. Returns false if the send queue is full (retry the same offset next time).
-static bool sendHistChunk(uint8_t ring, const HistRing& r, uint16_t offset) {
+static bool sendHistChunk(uint8_t ring, uint16_t offset) {
     using namespace slavelink;
     HistChunk c = {};
     fillHistChunkHdr(c);
     c.ring = ring;
     c.masterId = gMasterId;
-    c.fineTotal = (uint16_t)gFine.count;      // both totals in every chunk so the slave
-    c.coarseTotal = (uint16_t)gCoarse.count;  // knows to wait for coarse (sent after fine)
+    c.fineTotal = (uint16_t)gFine.count;      // all totals in every chunk so the slave
+    c.coarseTotal = (uint16_t)gCoarse.count;  // knows to wait for the rings sent later
+    c.envTotal = (uint16_t)gEnv.count;
     c.offset = offset;
-    uint16_t remain = (uint16_t)r.count - offset;
-    uint8_t n = remain > kHistChunkPts ? kHistChunkPts : (uint8_t)remain;
-    c.count = n;
-    for (uint8_t i = 0; i < n; ++i) {
-        const HistSample& s = r.buf[(r.head + r.cap - r.count + offset + i) % r.cap];
-        // HistSample (app.h) and HistPointW (SlaveLink.h) are deliberately the same
-        // sequence of int16 channels so a history point needs no field-by-field
-        // repacking. Adding a channel to one and not the other would otherwise
-        // truncate or over-read here silently.
-        static_assert(sizeof(HistSample) == sizeof(slavelink::HistPointW),
-                      "HistSample and HistPointW must stay layout-compatible");
-        memcpy(&c.pts[i], &s, sizeof(HistPointW));
+    if (ring == 2) {
+        uint16_t remain = (uint16_t)gEnv.count - offset;
+        uint8_t n = remain > kEnvChunkPts ? kEnvChunkPts : (uint8_t)remain;
+        c.count = n;
+        static_assert(sizeof(EnvSample) == sizeof(slavelink::EnvPointW), "EnvSample and EnvPointW must stay layout-compatible");
+        EnvPointW* pts = reinterpret_cast<EnvPointW*>(c.pts);
+        for (uint8_t i = 0; i < n; ++i)
+            memcpy(&pts[i], &gEnv.buf[(gEnv.head + gEnv.cap - gEnv.count + offset + i) % gEnv.cap], sizeof(EnvPointW));
+    } else {
+        const HistRing& r = (ring == 0) ? gFine : gCoarse;
+        uint16_t remain = (uint16_t)r.count - offset;
+        uint8_t n = remain > kHistChunkPts ? kHistChunkPts : (uint8_t)remain;
+        c.count = n;
+        static_assert(sizeof(HistSample) == sizeof(slavelink::HistPointW), "HistSample and HistPointW must stay layout-compatible");
+        for (uint8_t i = 0; i < n; ++i)
+            memcpy(&c.pts[i], &r.buf[(r.head + r.cap - r.count + offset + i) % r.cap], sizeof(HistPointW));
     }
     return esp_now_send(gHistPeerMac, (const uint8_t*)&c, sizeof(c)) == ESP_OK;
 }
@@ -300,14 +305,15 @@ void serviceHistSend() {
     if (++tick & 1) return;  // pace: send on every other 250ms tick (gentler = less loss)
     const int kBatch = 6;  // chunks per send (queue usually fills after ~4)
     for (int i = 0; i < kBatch; ++i) {
-        const HistRing& r = (gHistRing == 0) ? gFine : gCoarse;
-        if (gHistOffset >= (uint16_t)r.count) {  // this ring done
-            if (gHistRing == 0) { gHistRing = 1; gHistOffset = 0; continue; }
+        const uint16_t total = gHistRing == 0 ? (uint16_t)gFine.count : gHistRing == 1 ? (uint16_t)gCoarse.count : (uint16_t)gEnv.count;
+        const uint16_t stride = gHistRing == 2 ? slavelink::kEnvChunkPts : slavelink::kHistChunkPts;
+        if (gHistOffset >= total) {  // this ring done: fine -> coarse -> env
+            if (gHistRing < 2) { ++gHistRing; gHistOffset = 0; continue; }
             gHistSending = false; Serial.println("[hist] send complete"); break;
         }
-        if (!sendHistChunk(gHistRing, r, gHistOffset)) break;  // queue full -> next tick
-        uint16_t remain = (uint16_t)r.count - gHistOffset;
-        gHistOffset += remain > slavelink::kHistChunkPts ? slavelink::kHistChunkPts : remain;
+        if (!sendHistChunk(gHistRing, gHistOffset)) break;  // queue full -> next tick
+        uint16_t remain = total - gHistOffset;
+        gHistOffset += remain > stride ? stride : remain;
     }
 }
 

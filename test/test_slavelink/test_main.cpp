@@ -79,6 +79,11 @@ void test_fits_espnow() {
     TEST_ASSERT_LESS_THAN(250, (int)sizeof(HistReq));
     // ...and a chunk should still carry a useful number of points.
     TEST_ASSERT_GREATER_THAN(0, kHistChunkPts);
+    // Env points ride in the same byte area as electrical ones (ring 2).
+    TEST_ASSERT_EQUAL_INT(12, (int)sizeof(HistPointW));
+    TEST_ASSERT_EQUAL_INT(8, (int)sizeof(EnvPointW));
+    TEST_ASSERT_TRUE(kEnvChunkPts * sizeof(EnvPointW) <= kHistChunkPts * sizeof(HistPointW));
+    TEST_ASSERT_GREATER_THAN(0, kEnvChunkPts);
 }
 
 int main(int, char**) {

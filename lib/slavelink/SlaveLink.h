@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 6;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688)
+static const uint8_t kVersion = 7;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688); v7 environment moved off HistPointW onto its own 5-min ring (EnvPointW, chunk ring 2)
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -151,24 +151,31 @@ static const uint16_t kHistCoarseMax = 1440;
 // deci-%RH, deci-hPa and whole kilo-ohms, with -32768 meaning "not available".
 struct HistPointW {
     int16_t battery, solar, charger, dcdc, load, soc;
-    int16_t envT, envH, envP, envG;
 };
+// Environment history point: 5-min cadence, its own ring (chunk ring == 2).
+struct EnvPointW {
+    int16_t t, h, p, g;
+};
+static const uint16_t kHistEnvMax = 288;   // 24h @ 5 min
 
 struct HistReq {
     uint8_t magic0, magic1, version, pad_;  // 'V','Q'
     uint32_t masterId;                       // target master (ignored by others)
 };
-static const int kHistChunkPts = 11;         // 11*20 + 16 hdr = 236 B (< 250)
+static const int kHistChunkPts = 18;         // 18*12 + 18 hdr = 234 B (< 250)
+// Env points (8 B) are packed into the same pts[] byte area when ring == 2.
+static const int kEnvChunkPts = (kHistChunkPts * 12) / 8;   // 27
 struct HistChunk {
-    uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse
+    uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse, 2 = env
     uint32_t masterId;
     uint16_t fineTotal, coarseTotal;         // BOTH ring totals in every chunk, so the
                                              // slave knows to wait for coarse even while
                                              // fine (sent first) is still arriving
     uint16_t offset;                         // index of pts[0] within `ring`
-    uint8_t count;                           // valid samples in pts[] (<= kHistChunkPts)
+    uint8_t count;                           // valid samples in pts[] (<= kHistChunkPts, or kEnvChunkPts for ring 2)
     uint8_t pad_;
-    HistPointW pts[kHistChunkPts];
+    uint16_t envTotal;                       // env ring total (ring 2 is sent last)
+    HistPointW pts[kHistChunkPts];           // ring 2: reinterpret as EnvPointW[kEnvChunkPts]
 };
 
 // ---- Firmware clone over ESP-NOW (OTA push) --------------------------------

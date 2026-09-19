@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.15";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.16";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -342,6 +342,8 @@ void saveApCfg(const String& ssid, const String& pass) {
 // disagree this says which one is empty.
 static void dumpHist() {
     static const char* kName[5] = {"batt", "solar", "chg", "dcdc", "load"};
+    Serial.printf("[hist] env ring: count=%u cap=%u interval=%lums (%lu h span)\n", (unsigned)gEnv.count,
+                  (unsigned)gEnv.cap, (unsigned long)gEnv.intervalMs, (unsigned long)(gEnv.count * gEnv.intervalMs / 3600000));
     for (int which = 0; which < 2; ++which) {
         const HistRing& r = which ? gCoarse : gFine;
         Serial.printf("[hist] %s ring: count=%u cap=%u interval=%lums (%lu min span)\n",
@@ -682,6 +684,11 @@ static const uint32_t HIST2_INTERVAL = 60000;  // ms
 // rings; buildHistoryJson in web/main serializes them).
 static HistSample gFineBuf[HIST_CAP];
 static HistSample gCoarseBuf[HIST2_CAP];
+static const size_t ENV_CAP = 288;             // 24 h @ 5 min
+static const uint32_t ENV_INTERVAL = 300000;   // ms
+static EnvSample gEnvBuf[ENV_CAP];
+EnvRing gEnv;
+uint8_t gLinkMismatch = 0;
 HistRing gFine, gCoarse;
 
 static int16_t encA(bool v, float a) {
@@ -699,12 +706,11 @@ static int16_t sampleField(const HistSample& s, int idx) {
         case 2: return s.charger;
         case 3: return s.dcdc;
         case 4: return s.load;
-        case 5: return s.soc;
-        case 6: return s.envT;
-        case 7: return s.envH;
-        case 8: return s.envP;
-        default: return s.envG;
+        default: return s.soc;
     }
+}
+static int16_t envField(const EnvSample& e, int idx) {   // 6..9 of the series order
+    switch (idx) { case 6: return e.t; case 7: return e.h; case 8: return e.p; default: return e.g; }
 }
 
 // Encode the live Unit ENV Pro reading into a history sample. Temperature,
@@ -713,18 +719,18 @@ static int16_t sampleField(const HistSample& s, int idx) {
 // three orders of magnitude and a tenth of an ohm is noise. Gas carries its own
 // validity — the heater needs a few cycles from cold before its number means
 // anything, while T/H/P are good from the first reading.
-static void encodeEnv(HistSample& s) {
-    const EnvReading& e = envReading();
-    s.envT = e.valid ? static_cast<int16_t>(lroundf(e.tempC * 10.0f)) : -32768;
-    s.envH = e.valid ? static_cast<int16_t>(lroundf(e.humidity * 10.0f)) : -32768;
-    s.envP = e.valid ? static_cast<int16_t>(lroundf(e.pressureHpa * 10.0f)) : -32768;
-    if (e.gasValid) {
-        float k = e.gasOhm / 1000.0f;       // ohms -> kilo-ohms
+static void encodeEnv(EnvSample& e) {
+    const EnvReading& r = envReading();
+    e.t = r.valid ? static_cast<int16_t>(lroundf(r.tempC * 10.0f)) : -32768;
+    e.h = r.valid ? static_cast<int16_t>(lroundf(r.humidity * 10.0f)) : -32768;
+    e.p = r.valid ? static_cast<int16_t>(lroundf(r.pressureHpa * 10.0f)) : -32768;
+    if (r.gasValid) {
+        float k = r.gasOhm / 1000.0f;       // ohms -> kilo-ohms
         if (k > 32000.0f) k = 32000.0f;     // very clean air can run away; clamp under INT16_MAX
         if (k < 0.0f) k = 0.0f;
-        s.envG = static_cast<int16_t>(lroundf(k));
+        e.g = static_cast<int16_t>(lroundf(k));
     } else {
-        s.envG = -32768;
+        e.g = -32768;
     }
 }
 
@@ -732,6 +738,9 @@ static void encodeEnv(HistSample& s) {
 // rings from a single read.
 static void sampleHistory() {
     uint32_t now = millis();
+    // First env sample waits for a valid reading: at boot the BME688 has not
+    // produced one yet, and an n/a sample would blank the first five minutes.
+    if (gEnv.due(now) && (gEnv.count || envReading().valid)) { EnvSample e; encodeEnv(e); gEnv.push(e, now); }
     bool dueFine = gFine.due(now);
     bool dueCoarse = gCoarse.due(now);
     if (!dueFine && !dueCoarse) return;
@@ -744,7 +753,6 @@ static void sampleHistory() {
     s.dcdc = encA(c.dV, c.dcdc);
     s.load = encA(c.lV, c.load);
     s.soc = encA(soc.valid, soc.value);  // deci-percent (same *10 encoding)
-    encodeEnv(s);
     if (dueFine) gFine.push(s, now);
     if (dueCoarse) gCoarse.push(s, now);
 }
@@ -756,7 +764,7 @@ static void sampleHistory() {
 static void sampleSlaveHistory() {
     uint32_t now = millis();
     bool dueFine = gFine.due(now), dueCoarse = gCoarse.due(now);
-    if (!dueFine && !dueCoarse) return;
+    if (!dueFine && !dueCoarse && !gEnv.due(now)) return;
     if (!gRx.live()) return;  // only log while actually receiving
     using namespace slavelink;
     const Snapshot& sn = gRx.snapshot();
@@ -768,14 +776,16 @@ static void sampleSlaveHistory() {
     s.dcdc    = f(V_DCDC, sn.dcdcA_da);
     s.load    = f(V_LOAD, sn.loadA_da);
     s.soc     = f(V_SOC, sn.soc_d);
-    // Environment mirrors the master's sensor: T/H/P share one validity bit, gas
-    // has its own (see slavelink::V_ENV / V_ENVGAS).
-    s.envT    = f(V_ENV, sn.envTemp_dc);
-    s.envH    = f(V_ENV, sn.envHum_dp);
-    s.envP    = f(V_ENV, (int16_t)sn.envPress_dhpa);
-    s.envG    = f(V_ENVGAS, (int16_t)sn.envGas_kohm);
     if (dueFine) gFine.push(s, now);
     if (dueCoarse) gCoarse.push(s, now);
+    // Environment mirrors the master's sensor on its own 5-min ring: T/H/P share
+    // one validity bit, gas has its own (see slavelink::V_ENV / V_ENVGAS).
+    if (gEnv.due(now) && (gEnv.count || (sn.valid & V_ENV))) {
+        EnvSample e;
+        e.t = f(V_ENV, sn.envTemp_dc); e.h = f(V_ENV, sn.envHum_dp);
+        e.p = f(V_ENV, (int16_t)sn.envPress_dhpa); e.g = f(V_ENVGAS, (int16_t)sn.envGas_kohm);
+        gEnv.push(e, now);
+    }
 }
 
 // ---- history persistence (LittleFS) ----------------------------------------
@@ -785,7 +795,7 @@ static void sampleSlaveHistory() {
 // reloaded samples continue seamlessly at the "now" edge.
 
 bool gFsOk = false;
-static const uint8_t kHistVer = 3;  // 2: HistSample gained `soc`; 3: + environment (T/H/P/gas)
+static const uint8_t kHistVer = 4;  // 2: +soc; 3: +environment in HistSample; 4: environment on its own 5-min ring
 // How often the history is flushed to flash. At ~26 KB/save (full buffers) this
 // is ~7.5 MB/day; LittleFS wear-levels it across the ~1.5 MB FS partition, so at
 // 100k erase cycles/block the flash lasts decades. Raise it to lose less to
@@ -802,6 +812,18 @@ static void writeRing(File& f, const HistRing& r) {
         f.write(reinterpret_cast<const uint8_t*>(&r.buf[idx]), sizeof(HistSample));
     }
 }
+static void writeEnvRing(File& f, const EnvRing& r) {
+    size_t start = (r.head + r.cap - r.count) % r.cap;
+    for (size_t k = 0; k < r.count; ++k)
+        f.write(reinterpret_cast<const uint8_t*>(&r.buf[(start + k) % r.cap]), sizeof(EnvSample));
+}
+static void readEnvRing(File& f, EnvRing& r, uint16_t n) {
+    if (n > r.cap) n = r.cap;
+    size_t k = 0;
+    for (; k < n; ++k)
+        if (f.read(reinterpret_cast<uint8_t*>(&r.buf[k]), sizeof(EnvSample)) != sizeof(EnvSample)) break;
+    r.count = k; r.head = k % r.cap;
+}
 // Read up to n samples back into a (chronological) ring.
 static void readRing(File& f, HistRing& r, uint16_t n) {
     if (n > r.cap) n = r.cap;
@@ -817,11 +839,11 @@ static void readRing(File& f, HistRing& r, uint16_t n) {
 // boot, so an unconditional periodic save would overwrite a day of stored
 // history with a few seconds of it — which is exactly what repeated reflashing
 // did to the master's trend today. Refuse to shrink the file.
-static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0;
+static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0;
 
 void saveHistFile(int profile) {
     if (!gFsOk) return;
-    if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse) return;
+    if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse || gEnv.count < gHistLoadedEnv) return;
     // Write to a temp file and rename over the old one. LittleFS rename is
     // atomic, so a reset or reflash landing mid-write (every 5 min, so not rare
     // across a day of flashing) leaves the previous complete file in place
@@ -830,12 +852,13 @@ void saveHistFile(int profile) {
     File f = LittleFS.open(tmp, "w");
     if (!f) return;
     uint8_t hdr[4] = {'V', 'H', kHistVer, 0};
-    uint16_t fc = gFine.count, cc = gCoarse.count;
+    uint16_t fc = gFine.count, cc = gCoarse.count, ec = gEnv.count;
     bool ok = f.write(hdr, 4) == 4 &&
               f.write(reinterpret_cast<uint8_t*>(&fc), 2) == 2 &&
-              f.write(reinterpret_cast<uint8_t*>(&cc), 2) == 2;
-    if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); }
-    size_t expect = 8 + (size_t)(fc + cc) * sizeof(HistSample);
+              f.write(reinterpret_cast<uint8_t*>(&cc), 2) == 2 &&
+              f.write(reinterpret_cast<uint8_t*>(&ec), 2) == 2;
+    if (ok) { writeRing(f, gFine); writeRing(f, gCoarse); writeEnvRing(f, gEnv); }
+    size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
     ok = ok && f.size() == expect;
     f.close();
     if (!ok) { LittleFS.remove(tmp); return; }
@@ -849,14 +872,16 @@ static void loadHistFile(int profile) {
     if (!f) return;
     uint8_t hdr[4];
     if (f.read(hdr, 4) != 4 || hdr[0] != 'V' || hdr[1] != 'H' || hdr[2] != kHistVer) {
+        if (f.size() >= 3 && hdr[0] == 'V' && hdr[1] == 'H') Serial.printf("[hist] file is v%u, this firmware v%u — starting fresh\n", hdr[2], kHistVer);
         f.close();
         return;
     }
-    uint16_t fc = 0, cc = 0;
+    uint16_t fc = 0, cc = 0, ec = 0;
     f.read(reinterpret_cast<uint8_t*>(&fc), 2);
     f.read(reinterpret_cast<uint8_t*>(&cc), 2);
-    size_t expect = 8 + (size_t)(fc + cc) * sizeof(HistSample);
-    if (fc > gFine.cap || cc > gCoarse.cap || f.size() != expect) {
+    f.read(reinterpret_cast<uint8_t*>(&ec), 2);
+    size_t expect = 10 + (size_t)(fc + cc) * sizeof(HistSample) + (size_t)ec * sizeof(EnvSample);
+    if (fc > gFine.cap || cc > gCoarse.cap || ec > gEnv.cap || f.size() != expect) {
         Serial.printf("[hist] %s: bad length (%u, expected %u) — ignoring\n",
                       histPath(profile).c_str(), (unsigned)f.size(), (unsigned)expect);
         f.close();
@@ -864,10 +889,12 @@ static void loadHistFile(int profile) {
     }
     readRing(f, gFine, fc);
     readRing(f, gCoarse, cc);
+    readEnvRing(f, gEnv, ec);
     gHistLoadedFine = gFine.count;    // what the file now represents
     gHistLoadedCoarse = gCoarse.count;
+    gHistLoadedEnv = gEnv.count;
     f.close();
-    Serial.printf("[hist] restored fine=%u coarse=%u\n", (unsigned)fc, (unsigned)cc);
+    Serial.printf("[hist] restored fine=%u coarse=%u env=%u\n", (unsigned)fc, (unsigned)cc, (unsigned)ec);
     gFine.lastMs = 0;  // take a fresh sample promptly after a reload
     gCoarse.lastMs = 0;
 }
@@ -930,21 +957,44 @@ void buildHistoryInto(int mins, OutSink& h) {
     static const char* const names[kHistSeries] = {"battery", "solar", "charger", "dcdc", "load",
                                                    "soc", "temp", "humidity", "pressure", "gas"};
     h.f("{\"interval\":%d,\"mins\":%d,\"series\":{", ivSec, mins);
+    // Environment lives on its own 5-min ring. Its columns are aligned to the
+    // same depth in time as the electrical ones, averaged per column, and a
+    // column with no env sample carries the previous value forward (a reading
+    // that changes by a tenth of a degree an hour is a level, not a gap).
+    const int depthSec = want * static_cast<int>(r.intervalMs / 1000);
+    int wantE = (depthSec + 299) / 300;
+    if (wantE > static_cast<int>(gEnv.count)) wantE = gEnv.count;
+    const size_t startE = (gEnv.head + gEnv.cap - static_cast<size_t>(wantE)) % gEnv.cap;
     for (int f = 0; f < kHistSeries; ++f) {
         const bool whole = (f == kHistGasIdx);
+        const bool env = (f >= 6);
         h.f("\"%s\":[", names[f]);
+        int16_t hold = -32768;
         for (int k = 0; k < n; ++k) {
-            int lo = static_cast<int>(static_cast<long>(k) * want / n);
-            int hi = static_cast<int>(static_cast<long>(k + 1) * want / n);
-            if (hi <= lo) hi = lo + 1;
-            if (hi > want) hi = want;
             int16_t best = -32768;
-            for (int si = lo; si < hi; ++si) {
-                const int16_t v = sampleField(r.buf[(start + static_cast<size_t>(si)) % r.cap], f);
-                if (v == -32768) continue;
-                if (best == -32768) { best = v; continue; }
-                const int av = v < 0 ? -v : v, ab = best < 0 ? -best : best;
-                if (av > ab) best = v;
+            if (env) {
+                int lo = static_cast<int>(static_cast<long>(k) * wantE / n);
+                int hi = static_cast<int>(static_cast<long>(k + 1) * wantE / n);
+                if (hi > wantE) hi = wantE;
+                long sum = 0; int cnt = 0;
+                for (int si = lo; si < hi; ++si) {
+                    const int16_t v = envField(gEnv.buf[(startE + static_cast<size_t>(si)) % gEnv.cap], f);
+                    if (v != -32768) { sum += v; ++cnt; }
+                }
+                if (cnt) hold = static_cast<int16_t>(sum / cnt);
+                best = hold;
+            } else {
+                int lo = static_cast<int>(static_cast<long>(k) * want / n);
+                int hi = static_cast<int>(static_cast<long>(k + 1) * want / n);
+                if (hi <= lo) hi = lo + 1;
+                if (hi > want) hi = want;
+                for (int si = lo; si < hi; ++si) {
+                    const int16_t v = sampleField(r.buf[(start + static_cast<size_t>(si)) % r.cap], f);
+                    if (v == -32768) continue;
+                    if (best == -32768) { best = v; continue; }
+                    const int av = v < 0 ? -v : v, ab = best < 0 ? -best : best;
+                    if (av > ab) best = v;
+                }
             }
             if (best == -32768) h.f("%snull", k ? "," : "");
             else if (whole)     h.f("%s%d", k ? "," : "", (int)best);
@@ -1445,6 +1495,39 @@ static void applyPulledHistory() {
         for (uint16_t i = 0; i < gRx.coarseCount(); ++i)
             gCoarse.push(take(gRx.coarsePoint(i)), millis());
     }
+    if (gRx.envCount() > 0) {
+        static_assert(sizeof(EnvSample) == sizeof(slavelink::EnvPointW), "EnvSample and EnvPointW must stay layout-compatible");
+        gEnv.clear();
+        for (uint16_t i = 0; i < gRx.envCount(); ++i) {
+            EnvSample e; memcpy(&e, &gRx.envPoint(i), sizeof(e));
+            gEnv.push(e, millis());
+        }
+    }
+}
+
+// A wire-version bump silences telemetry between a master and a slave on
+// different firmware; before this, the slave just showed STALE until someone
+// updated it by hand. The clone frames carry their own protocol version and
+// the version beacon is version-independent, so the slave can tell that its
+// paired master is on a different wire version AND whether the master's
+// firmware is newer — and if so, pull it. Only a pull, never a push: updating
+// yourself is safe, rebooting the master unasked is not. When this unit is the
+// newer one it says so instead, and the Network page's push button does it.
+static void serviceUpgradeWatch() {
+    static uint32_t lastTryMs = 0; static uint8_t tries = 0;
+    const bool mismatch = gRx.foreignMasterSeen() && gRx.pairedMaster() != 0 &&
+                          gRx.foreignMasterId() == gRx.pairedMaster() &&
+                          gRx.foreignMasterVersion() != slavelink::kVersion;
+    if (!mismatch) { gLinkMismatch = 0; tries = 0; return; }
+    const char* rel = gOta.peerKnown() ? gOta.peerRel() : "";
+    if (strcmp(rel, "older") == 0) { gLinkMismatch = 2; return; }
+    gLinkMismatch = 1;
+    if (strcmp(rel, "newer") != 0 || gOta.busy()) return;   // wait for the beacon / a transfer in progress
+    if (tries >= 5 || (lastTryMs && millis() - lastTryMs < 90000)) return;
+    lastTryMs = millis(); ++tries;
+    Serial.printf("[upgrade] master on wire v%u, this unit v%u, master firmware %s is newer — pulling (try %u)\n",
+                  gRx.foreignMasterVersion(), (unsigned)slavelink::kVersion, gOta.peerVersion(), tries);
+    gOta.startPull();
 }
 
 static void slaveLoop() {
@@ -1479,7 +1562,9 @@ static void slaveLoop() {
         gLiveSince = 0;
         gFine.clear();
         gCoarse.clear();
+        gEnv.clear();
     }
+    serviceUpgradeWatch();
     if (gRx.live() && gRx.haveMasterMac()) {
         if (gLiveSince == 0) gLiveSince = millis();
         // Wait until the link has been solidly live for a few seconds (first
@@ -1558,6 +1643,7 @@ void setup() {
     // Shared init (history rings, LittleFS, profiles/config/signals) — needed by
     // the web app in BOTH roles, so it runs before the role branch.
     gFine.init(gFineBuf, HIST_CAP, HIST_INTERVAL);
+    gEnv.init(gEnvBuf, ENV_CAP, ENV_INTERVAL);
     gCoarse.init(gCoarseBuf, HIST2_CAP, HIST2_INTERVAL);
 
     Serial.printf("[mem] boot: %u\n", (unsigned)ESP.getFreeHeap());
