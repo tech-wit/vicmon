@@ -1522,7 +1522,7 @@ void setupServer() {
         j += pairing ? "true" : "false";
         j += ",\"pairSec\":" + String(pairSec);
         j += ",\"status\":\"" + jsonEsc(String(gOta.statusText())) + "\"";
-        j += ",\"mismatch\":\"" + String(gLinkMismatch == 1 ? "paired master is on newer firmware — pulling it" : gLinkMismatch == 2 ? "paired master is on older firmware — send it this one" : "") + "\"}";
+        j += ",\"mismatch\":\"" + String(gLinkMismatch == 1 ? "paired master is on newer firmware — pulling it" : gLinkMismatch == 2 ? "paired master is on older firmware — send it this one" : gLinkMismatch == 3 ? "paired master has newer firmware (same link version) — update from peer when convenient" : "") + "\"}";
         req->send(200, "application/json", j);
     });
     gServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {

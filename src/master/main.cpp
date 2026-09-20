@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.22";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.23";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -1586,12 +1586,21 @@ static void serviceUpgradeWatch() {
     const bool mismatch = gRx.foreignMasterSeen() && gRx.pairedMaster() != 0 &&
                           gRx.foreignMasterId() == gRx.pairedMaster() &&
                           gRx.foreignMasterVersion() != slavelink::kVersion;
-    if (!mismatch) { gLinkMismatch = 0; tries = 0; return; }
     const char* rel = gOta.peerKnown() ? gOta.peerRel() : "";
+    if (!mismatch) {
+        // Same wire, but the master's firmware is newer: the link still works, so
+        // nothing is pulled unasked (a bench master gets flashed twenty times a
+        // day) — but say so, so the Network page's "update from peer" is a click.
+        gLinkMismatch = (strcmp(rel, "newer") == 0) ? 3 : 0;
+        tries = 0; return;
+    }
     if (strcmp(rel, "older") == 0) { gLinkMismatch = 2; return; }
     gLinkMismatch = 1;
     if (strcmp(rel, "newer") != 0 || gOta.busy()) return;   // wait for the beacon / a transfer in progress
-    if (tries >= 5 || (lastTryMs && millis() - lastTryMs < 90000)) return;
+    // The first pull reliably misses: the master starts offering only after the
+    // slave's acceptance window has closed. 30s (was 90s) makes the retry that
+    // engages come a minute sooner; a pull is one small broadcast.
+    if (tries >= 8 || (lastTryMs && millis() - lastTryMs < 30000)) return;
     lastTryMs = millis(); ++tries;
     Serial.printf("[upgrade] master on wire v%u, this unit v%u, master firmware %s is newer — pulling (try %u)\n",
                   gRx.foreignMasterVersion(), (unsigned)slavelink::kVersion, gOta.peerVersion(), tries);
