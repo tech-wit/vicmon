@@ -41,11 +41,11 @@ static uint8_t gHistPeerMac[6] = {0};
 static uint8_t gHistStep = 0;      // index into kHistRingOrder
 static uint8_t gHistRing = 0;      // ring being sent: 0 fine, 1 coarse, 2 env, 3 env-fine
 static uint16_t gHistOffset = 0;
-// Send order. The 1-hour rings go first (fine 40 chunks, env-fine 3, env 11) so
-// every <=1h page is complete a few seconds in; coarse (80 chunks, 12h/24h) is
-// the bulk and goes last. A slave that powers on with the car sees the pages it
-// looks at first fill first.
-static const uint8_t kHistRingOrder[4] = {0, 3, 2, 1};
+// Send order: fine (40 chunks, 1h electrical), env-fine (3, 1h env), coarse
+// (80, 12h/24h electrical), env (11, 24h env). The 1-hour pages complete a few
+// seconds in; the electrical trends come before the environment ones. A slave
+// that powers on with the car sees the pages it looks at first fill first.
+static const uint8_t kHistRingOrder[4] = {0, 3, 1, 2};
 
 // Receive callback (master role). Only handles the tiny history request; the
 // bulky reply is sent from the loop so we never block the WiFi task.
