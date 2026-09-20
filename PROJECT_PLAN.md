@@ -430,6 +430,12 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   proportional and "Temperature" is ~100 px, so the reading printed over the label
   (0.7.27). `textW()` (getTextBounds) is the shared helper — use it whenever one
   string follows another on a row.
+- **A slave's own facts must not depend on hearing its master.** `collectSlaveDash()`
+  returned early with no snapshot, and the unit-local fields (firmware version, AP,
+  IP, uptime, OTA status, the older/newer-master hint) were filled only after that
+  return. A slave paired across wire versions never gets a snapshot, so its LCD
+  Firmware page went blank on precisely the screen used to push the fix (0.7.28).
+  Fill what this unit knows about itself first, then what the link provides.
 
 ## Open items / unverified
 

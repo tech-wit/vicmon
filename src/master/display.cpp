@@ -419,13 +419,27 @@ static void collectSlaveDash(guition::DashData& d) {
     d.linkDrops = gRx.drops();
     d.linkChannel = gRx.channel();
     d.heardInvite = gRx.heardInvite();
+    d.linkMismatch = gLinkMismatch;
+
+    // This unit's own facts first — they do not depend on the master. They used
+    // to sit after the no-snapshot return below, so a slave that had never heard
+    // its master on the same wire (paired across versions, waiting for the OTA
+    // push) showed a BLANK firmware version, no OTA status and no "master is on
+    // older firmware" hint — on precisely the screen used to fix that.
+    strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1); d.apSsid[sizeof(d.apSsid) - 1] = '\0';
+    strncpy(d.apPass, kApPass, sizeof(d.apPass) - 1); d.apPass[sizeof(d.apPass) - 1] = '\0';
+    WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
+    d.uptimeSec = millis() / 1000;
+    d.freeHeapKb = ESP.getFreeHeap() / 1024;
+    d.tzMin = gTzOffsetMin;
+    strncpy(d.version, kFwVersion, sizeof(d.version) - 1); d.version[sizeof(d.version) - 1] = '\0';
+    fillOtaDash(d);
 
     // Keep showing the last-known values when the link goes stale (flag them
     // stale) instead of blanking everything; only truly blank if we've never
     // heard this master at all.
     if (!gRx.haveSnapshot()) { d.mode = "--"; d.battValid = false; d.linkStale = false; return; }
     d.linkStale = !gRx.live();
-    d.linkMismatch = gLinkMismatch;
     const Snapshot& s = gRx.snapshot();
     auto has = [&](uint16_t f) { return (s.valid & f) != 0; };
     switch (s.mode) {
@@ -502,16 +516,6 @@ static void collectSlaveDash(guition::DashData& d) {
         d.dayCount = 0; d.clockOk = false; d.dayNow = 0;
         d.statToday = d.statTrip = d.statTotal = guition::DashData::StatMeter{};
     }
-
-    // Settings (Tune) fields relevant to a slave: its own config AP + display prefs.
-    strncpy(d.apSsid, kApSsid, sizeof(d.apSsid) - 1); d.apSsid[sizeof(d.apSsid) - 1] = '\0';
-    strncpy(d.apPass, kApPass, sizeof(d.apPass) - 1); d.apPass[sizeof(d.apPass) - 1] = '\0';
-    WiFi.softAPIP().toString().toCharArray(d.ipStr, sizeof(d.ipStr));
-    d.uptimeSec = millis() / 1000;
-    d.freeHeapKb = ESP.getFreeHeap() / 1024;
-    d.tzMin = gTzOffsetMin;
-    strncpy(d.version, kFwVersion, sizeof(d.version) - 1); d.version[sizeof(d.version) - 1] = '\0';
-    fillOtaDash(d);
 }
 
 #ifdef VICMON_HAS_LILYGO
