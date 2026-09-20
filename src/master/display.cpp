@@ -151,24 +151,27 @@ static void collectHistory(guition::DashData& d) {
     int mins = gGraphWinMin;
     d.histWinMin = (uint16_t)mins;
     const HistRing& r = mins > 60 ? gCoarse : gFine;
-    int want = mins * 60 * 1000 / (int)r.intervalMs;
-    if (want > (int)r.count) want = r.count;
-    if (want < 0) want = 0;
-    if (want < 2) { d.histCount = 0; return; }
-    int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
-    size_t start = (r.head + r.cap - (size_t)want) % r.cap;
+    // Columns span the FULL window, not just the samples the ring holds. When the
+    // ring held less than the window (any reboot, or a fresh unit), the old code
+    // stretched what it had across the whole width, so 12h and 24h drew the same
+    // picture under different axis labels. Samples older than the ring's oldest
+    // are simply gaps on the left; the data sits at the right, where "now" is.
+    const int ivS = (int)(r.intervalMs / 1000);
+    const int want = mins * 60 / ivS;                       // samples in the window
+    int have = want; if (have > (int)r.count) have = r.count;
+    if (have < 2) { d.histCount = 0; return; }
+    const int missing = want - have;                        // leading gap, in samples
+    const int out = want < guition::HIST_POINTS ? want : guition::HIST_POINTS;
+    const size_t start = (r.head + r.cap - (size_t)have) % r.cap;  // oldest sample we HAVE
     const EnvRing& er = mins > 60 ? gEnv : gEnvFine;   // 60s ring for windows up to an hour
     const int ivE = (int)(er.intervalMs / 1000);
-    const int depthSec = want * (int)(r.intervalMs / 1000);
-    int wantE = (depthSec + ivE - 1) / ivE;
-    if (wantE > (int)er.count) wantE = er.count;
-    const size_t startE = (er.head + er.cap - (size_t)wantE) % er.cap;
+    const int wantE = (want * ivS + ivE - 1) / ivE;         // env samples in the window
+    int haveE = wantE; if (haveE > (int)er.count) haveE = er.count;
+    const int missingE = wantE - haveE;
+    const size_t startE = (er.head + er.cap - (size_t)haveE) % er.cap;
     int16_t holdE[4] = {-32768, -32768, -32768, -32768};
-    if ((int)er.count > wantE) {   // seed from the sample just before the window
+    if (missingE == 0 && (int)er.count > haveE) {   // the window is fully covered: seed from the sample just before it
         const EnvSample& sd = er.buf[(startE + er.cap - 1) % er.cap];
-        holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
-    } else if (&er == &gEnvFine && gEnv.count) {   // nothing earlier on the 60s ring: newest 5-min sample
-        const EnvSample& sd = gEnv.buf[(gEnv.head + gEnv.cap - 1) % gEnv.cap];
         holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
     }
     // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
@@ -185,7 +188,8 @@ static void collectHistory(guition::DashData& d) {
         if (hi > want) hi = want;
         int16_t peak[6]; bool has[6] = {false, false, false, false, false, false};
         for (int si = lo; si < hi; ++si) {
-            const HistSample& s = r.buf[(start + (size_t)si) % r.cap];
+            if (si < missing) continue;                      // before the oldest sample we have
+            const HistSample& s = r.buf[(start + (size_t)(si - missing)) % r.cap];
             const int16_t fv[6] = {s.battery, s.solar, s.charger, s.dcdc, s.load, s.soc};
             for (int f = 0; f < 6; ++f) {
                 if (fv[f] == -32768) continue;
@@ -210,7 +214,8 @@ static void collectHistory(guition::DashData& d) {
             if (hiE > wantE) hiE = wantE;
             long sum[4] = {0, 0, 0, 0}; int cnt[4] = {0, 0, 0, 0};
             for (int si = loE; si < hiE; ++si) {
-                const EnvSample& e = er.buf[(startE + (size_t)si) % er.cap];
+                if (si < missingE) continue;
+                const EnvSample& e = er.buf[(startE + (size_t)(si - missingE)) % er.cap];
                 const int16_t ev[4] = {e.t, e.h, e.p, e.g};
                 for (int f = 0; f < 4; ++f) if (ev[f] != -32768) { sum[f] += ev[f]; ++cnt[f]; }
             }
