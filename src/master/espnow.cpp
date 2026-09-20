@@ -287,7 +287,12 @@ static bool sendHistChunk(uint8_t ring, uint16_t offset) {
         for (uint8_t i = 0; i < n; ++i)
             memcpy(&c.pts[i], &r.buf[(r.head + r.cap - r.count + offset + i) % r.cap], sizeof(HistPointW));
     }
-    return esp_now_send(gHistPeerMac, (const uint8_t*)&c, sizeof(c)) == ESP_OK;
+    esp_err_t e = esp_now_send(gHistPeerMac, (const uint8_t*)&c, sizeof(c));
+    if (e != ESP_OK && e != ESP_ERR_ESPNOW_NO_MEM) {  // NO_MEM = queue full, retried next tick
+        static uint32_t lastErrMs = 0;
+        if (millis() - lastErrMs > 5000) { lastErrMs = millis(); Serial.printf("[hist] chunk send err 0x%x\n", (unsigned)e); }
+    }
+    return e == ESP_OK;
 }
 
 // Called each master loop: begin a pull on request, then gently paced-send the

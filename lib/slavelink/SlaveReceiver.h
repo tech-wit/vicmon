@@ -194,8 +194,17 @@ class Receiver {
     if (len == (int)sizeof(HistChunk)) {
       HistChunk c;
       memcpy(&c, data, sizeof(c));
-      if (validHistChunk(c) && histActive_ && paired_ != 0 && c.masterId == paired_)
+      if (validHistChunk(c) && histActive_ && paired_ != 0 && c.masterId == paired_) {
         stageChunk(c);
+      } else {
+        // A chunk we won't take: another master's, or one arriving after we gave up.
+        static uint32_t lastRejMs = 0;
+        if (millis() - lastRejMs > 10000) {
+          lastRejMs = millis();
+          Serial.printf("[slave] hist chunk ignored: from %08X (paired %08X) valid=%d active=%d\n",
+                        (unsigned)c.masterId, (unsigned)paired_, validHistChunk(c), histActive_);
+        }
+      }
       return;
     }
     // ---- cross-version pairing ------------------------------------------
@@ -289,6 +298,14 @@ class Receiver {
     }
     got[idx] = 1;
     lastChunkMs_ = millis();
+    if (isNew) {
+      static uint32_t lastLogMs = 0;
+      if (lastLogMs == 0 || millis() - lastLogMs > 5000) {
+        lastLogMs = millis();
+        Serial.printf("[slave] hist chunk ring%u off%u n%u (totals fine=%u coarse=%u env=%u) %u%%\n",
+                      c.ring, c.offset, c.count, fineTotal_, coarseTotal_, envTotal_, histPercent());
+      }
+    }
     // Forward progress (a chunk we didn't have) refreshes the give-up budget, so a
     // weak-but-alive link that keeps trickling in new chunks never exhausts its
     // retries and resets to zero — the cap only trips on a genuinely stalled link.
@@ -343,17 +360,34 @@ class Receiver {
     ensureHistPeer();
     HistReq r;
     fillHistReq(r, paired_);
-    esp_now_send(masterMac_, (const uint8_t*)&r, sizeof(r));
+    esp_err_t e = esp_now_send(masterMac_, (const uint8_t*)&r, sizeof(r));
     lastHistReqMs_ = millis();
+    // Say what happened: a request that never leaves (no peer, NO_MEM) and one the
+    // master ignores look identical from the outside — "syncing 0%" for ever.
+    Serial.printf("[slave] hist req #%u -> ..%02X:%02X peer=%d err=0x%x (have fine=%u coarse=%u env=%u)\n",
+                  (unsigned)histAttempts_ + 1, masterMac_[4], masterMac_[5], histPeerAdded_, (unsigned)e,
+                  (unsigned)countGot(fineGot_, kFineChunks), (unsigned)countGot(coarseGot_, kCoarseChunks),
+                  (unsigned)countGot(envGot_, kEnvChunks));
+  }
+  static uint16_t countGot(const uint8_t* got, uint16_t n) {
+    uint16_t c = 0; if (!got) return 0;
+    for (uint16_t i = 0; i < n; ++i) c += got[i];
+    return c;
   }
   void ensureHistPeer() {
     if (histPeerAdded_) return;
+    // The master's MAC may already be registered — the OTA clone engine adds the
+    // same unicast peer for a push/pull. Treat an existing entry as success (the
+    // master-side ensureHistPeer learned this the hard way in July).
+    if (esp_now_is_peer_exist(masterMac_)) { histPeerAdded_ = true; return; }
     esp_now_peer_info_t p = {};
     memcpy(p.peer_addr, masterMac_, 6);
     p.channel = 0;      // current channel
     p.encrypt = false;
     p.ifidx = manageWifi_ ? WIFI_IF_STA : WIFI_IF_AP;
-    if (esp_now_add_peer(&p) == ESP_OK) histPeerAdded_ = true;
+    esp_err_t e = esp_now_add_peer(&p);
+    if (e == ESP_OK || e == ESP_ERR_ESPNOW_EXIST) histPeerAdded_ = true;
+    else Serial.printf("[slave] hist add_peer failed 0x%x\n", (unsigned)e);
   }
   // Resilient, resumable pull: re-send the request whenever progress stalls — a
   // lost request (no chunk at all) is nudged quickly, a mid-transfer stall a bit
