@@ -444,6 +444,30 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
 
 ## Open items / unverified
 
+- **Wire v9 rollout pending (2026-09-20).** 0.7.31 (wire v9: 60 s env ring synced, stream
+  order fine → env-fine → coarse → env) is on the bench dev Capsule and written to the
+  bench LilyGo; the car Capsule + Guition are on 0.7.28 (v8). Order: LilyGo → push to the
+  car Capsule from its Firmware page → the Guition pulls itself. Until then the LilyGo
+  (homed to the car) reports the car master as foreign.
+- **Car history sync showed 0% on both car slaves (0.7.28).** Not root-caused: from the
+  bench the car Capsule is only intermittently audible (60 % drops, then silent), so no
+  chunk ever arrived there; the Guition next to it in the car was not observed. 0.7.29+
+  logs every step (`[slave] hist req … err=`, `[slave] hist chunk …%`, `[hist] chunk send
+  err`) — read the slave log, or the car Capsule's over USB (`[hist] req from … peer=1`),
+  when next in range. Note: the car Capsule's graph history was legitimately discarded on
+  the 0.7.6 → 0.7.28 upgrade (history file v3 → v5 "starting fresh"); Week/lifetime stats
+  survive (NVS blob version unchanged).
+- **LilyGo dropped off USB after the 0.7.31 flash reset** (15:01, no re-enumeration; the
+  image verified). Nothing in the firmware touches USB or sleeps — check the board /
+  RST / replug. Standing caveat: the S3 USB-JTAG RTS reset is a pulse, and a flash reset
+  does not always re-enumerate.
+- **Slave boot-time ideas, not done** (user: ~10 s to sync is fine): keep the slave's
+  persisted rings at boot instead of clearing them in `setupSlave()` (the first
+  `slaveLoop()` pass also clears every ring because `gLastPaired` starts at 0 — fix that
+  first); keep partial pull progress across the 20-attempt give-up; the 5 s pre-pull wait.
+- **Standalone `guition` PlatformIO env no longer compiles** (`src/guition/main.cpp` calls
+  `diagHit()` with 4 args). Dead demo — the universal `s3` image is the only one flashed.
+
 - **Orion XS (0x0F) and SolarCharger (0x01) parsers VERIFIED** against real
   hardware — the "4wd" profile runs an Orion XS + solar charger + a second BMV,
   and their values cross-check with VictronConnect (2026-06-28).
