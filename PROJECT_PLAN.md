@@ -446,6 +446,8 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   ESP-NOW) and neither crashes, but the *layouts* have not been looked at —
   particularly the pressure axis labels ("1019.3"), the widest thing on either
   page, in the Guition's 52 px gutter and the LilyGo's 34 px one.
+- **Guition Environment page: the temperature and humidity values print over the top of their
+  labels** (reported 2026-09-20, `lib/guition/gfx_env.cpp`). Layout only; not yet fixed.
 - **Unit ENV Pro is M5Capsule-only by design.** Grove Port A pins differ per
   board (Capsule/StampS3/Dial/DinMeter = SDA 13/SCL 15; CoreS3/AtomS3/Cardputer =
   SDA 2/SCL 1), and anything that isn't a Guition/LilyGo/Capsule is `HW_HEADLESS`

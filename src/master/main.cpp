@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.25";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.26";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -343,6 +343,7 @@ void saveApCfg(const String& ssid, const String& pass) {
 static uint16_t gHistLoadedFine = 0, gHistLoadedCoarse = 0, gHistLoadedEnv = 0, gHistLoadedEnvF = 0;
 static uint32_t gHistGapSec = 0;   // downtime bridged with n/a samples at the last load
 static uint32_t gLastHistSaveMs = 0;  // 0 = not saved since boot
+static bool gHistLoadDone = false;    // set once loadHistFile() has run (restored or deliberately fresh)
 static bool gLastHistSaveOk = false;
 static const uint32_t kHistSaveMs = 2 * 60 * 1000;
 static void dumpHist() {
@@ -871,6 +872,7 @@ static void readRing(File& f, HistRing& r, uint16_t n) {
 
 void saveHistFile(int profile) {
     if (!gFsOk) return;
+    if (!gHistLoadDone) { Serial.println("[hist] save skipped: boot-time load not complete"); return; }  // never clobber a file we have not read
     if (gFine.count < gHistLoadedFine || gCoarse.count < gHistLoadedCoarse || gEnv.count < gHistLoadedEnv || gEnvFine.count < gHistLoadedEnvF) return;
     // Write to a temp file and rename over the old one. LittleFS rename is
     // atomic, so a reset or reflash landing mid-write (every 5 min, so not rare
@@ -1240,6 +1242,7 @@ void applyProfile(int pid) {
     gCoarse.clear();
 #ifndef VICMON_SIM
     loadHistFile(pid);  // restore persisted history for this profile (no-op under sim)
+    gHistLoadDone = true;  // from here on the periodic save may run (a failed/absent load starts fresh, deliberately)
 #endif
 }
 
