@@ -38,8 +38,14 @@ static volatile bool gHistReqPending = false;
 static uint8_t gHistReqMac[6] = {0};
 static bool gHistSending = false, gHistPeerAdded = false;
 static uint8_t gHistPeerMac[6] = {0};
-static uint8_t gHistRing = 0;      // 0 fine, 1 coarse, 2 env
+static uint8_t gHistStep = 0;      // index into kHistRingOrder
+static uint8_t gHistRing = 0;      // ring being sent: 0 fine, 1 coarse, 2 env, 3 env-fine
 static uint16_t gHistOffset = 0;
+// Send order. The 1-hour rings go first (fine 40 chunks, env-fine 3, env 11) so
+// every <=1h page is complete a few seconds in; coarse (80 chunks, 12h/24h) is
+// the bulk and goes last. A slave that powers on with the car sees the pages it
+// looks at first fill first.
+static const uint8_t kHistRingOrder[4] = {0, 3, 2, 1};
 
 // Receive callback (master role). Only handles the tiny history request; the
 // bulky reply is sent from the loop so we never block the WiFi task.
@@ -307,7 +313,7 @@ void serviceHistSend() {
         Serial.printf("[hist] req from ..%02X:%02X peer=%d fine=%u coarse=%u env=%u envfine=%u\n",
                       gHistReqMac[4], gHistReqMac[5], gHistPeerAdded,
                       (unsigned)gFine.count, (unsigned)gCoarse.count, (unsigned)gEnv.count, (unsigned)gEnvFine.count);
-        if (gHistPeerAdded) { gHistSending = true; gHistRing = 0; gHistOffset = 0; }
+        if (gHistPeerAdded) { gHistSending = true; gHistStep = 0; gHistRing = kHistRingOrder[0]; gHistOffset = 0; }
     }
     if (!gHistSending) return;
     static uint8_t tick = 0;
@@ -317,8 +323,8 @@ void serviceHistSend() {
         const uint16_t total = gHistRing == 0 ? (uint16_t)gFine.count : gHistRing == 1 ? (uint16_t)gCoarse.count
                              : gHistRing == 2 ? (uint16_t)gEnv.count : (uint16_t)gEnvFine.count;
         const uint16_t stride = gHistRing >= 2 ? slavelink::kEnvChunkPts : slavelink::kHistChunkPts;
-        if (gHistOffset >= total) {  // this ring done: fine -> coarse -> env -> env-fine
-            if (gHistRing < 3) { ++gHistRing; gHistOffset = 0; continue; }
+        if (gHistOffset >= total) {  // this ring done: next in kHistRingOrder
+            if (gHistStep < 3) { ++gHistStep; gHistRing = kHistRingOrder[gHistStep]; gHistOffset = 0; continue; }
             gHistSending = false; Serial.println("[hist] send complete"); break;
         }
         if (!sendHistChunk(gHistRing, gHistOffset)) break;  // queue full -> next tick
