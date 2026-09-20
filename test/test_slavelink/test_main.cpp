@@ -86,11 +86,43 @@ void test_fits_espnow() {
     TEST_ASSERT_GREATER_THAN(0, kEnvChunkPts);
 }
 
+// A slave must be able to PAIR to a master on any wire version: the adopt path
+// reads only magic + masterId + F_PAIRING at fixed offsets from a frame whose
+// telemetry it must otherwise refuse.
+void test_pairing_independent_of_wire_version() {
+    Snapshot s = {};
+    s.magic0 = kMagic0; s.magic1 = kMagic1;
+    s.version = kVersion + 1;          // a future wire version
+    s.masterId = 0xCAFEBABE; s.flags = F_PAIRING;
+    uint8_t buf[sizeof(Snapshot)];
+    memcpy(buf, &s, sizeof(s));
+    Snapshot r; memcpy(&r, buf, sizeof(r));
+    TEST_ASSERT_FALSE(validHeader(r));                  // telemetry refused ...
+    TEST_ASSERT_TRUE((int)sizeof(buf) >= kSnapHdrMin);
+    uint32_t fid; memcpy(&fid, buf + kSnapMasterIdOff, sizeof(fid));
+    TEST_ASSERT_EQUAL_UINT32(0xCAFEBABE, fid);           // ... but the invite is still readable
+    TEST_ASSERT_TRUE(buf[kSnapFlagsOff] & F_PAIRING);
+    TEST_ASSERT_EQUAL_UINT8(kVersion + 1, buf[2]);       // and the version byte says why
+}
+
+// The firmware clone must not care about kVersion at all: its frames validate on
+// their own protocol byte.
+void test_ota_independent_of_wire_version() {
+    OtaHello h = {};
+    h.magic0 = kMagic0; h.magic1 = kOtaHelloMagic1; h.otaProto = kOtaProto;
+    TEST_ASSERT_TRUE(validOta(&h, kOtaHelloMagic1));
+    h.otaProto = kOtaProto + 1;
+    TEST_ASSERT_FALSE(validOta(&h, kOtaHelloMagic1));    // gated on ITS byte, nothing else
+    TEST_ASSERT_TRUE(kOtaProto != 0);
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_header);
     RUN_TEST(test_roundtrip_bytes);
     RUN_TEST(test_encode_decode);
     RUN_TEST(test_fits_espnow);
+    RUN_TEST(test_pairing_independent_of_wire_version);
+    RUN_TEST(test_ota_independent_of_wire_version);
     return UNITY_END();
 }

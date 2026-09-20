@@ -464,9 +464,7 @@ class Receiver {
     envStage_ = new (std::nothrow) EnvPointW[kHistEnvMax];
     envGot_ = new (std::nothrow) uint8_t[kEnvChunks]();
   }
-  // Byte offsets into the Snapshot header, stable across every wire version since
-  // v2 — see the cross-version pairing note in the receive path.
-  static const int kSnapMasterIdOff = 8, kSnapFlagsOff = 12, kSnapHdrMin = 13;
+  // Snapshot header offsets for cross-version pairing: slavelink::kSnap*Off (SlaveLink.h, asserted there).
 
   // Shared "no data" point returned by finePoint/coarsePoint before staging exists.
   static const HistPointW& kNaPoint() {

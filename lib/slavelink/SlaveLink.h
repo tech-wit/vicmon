@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 // Wire format for the master -> slave live-data link (ESP-NOW broadcast).
@@ -267,6 +268,26 @@ struct OtaHello {
     char ver[kOtaVerLen];
 };
 #pragma pack(pop)
+
+// ---- What must NEVER move ---------------------------------------------------
+// Two things are deliberately independent of kVersion, so a master and a slave
+// on different firmware can still pair and update each other:
+//   * PAIRING: a slave adopts a master by reading only the magic, the masterId
+//     and the F_PAIRING flag from a Snapshot it otherwise cannot decode. They
+//     are read at these byte offsets from ANY wire version.
+//   * FIRMWARE CLONE: the OTA frames are validated on their own kOtaProto byte,
+//     never on kVersion, and filtered on the paired masterId.
+// The asserts below turn that from a comment into a build error.
+static const int kSnapMasterIdOff = 8, kSnapFlagsOff = 12, kSnapHdrMin = 13;
+static_assert(offsetof(Snapshot, magic0) == 0 && offsetof(Snapshot, magic1) == 1 &&
+              offsetof(Snapshot, version) == 2, "Snapshot magic/version bytes must stay at 0/1/2");
+static_assert(offsetof(Snapshot, masterId) == kSnapMasterIdOff, "cross-version pairing reads masterId at byte 8");
+static_assert(offsetof(Snapshot, flags) == kSnapFlagsOff, "cross-version pairing reads flags at byte 12");
+static_assert(sizeof(Snapshot) >= kSnapHdrMin, "Snapshot header shorter than the pairing read");
+static_assert(offsetof(StatsFrame, version) == 2 && offsetof(HistReq, version) == 2 &&
+              offsetof(HistChunk, version) == 2, "the receiver reads the wire version at byte 2 of every telemetry frame");
+static_assert(offsetof(OtaHello, magic0) == 0 && offsetof(OtaHello, magic1) == 1 &&
+              offsetof(OtaHello, otaProto) == 2, "validOta reads the OTA protocol byte at 2");
 
 inline bool validOta(const void* p, uint8_t magic1) {
     const uint8_t* b = (const uint8_t*)p;
