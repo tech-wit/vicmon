@@ -425,6 +425,11 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   every tap meant for "Switch to Slave" returned Restart. Fixed by making Restart
   an ordinary row and paginating the menu. When adding a fixed control to a list
   screen, check it against the *longest* list the screen can show.
+- **Lay LCD rows out from measured text, not guessed offsets.** The Guition
+  Environment header put each live value a fixed 90 px after its label; FreeSans is
+  proportional and "Temperature" is ~100 px, so the reading printed over the label
+  (0.7.27). `textW()` (getTextBounds) is the shared helper — use it whenever one
+  string follows another on a row.
 
 ## Open items / unverified
 
@@ -446,8 +451,6 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   ESP-NOW) and neither crashes, but the *layouts* have not been looked at —
   particularly the pressure axis labels ("1019.3"), the widest thing on either
   page, in the Guition's 52 px gutter and the LilyGo's 34 px one.
-- **Guition Environment page: the temperature and humidity values print over the top of their
-  labels** (reported 2026-09-20, `lib/guition/gfx_env.cpp`). Layout only; not yet fixed.
 - **Unit ENV Pro is M5Capsule-only by design.** Grove Port A pins differ per
   board (Capsule/StampS3/Dial/DinMeter = SDA 13/SCL 15; CoreS3/AtomS3/Cardputer =
   SDA 2/SCL 1), and anything that isn't a Guition/LilyGo/Capsule is `HW_HEADLESS`

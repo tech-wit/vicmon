@@ -119,14 +119,19 @@ static void envChart(Arduino_GFX* c, const DashData& d, int cardY,
   c->fillRoundRect(cardX, cardY, cardW, EC_H, 8, kCard);
 
   // Header: "Temperature 24.5C" left, "Humidity 54.1%RH" right, each in its colour.
-  snprintf(buf, sizeof(buf), "%s ", left.name);
-  gtext(c, &FreeSans9pt7b, cardX + 6, cardY + 15, buf, left.col, L);
+  // The value follows its label by a measured gap — FreeSans is proportional and
+  // the four labels range from ~30 px ("Gas") to ~100 px ("Temperature"), so a
+  // fixed offset put the temperature reading on top of its label.
+  const int hdrY = cardY + 15, GAP = 6;
+  gtext(c, &FreeSans9pt7b, cardX + 6, hdrY, left.name, left.col, L);
   numOr(buf, sizeof(buf), left.nowValid, left.now, left.dp, left.unit);
-  gtext(c, &FreeSans9pt7b, cardX + 6 + 90, cardY + 15, buf, left.col, L);
+  gtext(c, &FreeSans9pt7b, cardX + 6 + textW(c, &FreeSans9pt7b, left.name) + GAP, hdrY,
+        buf, left.col, L);
   numOr(buf, sizeof(buf), right.nowValid, right.now, right.dp, right.unit);
-  gtext(c, &FreeSans9pt7b, cardX + cardW - 6, cardY + 15, buf, right.col, R);
-  snprintf(buf, sizeof(buf), "%s", right.name);
-  gtext(c, &FreeSans9pt7b, cardX + cardW - 6 - 74, cardY + 15, buf, right.col, R);
+  const int rValX = cardX + cardW - 6;
+  gtext(c, &FreeSans9pt7b, rValX, hdrY, buf, right.col, R);
+  gtext(c, &FreeSans9pt7b, rValX - textW(c, &FreeSans9pt7b, buf) - GAP, hdrY,
+        right.name, right.col, R);
 
   float lLo, lHi, rLo, rHi;
   bool haveL = envRange(left, n, lLo, lHi);

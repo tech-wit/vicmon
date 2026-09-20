@@ -21,6 +21,13 @@ void gtext(Arduino_GFX* c, const GFXfont* f, int x, int y, const char* s,
   c->print(s);
 }
 
+int textW(Arduino_GFX* c, const GFXfont* f, const char* s) {
+  int16_t bx, by; uint16_t bw, bh;
+  c->setFont(f);
+  c->getTextBounds(s, 0, 0, &bx, &by, &bw, &bh);
+  return bw;
+}
+
 void numOr(char* buf, size_t n, bool valid, float v, int dp, const char* unit) {
   if (!valid) snprintf(buf, n, "--%s", unit);
   else        snprintf(buf, n, "%.*f%s", dp, v, unit);

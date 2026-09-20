@@ -63,6 +63,10 @@ void renderZoomRow(Arduino_GFX* c, int activeMin);
 // Shared drawing primitives (defined in gfx_common.cpp).
 void gtext(Arduino_GFX* c, const GFXfont* f, int x, int y, const char* s,
            uint16_t color, Align a = L);
+// Rendered width of `s` in font `f`, for laying a row out from measured text
+// rather than guessed offsets (proportional fonts: "Temperature" is ~100 px,
+// "Gas" ~30 px, and a hard-coded gap fits at most one of them).
+int textW(Arduino_GFX* c, const GFXfont* f, const char* s);
 void numOr(char* buf, size_t n, bool valid, float v, int dp, const char* unit);
 uint16_t modeColor(const DashData& d);
 
