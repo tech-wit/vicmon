@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.29";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.30";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -1572,6 +1572,16 @@ static void applyPulledHistory() {
         for (uint16_t i = 0; i < gRx.envCount(); ++i) {
             EnvSample e; memcpy(&e, &gRx.envPoint(i), sizeof(e));
             gEnv.push(e, millis());
+        }
+    }
+    // v9: the 60 s env ring too — it is what the 1m/10m/1h Environment windows
+    // draw, and before this a slave only ever filled it live, one sample a
+    // minute, so those windows stayed empty for up to an hour after every boot.
+    if (gRx.envFineCount() > 0) {
+        gEnvFine.clear();
+        for (uint16_t i = 0; i < gRx.envFineCount(); ++i) {
+            EnvSample e; memcpy(&e, &gRx.envFinePoint(i), sizeof(e));
+            gEnvFine.push(e, millis());
         }
     }
 }

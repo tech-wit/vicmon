@@ -24,7 +24,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 8;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688); v7 env on its own ring; v8 StatsFrame carries per-day NET charged/discharged Ah
+static const uint8_t kVersion = 9;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688); v7 env on its own ring; v8 StatsFrame carries per-day NET charged/discharged Ah; v9 HistChunk carries the 60s env ring (ring 3) so a slave's 1m/10m/1h env windows repopulate
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -160,6 +160,7 @@ struct EnvPointW {
     int16_t t, h, p, g;
 };
 static const uint16_t kHistEnvMax = 288;   // 24h @ 5 min
+static const uint16_t kHistEnvFineMax = 60; // 1h @ 60 s (chunk ring == 3) — what the <=1h windows draw
 
 struct HistReq {
     uint8_t magic0, magic1, version, pad_;  // 'V','Q'
@@ -169,7 +170,7 @@ static const int kHistChunkPts = 18;         // 18*12 + 18 hdr = 234 B (< 250)
 // Env points (8 B) are packed into the same pts[] byte area when ring == 2.
 static const int kEnvChunkPts = (kHistChunkPts * 12) / 8;   // 27
 struct HistChunk {
-    uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse, 2 = env
+    uint8_t magic0, magic1, version, ring;   // 'V','C'; ring 0 = fine, 1 = coarse, 2 = env (5 min), 3 = env-fine (60 s)
     uint32_t masterId;
     uint16_t fineTotal, coarseTotal;         // BOTH ring totals in every chunk, so the
                                              // slave knows to wait for coarse even while
@@ -177,8 +178,9 @@ struct HistChunk {
     uint16_t offset;                         // index of pts[0] within `ring`
     uint8_t count;                           // valid samples in pts[] (<= kHistChunkPts, or kEnvChunkPts for ring 2)
     uint8_t pad_;
-    uint16_t envTotal;                       // env ring total (ring 2 is sent last)
-    HistPointW pts[kHistChunkPts];           // ring 2: reinterpret as EnvPointW[kEnvChunkPts]
+    uint16_t envTotal;                       // env ring total (rings are sent 0,1,2,3)
+    uint16_t envFineTotal;                   // v9: 60 s env ring total (ring 3, sent last)
+    HistPointW pts[kHistChunkPts];           // rings 2/3: reinterpret as EnvPointW[kEnvChunkPts]
 };
 
 // ---- Firmware clone over ESP-NOW (OTA push) --------------------------------

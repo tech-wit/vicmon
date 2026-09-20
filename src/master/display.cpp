@@ -173,6 +173,12 @@ static void collectHistory(guition::DashData& d) {
     if (missingE == 0 && (int)er.count > haveE) {   // the window is fully covered: seed from the sample just before it
         const EnvSample& sd = er.buf[(startE + er.cap - 1) % er.cap];
         holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
+    } else if (&er == &gEnvFine && gEnv.count) {
+        // The 60 s ring has nothing earlier (fresh boot, backlog still syncing):
+        // seed from the newest 5-min sample so a short window draws the current
+        // level instead of nothing — the same fallback the web chart uses.
+        const EnvSample& sd = gEnv.buf[(gEnv.head + gEnv.cap - 1) % gEnv.cap];
+        holdE[0] = sd.t; holdE[1] = sd.h; holdE[2] = sd.p; holdE[3] = sd.g;
     }
     // Peak-preserving bucket downsample (not nearest-sample decimation, not mean).
     // Nearest-sample aliases — every column jumps as the window slides. Mean is

@@ -243,7 +243,7 @@ extern int gScanResults;
 extern uint32_t gScanHeapCost;
 extern HistRing gFine, gCoarse;  // continuous history rings (backing arrays in main.cpp)
 extern EnvRing gEnv;             // environment ring, 5-min cadence, 24h (persisted, synced to slaves)
-extern EnvRing gEnvFine;         // environment ring, 60s cadence, 1h (live only) — for the short windows
+extern EnvRing gEnvFine;         // environment ring, 60s cadence, 1h (persisted, synced to slaves since wire v9) — for the short windows
 
 // ---- cross-module function prototypes --------------------------------------
 // Defined in main.cpp (the data/registry core), called from web.cpp etc.

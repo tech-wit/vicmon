@@ -269,15 +269,17 @@ static bool sendHistChunk(uint8_t ring, uint16_t offset) {
     c.fineTotal = (uint16_t)gFine.count;      // all totals in every chunk so the slave
     c.coarseTotal = (uint16_t)gCoarse.count;  // knows to wait for the rings sent later
     c.envTotal = (uint16_t)gEnv.count;
+    c.envFineTotal = (uint16_t)gEnvFine.count;
     c.offset = offset;
-    if (ring == 2) {
-        uint16_t remain = (uint16_t)gEnv.count - offset;
+    if (ring == 2 || ring == 3) {
+        const EnvRing& er = (ring == 2) ? gEnv : gEnvFine;
+        uint16_t remain = (uint16_t)er.count - offset;
         uint8_t n = remain > kEnvChunkPts ? kEnvChunkPts : (uint8_t)remain;
         c.count = n;
         static_assert(sizeof(EnvSample) == sizeof(slavelink::EnvPointW), "EnvSample and EnvPointW must stay layout-compatible");
         EnvPointW* pts = reinterpret_cast<EnvPointW*>(c.pts);
         for (uint8_t i = 0; i < n; ++i)
-            memcpy(&pts[i], &gEnv.buf[(gEnv.head + gEnv.cap - gEnv.count + offset + i) % gEnv.cap], sizeof(EnvPointW));
+            memcpy(&pts[i], &er.buf[(er.head + er.cap - er.count + offset + i) % er.cap], sizeof(EnvPointW));
     } else {
         const HistRing& r = (ring == 0) ? gFine : gCoarse;
         uint16_t remain = (uint16_t)r.count - offset;
@@ -302,9 +304,9 @@ void serviceHistSend() {
     if (gHistReqPending) {
         gHistReqPending = false;
         ensureHistPeer(gHistReqMac);
-        Serial.printf("[hist] req from ..%02X:%02X peer=%d fine=%u coarse=%u\n",
+        Serial.printf("[hist] req from ..%02X:%02X peer=%d fine=%u coarse=%u env=%u envfine=%u\n",
                       gHistReqMac[4], gHistReqMac[5], gHistPeerAdded,
-                      (unsigned)gFine.count, (unsigned)gCoarse.count);
+                      (unsigned)gFine.count, (unsigned)gCoarse.count, (unsigned)gEnv.count, (unsigned)gEnvFine.count);
         if (gHistPeerAdded) { gHistSending = true; gHistRing = 0; gHistOffset = 0; }
     }
     if (!gHistSending) return;
@@ -312,10 +314,11 @@ void serviceHistSend() {
     if (++tick & 1) return;  // pace: send on every other 250ms tick (gentler = less loss)
     const int kBatch = 6;  // chunks per send (queue usually fills after ~4)
     for (int i = 0; i < kBatch; ++i) {
-        const uint16_t total = gHistRing == 0 ? (uint16_t)gFine.count : gHistRing == 1 ? (uint16_t)gCoarse.count : (uint16_t)gEnv.count;
-        const uint16_t stride = gHistRing == 2 ? slavelink::kEnvChunkPts : slavelink::kHistChunkPts;
-        if (gHistOffset >= total) {  // this ring done: fine -> coarse -> env
-            if (gHistRing < 2) { ++gHistRing; gHistOffset = 0; continue; }
+        const uint16_t total = gHistRing == 0 ? (uint16_t)gFine.count : gHistRing == 1 ? (uint16_t)gCoarse.count
+                             : gHistRing == 2 ? (uint16_t)gEnv.count : (uint16_t)gEnvFine.count;
+        const uint16_t stride = gHistRing >= 2 ? slavelink::kEnvChunkPts : slavelink::kHistChunkPts;
+        if (gHistOffset >= total) {  // this ring done: fine -> coarse -> env -> env-fine
+            if (gHistRing < 3) { ++gHistRing; gHistOffset = 0; continue; }
             gHistSending = false; Serial.println("[hist] send complete"); break;
         }
         if (!sendHistChunk(gHistRing, gHistOffset)) break;  // queue full -> next tick

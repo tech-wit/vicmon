@@ -436,6 +436,11 @@ Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble
   return. A slave paired across wire versions never gets a snapshot, so its LCD
   Firmware page went blank on precisely the screen used to push the fix (0.7.28).
   Fill what this unit knows about itself first, then what the link provides.
+- **Every ring a page draws from must be in the backlog sync.** The 60 s env ring
+  (`gEnvFine`, what the 1m/10m/1h Environment windows draw) was persisted on the
+  master but never sent to slaves, so on a slave those windows filled live at one
+  point a minute and were empty for an hour after every boot — while the 5-min ring
+  synced fine and 12h/24h looked right. Wire v9 sends it as chunk ring 3 (0.7.30).
 
 ## Open items / unverified
 
