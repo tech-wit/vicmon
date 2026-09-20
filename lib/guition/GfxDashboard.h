@@ -78,6 +78,7 @@ struct DashData {
   static const int DAYS_N = 7;
   uint32_t dayStamp[DAYS_N];       // yyyymmdd (clocked) or run-day index (no clock)
   float    daySolarAh[DAYS_N], dayDcdcAh[DAYS_N], dayChargerAh[DAYS_N], dayLoadAh[DAYS_N];
+  float    dayChargedAh[DAYS_N], dayDischargedAh[DAYS_N];  // NET battery flow per day (0 = unknown on days archived before it existed)
   int      dayCount = 0;
   uint32_t dayNow = 0;             // current day key (run-index or yyyymmdd) for axis labels
   bool     clockOk = false;        // a real/manual clock is set (date labels vs "Day N")

@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.21";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.22";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -396,10 +396,10 @@ static void dumpWeek() {
                       gRx.hasStats() ? 1u : 0u, (unsigned)f.clockOk,
                       (unsigned long)f.dayNow, (unsigned)f.dayCount);
         for (int i = 0; i < (int)f.dayCount && i < 7; ++i)
-            Serial.printf("[week]   day[%d] stamp=%lu sol=%u dcdc=%u chg=%u load=%u\n", i,
+            Serial.printf("[week]   day[%d] stamp=%lu sol=%u dcdc=%u chg=%u load=%u | net in=%u out=%u\n", i,
                           (unsigned long)f.dayStamp[i], (unsigned)f.daySolarAh[i],
                           (unsigned)f.dayDcdcAh[i], (unsigned)f.dayChargerAh[i],
-                          (unsigned)f.dayLoadAh[i]);
+                          (unsigned)f.dayLoadAh[i], (unsigned)f.dayChargedAh[i], (unsigned)f.dayDischargedAh[i]);
         Serial.printf("[week]   today in=%lu out=%lu sol=%lu dcdc=%lu chg=%lu load=%lu dur=%lus\n",
                       (unsigned long)f.today.inAh, (unsigned long)f.today.outAh,
                       (unsigned long)f.today.solarAh, (unsigned long)f.today.dcdcAh,

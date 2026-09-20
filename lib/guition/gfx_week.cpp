@@ -124,16 +124,24 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
   const int capFirst = (NSLOT - 1) - capShown;           // first slot holding a real day
   const int dBase = nd - capShown;                       // day-array index of that first day
 
-  auto dayIn = [&](int di) { return d.daySolarAh[di] + d.dayDcdcAh[di] + d.dayChargerAh[di]; };
+  // In = the larger of NET charge and the attributed sources (the sources stack,
+  // any unattributed remainder draws in grey); out = the larger of NET discharge
+  // and load. Same rule as the web chart. A system whose charge source is not a
+  // monitored device used to show empty bars against a meter reading +44 Ah.
+  auto srcIn = [&](int di) { return d.daySolarAh[di] + d.dayDcdcAh[di] + d.dayChargerAh[di]; };
+  auto dayIn = [&](int di) { float s = srcIn(di); return d.dayChargedAh[di] > s ? d.dayChargedAh[di] : s; };
+  auto dayOut = [&](int di) { return d.dayDischargedAh[di] > d.dayLoadAh[di] ? d.dayDischargedAh[di] : d.dayLoadAh[di]; };
   float mx = 1;
   for (int j = 0; j < capShown; ++j) {
     int di = dBase + j;
     if (dayIn(di) > mx) mx = dayIn(di);
-    if (d.dayLoadAh[di] > mx) mx = d.dayLoadAh[di];
+    if (dayOut(di) > mx) mx = dayOut(di);
   }
-  float nowIn = d.statToday.solarAh + d.statToday.dcdcAh + d.statToday.chargerAh;
+  float nowSrc = d.statToday.solarAh + d.statToday.dcdcAh + d.statToday.chargerAh;
+  float nowIn = d.statToday.inAh > nowSrc ? d.statToday.inAh : nowSrc;
+  float nowOut = d.statToday.outAh > d.statToday.loadAh ? d.statToday.outAh : d.statToday.loadAh;
   if (nowIn > mx) mx = nowIn;
-  if (d.statToday.outAh > mx) mx = d.statToday.outAh;
+  if (nowOut > mx) mx = nowOut;
 
   auto yOf = [&](float v) { return py + (int)(ph * (1.0f - v / mx)); };
   for (int g = 0; g <= 2; ++g) {  // gridlines mx, mx/2, 0
@@ -156,7 +164,8 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
       float sol = now ? d.statToday.solarAh   : d.daySolarAh[di];
       float dcd = now ? d.statToday.dcdcAh    : d.dayDcdcAh[di];
       float chg = now ? d.statToday.chargerAh : d.dayChargerAh[di];
-      float out = now ? d.statToday.outAh     : d.dayLoadAh[di];
+      float out = now ? nowOut : dayOut(di);
+      float tot = now ? nowIn : dayIn(di);
       float acc = 0;
       const float vals[3] = {sol, dcd, chg};
       const uint16_t cols[3] = {kSerSolar, kSerDcdc, kSerChg};
@@ -165,6 +174,10 @@ void renderDays(Arduino_GFX* c, const DashData& d) {
         int y0 = yOf(acc), y1 = yOf(acc + v);
         c->fillRect(xi, y1, bw, y0 - y1, cols[sIdx]);
         acc += v;
+      }
+      if (tot - acc > 0.05f) {  // unattributed net charge, in grey
+        int y0 = yOf(acc), y1 = yOf(tot);
+        c->fillRect(xi, y1, bw, y0 - y1, kMuted);
       }
       if (out > 0) { int yo = yOf(out); c->fillRect(xo, yo, bw, base - yo, kSerLoad); }
     }

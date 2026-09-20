@@ -605,21 +605,23 @@ static void pageWeek(const DashData& d) {
     // *yesterday*, wearing a "now" label, and nothing on the page moved until
     // midnight. That is why the week stopped appearing to trend.
     const int NS = 7;
-    float inAh[NS] = {0}, outAh[NS] = {0}, sol[NS] = {0}, dcd[NS] = {0}, chg[NS] = {0};
+    float inAh[NS] = {0}, outAh[NS] = {0}, sol[NS] = {0}, dcd[NS] = {0}, chg[NS] = {0}, net[NS] = {0};
     bool used[NS] = {false};
     char lbl[NS][8];
     for (int s = 0; s < NS; ++s) {
         lbl[s][0] = '\0';
         if (s == NS - 1) {
             sol[s] = d.statToday.solarAh; dcd[s] = d.statToday.dcdcAh;
-            chg[s] = d.statToday.chargerAh; outAh[s] = d.statToday.outAh;
+            chg[s] = d.statToday.chargerAh; net[s] = d.statToday.inAh;
+            outAh[s] = d.statToday.outAh > d.statToday.loadAh ? d.statToday.outAh : d.statToday.loadAh;
             used[s] = true;
             strcpy(lbl[s], "now");
         } else {
             int di = d.dayCount - (NS - 1 - s);
             if (di < 0 || di >= d.dayCount) continue;
             sol[s] = d.daySolarAh[di]; dcd[s] = d.dayDcdcAh[di];
-            chg[s] = d.dayChargerAh[di]; outAh[s] = d.dayLoadAh[di];
+            chg[s] = d.dayChargerAh[di]; net[s] = d.dayChargedAh[di];
+            outAh[s] = d.dayDischargedAh[di] > d.dayLoadAh[di] ? d.dayDischargedAh[di] : d.dayLoadAh[di];
             used[s] = true;
             uint32_t st = d.dayStamp[di];
             if (d.clockOk && st >= kYmdMin)
@@ -629,6 +631,7 @@ static void pageWeek(const DashData& d) {
                 snprintf(lbl[s], sizeof(lbl[s]), "%u", (unsigned)st);
         }
         inAh[s] = sol[s] + dcd[s] + chg[s];
+        if (net[s] > inAh[s]) inAh[s] = net[s];   // NET charge when no monitored source claimed it (same rule as the web)
     }
     float mx = 1.0f;
     for (int s = 0; s < NS; ++s) {
@@ -668,6 +671,8 @@ static void pageWeek(const DashData& d) {
                 g->fillRect(x, midY - acc - h, bw, h, sc[k]);
                 acc += h;
             }
+            int rest = (int)lroundf(inAh[s] / mx * halfH) - acc;   // unattributed remainder, grey
+            if (rest > 0) g->fillRect(x, midY - acc - rest, bw, rest, C_LBL);
             int oh = (int)lroundf(outAh[s] / mx * halfH);
             if (oh > 0) g->fillRect(x, midY + 1, bw, oh, C_LOAD);
         }

@@ -23,7 +23,7 @@ namespace slavelink {
 
 static const uint8_t kMagic0 = 'V';
 static const uint8_t kMagic1 = 'S';
-static const uint8_t kVersion = 7;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688); v7 environment moved off HistPointW onto its own 5-min ring (EnvPointW, chunk ring 2)
+static const uint8_t kVersion = 8;  // v2 masterId+flags; v3 solar W/V, dc-dc V, consumed Ah; v4 capacity; v5 clock (StatsFrame.utcNow); v6 environment (BME688); v7 env on its own ring; v8 StatsFrame carries per-day NET charged/discharged Ah
 
 // Frame flags (bitfield in Snapshot.flags).
 enum Flags : uint8_t {
@@ -133,6 +133,8 @@ struct StatsFrame {
     StatMeterW today, trip, total;                                       // resettable meters
     uint16_t daySolarAh[7], dayDcdcAh[7], dayChargerAh[7], dayLoadAh[7]; // whole Ah per day
     uint32_t dayStamp[7]; // yyyymmdd (clocked) or run-day index per past-day entry
+    uint16_t dayChargedAh[7], dayDischargedAh[7]; // v8: NET battery flow per day (whole Ah) — what the
+                                                  // Week bars draw when no monitored source claimed it
 };
 
 // ---- Graph history sync (on-demand, paced) ---------------------------------

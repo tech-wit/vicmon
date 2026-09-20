@@ -297,6 +297,8 @@ static void collectDash(guition::DashData& d) {
         d.dayDcdcAh[out]    = r.dcdcAh;
         d.dayChargerAh[out] = r.chargerAh;
         d.dayLoadAh[out]    = r.loadAh;
+        d.dayChargedAh[out] = r.chargedAh;
+        d.dayDischargedAh[out] = r.dischargedAh;
         ++out;
     }
     d.dayCount = out;
@@ -487,6 +489,8 @@ static void collectSlaveDash(guition::DashData& d) {
             d.dayDcdcAh[i] = f.dayDcdcAh[i];
             d.dayChargerAh[i] = f.dayChargerAh[i];
             d.dayLoadAh[i] = f.dayLoadAh[i];
+            d.dayChargedAh[i] = f.dayChargedAh[i];
+            d.dayDischargedAh[i] = f.dayDischargedAh[i];
         }
         d.dayCount = n;
     } else {

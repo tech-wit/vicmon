@@ -232,6 +232,8 @@ void sendStatsFrame() {
         f.dayChargerAh[out] = ahU16(r.chargerAh);
         f.dayLoadAh[out] = ahU16(r.loadAh);
         f.dayStamp[out] = r.dayStamp;
+        f.dayChargedAh[out] = ahU16(r.chargedAh);
+        f.dayDischargedAh[out] = ahU16(r.dischargedAh);
         ++out;
     }
     f.dayCount = (uint8_t)out;
