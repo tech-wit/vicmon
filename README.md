@@ -92,7 +92,7 @@ runtime** (NVS flag — switch it from the screen, the AP web page, or serial
 driver + OPI PSRAM are compiled in and used only where the hardware is present, so
 a Guition brings up the dashboard and any other S3 (e.g. an AtomS3) runs headless
 from the *same* binary. Other envs: `atoms3-sim` (synthetic data, no hardware),
-`guition`/`gfxref`/`lvglref` (bench/reference), `native` (host tests), `wroom` (the
+`gfxref`/`lvglref`/`lilygoref` (panel bring-up baselines), `native` (host tests), `wroom` (the
 Phase-1 scanner in `src/wroom/`, classic ESP32).
 
 **Slaves (ESP-NOW):** a slave receives the master's ~4/s broadcast and shows it on

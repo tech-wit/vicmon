@@ -192,7 +192,7 @@ Redraw the SVGs by editing them directly (hand-authored, no toolchain); check wi
 
 ```
 vicmon/
-├── platformio.ini          # envs: s3 (universal S3 image), atoms3-sim, guition, gfxref, lvglref, wroom, native
+├── platformio.ini          # envs: s3 (universal S3 image), atoms3-sim, gfxref, lvglref, lilygoref, wroom, native
 ├── README.md               # usage / quick start
 ├── PROJECT_SPEC.md         # original brief
 ├── PROJECT_PLAN.md         # this file
@@ -223,7 +223,6 @@ vicmon/
 │   │   ├── Signals.*       # signal roles, fields, resolver, NVS bindings
 │   │   ├── Stats.*         # energy meters (Today/Trip/Total) + run-time odometer / day records
 │   │   └── Profiles.*      # ProfileManager (NVS, up to 4 profiles)
-│   ├── guition/main.cpp    # standalone GFX dashboard demo (synthetic data, no WiFi/BLE)
 │   ├── gfxref/main.cpp     # known-good AXS15231B reference baseline
 │   └── lvglref/main.cpp    # LVGL 9 reference/fallback on the real panel (not shipped)
 ├── lib/guition/            # master display driver: GuitionDisplay/Touch + the split dashboard
@@ -500,8 +499,6 @@ linked library, plus what was used and dropped — in [`docs/CREDITS.md`](docs/C
   persisted rings at boot instead of clearing them in `setupSlave()` (the first
   `slaveLoop()` pass also clears every ring because `gLastPaired` starts at 0 — fix that
   first); keep partial pull progress across the 20-attempt give-up; the 5 s pre-pull wait.
-- **Standalone `guition` PlatformIO env no longer compiles** (`src/guition/main.cpp` calls
-  `diagHit()` with 4 args). Dead demo — the universal `s3` image is the only one flashed.
 
 - **Orion XS (0x0F) and SolarCharger (0x01) parsers VERIFIED** against real
   hardware — the "4wd" profile runs an Orion XS + solar charger + a second BMV,
@@ -531,8 +528,8 @@ linked library, plus what was used and dropped — in [`docs/CREDITS.md`](docs/C
 ## Phases (remaining)
 
 ### Phase 3 — Master display *(Guition JC3248W535)* — ✅ DONE (2026-07-08)
-Shipped on hardware. See the `vicmon-guition-display` memory for the full driver
-notes, pins, and gotchas. Summary:
+Shipped on hardware. Driver notes, verified pins and gotchas are in the Hardware
+table above and in `lib/guition/`. Summary:
 - **Arduino_GFX direct-draw dashboard, NOT LVGL.** LVGL was brought up and works
   on this AXS15231B QSPI panel (partial-blit + RGB565 swap), but its anti-aliased
   fonts fringe on the 16-bit panel (grainy) with no upside over crisp 1-bit GFX
