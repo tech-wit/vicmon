@@ -233,21 +233,29 @@ static void pageDash(const DashData& d) {
     g->fillRect(4, 72, 158, 26, modeCol);
     T(11, 72 + 18, F_M, BLACK, mode);
 
-    // Right column: battery V / A + detail.
-    T(174, 14, F_S, C_LBL, "BATTERY");
-    if (d.battValid) {
-        Tf(174, 42, F_L, C_BLUE, "%.2fV", d.v);
-        Tf(174, 72, F_L, ampColor(d.a), "%+.1fA", d.a);
-    } else {
-        T(174, 42, F_L, C_DIM, "--V");
-        T(174, 72, F_L, C_DIM, "--A");
-    }
+    // Right column (x 168..316, the widest that clears the mode box at 162): amps
+    // is the hero — it changes fastest and decides charge/discharge — while the
+    // voltage rides small on the heading row, since it barely moves. Below it the
+    // Ah meter and the cycled detail line, both in F_M so they read at a glance.
+    T(168, 14, F_S, C_LBL, "BATTERY");
+    if (d.battValid) TR(316, 14, F_S, C_BLUE, "%.2fV", d.v);
+    else             TR(316, 14, F_S, C_DIM, "%s", "--V");
+    if (d.battValid) Tf(168, 46, F_L, ampColor(d.a), "%+.1fA", d.a);
+    else             T(168, 46, F_L, C_DIM, "--A");
+    // Ah meter: remaining / installed, mirroring the Guition battery card. With no
+    // capacity configured, fall back to the BMV's consumed Ah like the web mimic.
+    char ah[24];
+    if (d.battCapAh > 0 && d.battValid)
+        snprintf(ah, sizeof(ah), "%.0f/%.0f Ah", d.battCapAh * d.soc / 100.0f, d.battCapAh);
+    else if (d.consumedValid) snprintf(ah, sizeof(ah), "%.0f Ah out", fabsf(d.consumedAh));
+    else strcpy(ah, "-- Ah");
+    T(168, 74, F_M, d.battValid ? C_TEXT : C_DIM, ah);
     char det[28];
     if (gDashDetail == 0) guition::ttgLabel(det, sizeof(det), d);
     else if (gDashDetail == 1) snprintf(det, sizeof(det), "Batt %.0fW", d.v * d.a);
     else if (d.starterValid) snprintf(det, sizeof(det), "Start %.1fV", d.starterV);
     else strcpy(det, "Start --");
-    T(174, 92, F_S, C_LBL, det);
+    T(168, 98, F_M, C_TEXT, det);
 
     // Bottom chips: Solar / Alt / Charger / Load.
     const char* clbl[4] = {"SOLAR", "ALT", "CHG", "LOAD"};

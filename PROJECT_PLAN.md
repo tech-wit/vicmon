@@ -550,6 +550,15 @@ format on the host.
   task so it stays responsive under BLE load. FreeSans/FreeSansBold fonts; charge green /
   discharge red state colouring; shared `ttgLabel`. Settings tab cycles items (B) with
   press-and-hold to select (brightness, 180° flip, pair, role toggle, restart).
+- **Dashboard right column, reworked 0.7.32.** Amps is the hero (F_L, charge-coloured);
+  the voltage dropped to F_S on the "BATTERY" heading row, right-aligned — it barely
+  moves, so it was wasting the biggest font on the page. Below it an **Ah meter**
+  (`remaining/installed Ah`, matching the Guition battery card; falls back to the BMV's
+  consumed Ah when no capacity is set) and the B-cycled detail line (TTG / watts /
+  starter), both promoted F_S → F_M for legibility. The column starts at x=168 (clears
+  the mode box at 162) giving 148 px; worst-case strings measured against the GFX font
+  tables fit, and the four text rows occupy pixel rows 2..15 / 21..47 / 57..75 / 81..99,
+  clear of the source chips' rule at y=104.
 - **One universal image + runtime board-detect.** The `s3` env compiles BOTH backends
   (`BOARD_GUITION` + `BOARD_LILYGO`); `detectBoard()` picks the panel at boot by the DC
   level on GPIO4 (Guition I²C-SDA pull-up ~3.3V vs LilyGo battery divider ~2.3V, threshold
