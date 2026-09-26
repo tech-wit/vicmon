@@ -1,0 +1,10 @@
+{
+  "name": "Vicmon",
+  "version": "0.7.32",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [{ "path": "vicmon-0.7.32-esp32s3-full.bin", "offset": 0 }]
+    }
+  ]
+}

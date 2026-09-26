@@ -10,6 +10,11 @@
 #                                  ESP-NOW clone, or esptool at 0x10000. Keeps NVS.
 #   SHA256SUMS                     checksums for both.
 #   manifest.json                  ESP Web Tools descriptor for the full image.
+#
+# With --publish it also copies them into releases/v<ver>/, which IS committed, so
+# a working image is downloadable straight from the repo with no build and no
+# release-server API. Costs ~3 MB of history per release, permanently — see
+# releases/README.md before cutting many.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,6 +25,8 @@ ESPTOOL=${ESPTOOL:-$CORE/packages/tool-esptoolpy/esptool.py}
 BOOT_APP0=${BOOT_APP0:-$CORE/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin}
 BUILD=.pio/build/s3
 OUT=dist
+PUBLISH=0
+[ "${1:-}" = "--publish" ] && PUBLISH=1
 
 for f in "$PIO" "$PY" "$ESPTOOL" "$BOOT_APP0"; do
     [ -e "$f" ] || { echo "release: missing $f (set PIO/PY/ESPTOOL/BOOT_APP0 or PLATFORMIO_CORE_DIR)" >&2; exit 1; }
@@ -67,6 +74,13 @@ cat > "$OUT/manifest.json" <<JSON
   ]
 }
 JSON
+
+if [ "$PUBLISH" = 1 ]; then
+    REL="releases/v$VER"
+    mkdir -p "$REL"
+    cp "$FULL" "$APP" "$OUT/SHA256SUMS" "$OUT/manifest.json" "$REL/"
+    echo "release: published into $REL/ (git add it to commit the binaries)"
+fi
 
 echo
 echo "release: $VER -> $OUT/"

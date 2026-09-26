@@ -34,7 +34,9 @@ This keeps NVS, so devices, keys, profiles, bindings and pairing all survive.
 
 ## 3. Prebuilt image with esptool (a blank board)
 
-Grab the release assets and flash over USB. **No PlatformIO, no repo checkout.**
+Built images are committed in **[`releases/`](../releases/)** — `releases/v0.7.32/`
+and so on — so there is nothing to build and nothing to fetch from a release server.
+Flash them over USB. **No PlatformIO needed.**
 
 ```bash
 pipx install esptool          # or: pip install --user esptool
@@ -98,10 +100,23 @@ It builds `env:s3`, reads the version straight out of `kFwVersion`, and writes t
 
 The script warns if the working tree is dirty, since the image then matches no commit.
 
-To publish: bump `kFwVersion` in `src/master/main.cpp`, commit, tag
-(`git tag v0.7.32 && git push --tags`), run the script, and attach the four files from
-`dist/` to the release on the Forgejo host. `dist/` is git-ignored — the binaries live
-on the release, not in the tree.
+`dist/` is git-ignored, so an experimental build cannot wander into a commit. Adding
+`--publish` also copies the four files into `releases/v<version>/`, which **is**
+committed — that is what makes the images downloadable straight from the repo.
+
+To publish:
+
+```bash
+# bump kFwVersion in src/master/main.cpp first
+./tools/release.sh --publish
+git add releases/v0.7.32 && git commit -m "Release 0.7.32"
+git tag v0.7.32 && git push && git push --tags
+```
+
+Each release costs ~3 MB of history, permanently — see
+[`releases/README.md`](../releases/README.md). Publish tagged versions, not every
+development build. If it gets heavy, attach the same four files to a release on the
+Forgejo host instead and stop committing them; only the destination changes.
 
 ### Flash layout (8MB, `default_8MB.csv`)
 
