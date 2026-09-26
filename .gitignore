@@ -1,9 +1,11 @@
 .pio/
 .piovenv/
 .vscode/
+.claude/
 *.o
 *.elf
 *.bin
+!releases/**/*.bin
 
-# release artefacts (published on the release, not committed)
+# release artefacts (staged by tools/release.sh; the published copies live in releases/)
 dist/
