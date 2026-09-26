@@ -31,6 +31,9 @@ struct DashData {
   float soc = 0, v = 0, a = 0;   // % , V , A (signed +charging)
   bool  ttgValid = false;
   float ttg = 0;                 // minutes
+  bool  consumedValid = false;
+  float consumedAh = 0;          // BMV consumed Ah (negative = drawn out); the Ah
+                                 // deficit, so |consumedAh| / A = time to full
   bool  starterValid = false;
   float starterV = 0;
 

@@ -328,7 +328,13 @@ frame). Reset per-meter: long-press a card on the TFT, or a button on the AP.
   flow-coloured animated lines), battery detail (V/A/remaining-Ah/starter/TTG),
   mode banner, and a client-side trend chart (canvas, window 1/10/30/60 min).
   TTG is computed locally from instantaneous current + capacity (settles fast,
-  unlike the BMV's multi-minute filter).
+  unlike the BMV's multi-minute filter). **With no capacity configured, charging
+  still shows a time-to-full (0.7.32):** consumed Ah *is* the Ah deficit to refill,
+  so `|consumed| / A` needs no capacity — the BMV's own TTG is infinite while
+  charging, which is why charging used to read "TTG ∞". Same rule in the LCD
+  `ttgLabel()` (Guition + LilyGo, both roles) and the web mimic, so masters and
+  slaves agree; the slave gets `consumed` from the snapshot (already on the wire,
+  no wire bump).
 - `/devices` — add/edit/delete (key shown), live per-device summary, and
   "Discovered nearby" (adopt with name/MAC/RSSI; configured MACs filtered out).
 - `/stats` **Stats** — Today / Trip / Total energy counters (Ah & Wh per

@@ -132,6 +132,10 @@ async function tick_(){
  if(b.capacity>0&&b.valid&&Math.abs(b.a)>0.05){
   if(b.a>0){var mf=(b.capacity*(1-b.soc/100))/b.a*60;set('dTTG','Full '+ttgStr(mf));}
   else{var me=(b.capacity*(b.soc/100))/Math.abs(b.a)*60;set('dTTG','TTG '+ttgStr(me));}}
+ else if(b.valid&&b.a>0.05&&b.consumed_valid&&Math.abs(b.consumed)>0.1){
+  // Charging with no capacity set: consumed Ah IS the deficit to refill, so
+  // time-to-full needs no capacity (the BMV's own TTG is infinite while charging).
+  set('dTTG','Full '+ttgStr(Math.abs(b.consumed)/b.a*60));}
  else if(b.ttg_valid)set('dTTG','TTG '+ttgStr(b.ttg));
  else set('dTTG','TTG ∞');
  var h=Math.max(0,Math.min(1,soc/100))*88,f=document.getElementById('fill');

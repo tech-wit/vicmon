@@ -70,6 +70,12 @@ void ttgLabel(char* buf, size_t n, const DashData& d) {
       fmtDuration(t, sizeof(t), d.battCapAh * (d.soc / 100.0f) / fabsf(d.a) * 60.0f);
       snprintf(buf, n, "TTG %s", t);
     }
+  } else if (d.battValid && d.a > 0.05f && d.consumedValid && fabsf(d.consumedAh) > 0.1f) {
+    // Charging with no capacity configured: the BMV's own TTG is infinite while
+    // charging, so derive time-to-full from consumed Ah — that IS the Ah deficit
+    // to refill, measured by the BMV's coulomb counter, so no capacity needed.
+    fmtDuration(t, sizeof(t), fabsf(d.consumedAh) / d.a * 60.0f);
+    snprintf(buf, n, "Full %s", t);
   } else if (d.ttgValid && d.ttg > 0) {  // fall back to the BMV's filtered TTG
     fmtDuration(t, sizeof(t), d.ttg);
     snprintf(buf, n, "TTG %s", t);

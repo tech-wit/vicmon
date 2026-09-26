@@ -260,6 +260,7 @@ static void collectDash(guition::DashData& d) {
     d.battValid = p.soc.valid || p.battV.valid || p.battA.valid;
     d.soc = p.soc.value; d.v = p.battV.value; d.a = p.battA.value;
     d.ttgValid = p.ttg.valid; d.ttg = p.ttg.value;
+    d.consumedValid = p.consumed.valid; d.consumedAh = p.consumed.value;
     d.starterValid = p.starterV.valid; d.starterV = p.starterV.value;
 
     d.solarValid = p.solarA.valid; d.solarW = p.solarW.value; d.solarA = p.solarA.value;
@@ -460,6 +461,7 @@ static void collectSlaveDash(guition::DashData& d) {
     d.v = decCenti(s.battV_cv);
     d.a = decDeci(s.battA_da);
     d.ttgValid = has(V_TTG); d.ttg = (s.ttg_min == 0xFFFF) ? 0 : s.ttg_min;
+    d.consumedValid = has(V_CONSUMED); d.consumedAh = decDeci(s.consumedAh_da);
     d.starterValid = has(V_STARTERV); d.starterV = decCenti(s.starterV_cv);
     d.solarValid = has(V_SOLAR); d.solarA = decDeci(s.solarA_da);
     d.solarW = decWhole(s.solarW_w);  // v3
