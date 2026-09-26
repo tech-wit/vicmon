@@ -142,10 +142,27 @@ The same app is served by every unit, master or slave, from its own AP.
 charge, and the battery detail: voltage, current, watts, remaining Ah and the
 time-to-full. The banner and the SoC fill take the charge-state colour.*
 
-![Trend and Environment charts](img/web-charts.jpg)
+![The graphs at the foot of the Mimic page: Trend, and both Environment pairs](img/web-mimic-graphs.jpg)
 
-*Trend over the selected window with SoC on its own right-hand axis, and the
-Environment pair beneath it — each pair shares a chart but not an axis.*
+*The graphs at the foot of the Mimic page. Trend carries every source plus SoC on its
+own right-hand 0–100 % axis; below it the two Environment pairs — temperature with
+humidity, pressure with gas — each pair sharing a chart but not an axis, because a
+nominal 0–100 % or 300–1100 hPa scale would flatten indoor readings to a straight
+line. The break in the Trend traces about 25 minutes back is a reboot: the rings have
+no timestamps, so a restart is bridged with n/a samples rather than silently
+compressing the timeline.*
+
+### The window tabs
+
+Every chart on the page shares one window selector — `1m / 10m / 1h / 12h / 24h` — so
+Trend and both Environment pairs always cover the same span. Switching is instant:
+the rings are already on the device, and the server just serves a different slice.
+
+![The same Trend chart with the 24h window selected](img/web-trend-24h.jpg)
+
+*The same card at 24h instead of 1h: overnight discharge sloping down, then this
+morning's charge. Under the hood the short windows come from the fine 5 s ring and
+the long ones from the coarse 60 s ring.*
 
 ![The Stats page: Today / Trip / Total meters and the last-7-days energy chart](img/web-stats.jpg)
 
