@@ -19,7 +19,7 @@
 slavelink::OtaEngine gOta;
 
 // ---- ESP-NOW broadcast to slaves -------------------------------------------
-// Broadcasts a packed snapshot to FF:FF:FF:FF:FF:FF ~1/s. Connectionless, so any
+// Broadcasts a packed snapshot to FF:FF:FF:FF:FF:FF every 250 ms. Connectionless, so any
 // number of slaves can listen with no pairing and a dropped frame self-heals on
 // the next send. Shares the radio with the AP + BLE; the AP is pinned to channel
 // 1, and the broadcast peer uses channel 0 ("current channel") to follow it.

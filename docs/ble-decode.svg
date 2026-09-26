@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 570" width="960" height="570"
+     font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>How Vicmon turns a Victron BLE advertisement into panel values</title>
+  <defs>
+    <marker id="dArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="dWrap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7d8da1"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="570" fill="#0f1720"/>
+
+  <text x="30" y="36" font-size="21" font-weight="700" fill="#e6edf3">Reading a Victron advertisement</text>
+  <text x="30" y="58" font-size="12.5" fill="#7d8da1">Victron “Instant Readout” broadcasts state in the BLE advertisement itself. Nothing connects to the device — Vicmon just listens and decrypts.</text>
+
+  <!-- ===== byte layout ===== -->
+  <text x="30" y="90" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">EXTRA MANUFACTURER DATA, AFTER COMPANY ID 0x02E1</text>
+
+  <g font-size="9.5" fill="#7d8da1">
+    <text x="40" y="112">0</text>
+    <text x="150" y="112">2</text>
+    <text x="260" y="112">4</text>
+    <text x="315" y="112">5</text>
+    <text x="425" y="112">7</text>
+    <text x="480" y="112">8</text>
+  </g>
+
+  <g>
+    <rect x="40"  y="118" width="110" height="46" rx="4" fill="#172230" stroke="#243140"/>
+    <rect x="150" y="118" width="110" height="46" rx="4" fill="#172230" stroke="#243140"/>
+    <rect x="260" y="118" width="55"  height="46" rx="4" fill="#172230" stroke="#243140"/>
+    <rect x="315" y="118" width="110" height="46" rx="4" fill="#172230" stroke="#243140"/>
+    <rect x="425" y="118" width="55"  height="46" rx="4" fill="#172230" stroke="#fbbf24"/>
+    <rect x="480" y="118" width="440" height="46" rx="4" fill="#132030" stroke="#22d3ee" stroke-dasharray="5 3"/>
+  </g>
+  <g font-size="10.5" fill="#e6edf3" text-anchor="middle">
+    <text x="95"  y="140">prefix 0x10 0x00</text>
+    <text x="205" y="140">model ID</text>
+    <text x="287" y="140" font-size="9.5">type</text>
+    <text x="370" y="140">nonce / counter</text>
+    <text x="452" y="140" font-size="9.5" fill="#fbbf24">key chk</text>
+    <text x="700" y="140" fill="#22d3ee">encrypted payload</text>
+  </g>
+  <g font-size="9.5" fill="#7d8da1" text-anchor="middle">
+    <text x="95"  y="156">2 B</text>
+    <text x="205" y="156">2 B</text>
+    <text x="287" y="156">1 B</text>
+    <text x="370" y="156">2 B, LE</text>
+    <text x="452" y="156">1 B</text>
+    <text x="700" y="156">N bytes · AES-128-CTR</text>
+  </g>
+  <text x="150" y="182" font-size="10.5" fill="#7d8da1">There is no device-type byte: the type comes from the model ID and from which configured key matched.</text>
+
+  <!-- ===== stage cards, row 1 ===== -->
+  <g>
+    <rect x="30" y="206" width="270" height="104" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="44" y="230" font-size="12.5" font-weight="700" fill="#22d3ee">1 · Scan</text>
+    <text x="44" y="252" font-size="10.5" fill="#e6edf3">Passive NimBLE scan, ~2 s a sweep.</text>
+    <text x="44" y="270" font-size="10.5" fill="#e6edf3">Keep adverts whose manufacturer</text>
+    <text x="44" y="288" font-size="10.5" fill="#e6edf3">data carries company ID 0x02E1.</text>
+  </g>
+  <path d="M304,258 H341" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#dArr)"/>
+  <g>
+    <rect x="345" y="206" width="270" height="104" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="359" y="230" font-size="12.5" font-weight="700" fill="#22d3ee">2 · Match</text>
+    <text x="359" y="252" font-size="10.5" fill="#e6edf3">Look the advertiser’s MAC up in the</text>
+    <text x="359" y="270" font-size="10.5" fill="#e6edf3">device registry — that yields its</text>
+    <text x="359" y="288" font-size="10.5" fill="#e6edf3">16-byte key and the record type.</text>
+  </g>
+  <path d="M619,258 H656" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#dArr)"/>
+  <g>
+    <rect x="660" y="206" width="270" height="104" rx="10" fill="#172230" stroke="#fbbf24"/>
+    <text x="674" y="230" font-size="12.5" font-weight="700" fill="#fbbf24">3 · Key check</text>
+    <text x="674" y="252" font-size="10.5" fill="#e6edf3">Byte 7 must equal key[0].</text>
+    <text x="674" y="270" font-size="10.5" fill="#e6edf3">Mismatch → drop it. One compare</text>
+    <text x="674" y="288" font-size="10.5" fill="#e6edf3">instead of a wasted AES pass.</text>
+  </g>
+
+  <!-- wrap connector -->
+  <path d="M795,314 V330 H165 V352" stroke="#7d8da1" stroke-width="1.4" fill="none" marker-end="url(#dWrap)"/>
+
+  <!-- ===== stage cards, row 2 ===== -->
+  <g>
+    <rect x="30" y="356" width="270" height="104" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="44" y="380" font-size="12.5" font-weight="700" fill="#22d3ee">4 · Decrypt</text>
+    <text x="44" y="402" font-size="10.5" fill="#e6edf3">AES-128-CTR over the payload, the</text>
+    <text x="44" y="420" font-size="10.5" fill="#e6edf3">nonce as a little-endian counter.</text>
+    <text x="44" y="438" font-size="10.5" fill="#e6edf3">On-device: no cloud, no pairing.</text>
+  </g>
+  <path d="M304,408 H341" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#dArr)"/>
+  <g>
+    <rect x="345" y="356" width="270" height="104" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="359" y="380" font-size="12.5" font-weight="700" fill="#22d3ee">5 · Unpack</text>
+    <text x="359" y="402" font-size="10.5" fill="#e6edf3">Bit-fields, LSB-first, per record type.</text>
+    <text x="359" y="420" font-size="10.5" fill="#e6edf3">Each field has a “not available”</text>
+    <text x="359" y="438" font-size="10.5" fill="#e6edf3">sentinel → not-valid, never a fake 0.</text>
+  </g>
+  <path d="M619,408 H656" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#dArr)"/>
+  <g>
+    <rect x="660" y="356" width="270" height="104" rx="10" fill="#172230" stroke="#34d399"/>
+    <text x="674" y="380" font-size="12.5" font-weight="700" fill="#34d399">6 · Publish</text>
+    <text x="674" y="402" font-size="10.5" fill="#e6edf3">Registry → signal bindings → the</text>
+    <text x="674" y="420" font-size="10.5" fill="#e6edf3">panel roles. Feeds history, alerts,</text>
+    <text x="674" y="438" font-size="10.5" fill="#e6edf3">web, LCDs and the ESP-NOW snapshot.</text>
+  </g>
+
+  <!-- ===== footer ===== -->
+  <line x1="30" y1="488" x2="930" y2="488" stroke="#243140"/>
+  <text x="30" y="510" font-size="11" fill="#7d8da1"><tspan fill="#fbbf24" font-weight="700">The key</tspan> — VictronConnect → the device → Product info → Encryption key. 16 bytes of hex, one per device, entered once in Vicmon.</text>
+  <text x="30" y="530" font-size="11" fill="#7d8da1"><tspan fill="#e6edf3" font-weight="700">Record types parsed</tspan> — 0x02 battery monitor · 0x0F Orion XS · 0x01 solar charger (all three verified against VictronConnect) · 0x08 AC charger (unverified).</text>
+  <text x="30" y="550" font-size="11" fill="#7d8da1">A device whose key you have not entered is still listed under “Discovered nearby” — seen, named, but not decoded.</text>
+</svg>

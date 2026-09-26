@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 696" width="960" height="696"
+     font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>Vicmon topology: Victron gear over BLE to one collector, mirrored to slave displays over ESP-NOW</title>
+  <defs>
+    <marker id="aBle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="aNow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#34d399"/>
+    </marker>
+    <marker id="aBack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7d8da1"/>
+    </marker>
+    <marker id="aWifi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="696" fill="#0f1720"/>
+
+  <text x="28" y="36" font-size="21" font-weight="700" fill="#e6edf3">Vicmon — how the pieces connect</text>
+  <text x="28" y="58" font-size="12.5" fill="#7d8da1">Example deployment: one headless collector in the car, two displays elsewhere in the vehicle. One firmware on every board; master vs slave is a runtime flag.</text>
+
+  <!-- column headings -->
+  <text x="20" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">VICTRON GEAR — BLE BROADCAST ONLY</text>
+  <text x="330" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">COLLECTOR (MASTER)</text>
+  <text x="730" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">DISPLAYS (SLAVES)</text>
+
+  <!-- ============ Victron devices ============ -->
+  <g>
+    <rect x="20" y="104" width="180" height="70" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="34" y="128" font-size="13" font-weight="700" fill="#e6edf3">SmartShunt / BMV-7xx</text>
+    <text x="34" y="146" font-size="10.5" fill="#7d8da1">SoC · V · A · consumed Ah</text>
+    <text x="34" y="162" font-size="10.5" fill="#7d8da1">TTG · starter V · alarm</text>
+    <circle cx="186" cy="118" r="3.5" fill="#22d3ee"/>
+  </g>
+  <g>
+    <rect x="20" y="190" width="180" height="70" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="34" y="214" font-size="13" font-weight="700" fill="#e6edf3">Orion XS 1400 DC-DC</text>
+    <text x="34" y="232" font-size="10.5" fill="#7d8da1">in/out V · in/out A</text>
+    <text x="34" y="248" font-size="10.5" fill="#7d8da1">state · error</text>
+    <circle cx="186" cy="204" r="3.5" fill="#22d3ee"/>
+  </g>
+  <g>
+    <rect x="20" y="276" width="180" height="70" rx="10" fill="#172230" stroke="#243140"/>
+    <text x="34" y="300" font-size="13" font-weight="700" fill="#e6edf3">SmartSolar MPPT</text>
+    <text x="34" y="318" font-size="10.5" fill="#7d8da1">PV W · batt V/A</text>
+    <text x="34" y="334" font-size="10.5" fill="#7d8da1">yield today · state</text>
+    <circle cx="186" cy="290" r="3.5" fill="#22d3ee"/>
+  </g>
+
+  <!-- BLE arrows into the master -->
+  <path d="M204,139 H326" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#aBle)"/>
+  <path d="M204,225 H326" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#aBle)"/>
+  <path d="M204,311 H326" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#aBle)"/>
+  <text x="265" y="132" font-size="10.5" font-weight="700" fill="#22d3ee" text-anchor="middle">BLE advert</text>
+  <text x="265" y="218" font-size="10.5" font-weight="700" fill="#22d3ee" text-anchor="middle">BLE advert</text>
+  <text x="265" y="304" font-size="10.5" font-weight="700" fill="#22d3ee" text-anchor="middle">BLE advert</text>
+
+  <!-- caption under the Victron column (kept inside x<320: the client box starts at 330) -->
+  <text x="20" y="374" font-size="11" fill="#7d8da1">Manufacturer data, company ID <tspan fill="#e6edf3">0x02E1</tspan>,</text>
+  <text x="20" y="392" font-size="11" fill="#7d8da1">encrypted <tspan fill="#e6edf3">AES-128-CTR</tspan>.</text>
+  <text x="20" y="416" font-size="11" fill="#7d8da1">Enable “Instant readout via Bluetooth” per</text>
+  <text x="20" y="434" font-size="11" fill="#7d8da1">device, then copy its encryption key out of</text>
+  <text x="20" y="452" font-size="11" fill="#7d8da1">VictronConnect into Vicmon.</text>
+  <text x="20" y="476" font-size="11" fill="#34d399">Receive-only: Vicmon never connects and</text>
+  <text x="20" y="494" font-size="11" fill="#34d399">never pairs, so it cannot change a Victron</text>
+  <text x="20" y="512" font-size="11" fill="#34d399">setting. VictronConnect works alongside it.</text>
+
+  <!-- ============ Master ============ -->
+  <rect x="330" y="104" width="270" height="242" rx="12" fill="#172230" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="344" y="128" font-size="13.5" font-weight="700" fill="#e6edf3">M5Capsule — in the car</text>
+  <text x="344" y="145" font-size="10.5" fill="#7d8da1">headless · role: MASTER</text>
+  <line x1="344" y1="156" x2="586" y2="156" stroke="#243140"/>
+  <text x="344" y="175" font-size="11" fill="#e6edf3">decrypt → parse → device registry</text>
+  <text x="344" y="194" font-size="11" fill="#e6edf3">signal bindings + derived charge/load</text>
+  <text x="344" y="213" font-size="11" fill="#e6edf3">history rings (LittleFS, survive reboot)</text>
+  <text x="344" y="232" font-size="11" fill="#e6edf3">energy meters · alerts</text>
+  <text x="344" y="251" font-size="11" fill="#e6edf3">WiFi AP + web app</text>
+  <line x1="344" y1="263" x2="586" y2="263" stroke="#243140"/>
+  <text x="344" y="282" font-size="10.5" fill="#fbbf24">BM8563 RTC — clock source, no NTP</text>
+  <text x="344" y="300" font-size="10.5" fill="#fbbf24">microSD — one CSV per day</text>
+  <text x="344" y="318" font-size="10.5" fill="#fbbf24">buzzer — SoC-critical alarm</text>
+  <text x="344" y="336" font-size="10.5" fill="#fbbf24">Unit ENV Pro — temp/RH/hPa/gas</text>
+
+  <!-- ============ Slaves ============ -->
+  <rect x="730" y="104" width="210" height="96" rx="10" fill="#172230" stroke="#34d399" stroke-width="1.3"/>
+  <text x="744" y="128" font-size="13" font-weight="700" fill="#e6edf3">Guition JC3248W535</text>
+  <text x="744" y="146" font-size="10.5" fill="#7d8da1">ute back / kitchen</text>
+  <text x="744" y="166" font-size="10.5" fill="#e6edf3">480×320 touch · 7 pages</text>
+  <text x="744" y="184" font-size="10.5" fill="#7d8da1">own AP + full web app</text>
+
+  <rect x="730" y="224" width="210" height="96" rx="10" fill="#172230" stroke="#34d399" stroke-width="1.3"/>
+  <text x="744" y="248" font-size="13" font-weight="700" fill="#e6edf3">LilyGo T-Display-S3</text>
+  <text x="744" y="266" font-size="10.5" fill="#7d8da1">cabin</text>
+  <text x="744" y="286" font-size="10.5" fill="#e6edf3">320×170 · two buttons</text>
+  <text x="744" y="304" font-size="10.5" fill="#7d8da1">own AP + full web app</text>
+
+  <!-- ESP-NOW out -->
+  <path d="M604,170 H664 V152 H726" stroke="#34d399" stroke-width="1.8" fill="none" marker-end="url(#aNow)"/>
+  <path d="M604,190 H664 V272 H726" stroke="#34d399" stroke-width="1.8" fill="none" marker-end="url(#aNow)"/>
+  <text x="665" y="126" font-size="10.5" font-weight="700" fill="#34d399" text-anchor="middle">ESP-NOW</text>
+  <text x="665" y="140" font-size="10" fill="#7d8da1" text-anchor="middle">250 ms</text>
+
+  <!-- history pull back -->
+  <path d="M726,178 H690 V212 H604" stroke="#7d8da1" stroke-width="1.3" fill="none" stroke-dasharray="4 3" marker-end="url(#aBack)"/>
+  <text x="608" y="232" font-size="10" fill="#7d8da1">history pull</text>
+
+  <!-- ============ Clients ============ -->
+  <rect x="330" y="392" width="270" height="86" rx="10" fill="#172230" stroke="#243140"/>
+  <text x="344" y="416" font-size="13" font-weight="700" fill="#e6edf3">Phone / laptop</text>
+  <text x="344" y="436" font-size="10.5" fill="#7d8da1">joins any unit’s own WiFi AP —</text>
+  <text x="344" y="452" font-size="10.5" fill="#7d8da1">no internet, no router needed.</text>
+  <text x="344" y="470" font-size="10.5" fill="#fbbf24">http://192.168.4.1/</text>
+  <path d="M465,388 V352" stroke="#fbbf24" stroke-width="1.6" fill="none" marker-end="url(#aWifi)"/>
+
+  <!-- every unit serves the app: an AP marker on each box -->
+  <circle cx="926" cy="118" r="3.5" fill="#fbbf24"/>
+  <text x="918" y="122" font-size="9.5" fill="#fbbf24" text-anchor="end">AP</text>
+  <circle cx="926" cy="238" r="3.5" fill="#fbbf24"/>
+  <text x="918" y="242" font-size="9.5" fill="#fbbf24" text-anchor="end">AP</text>
+  <circle cx="586" cy="118" r="3.5" fill="#fbbf24"/>
+  <text x="578" y="122" font-size="9.5" fill="#fbbf24" text-anchor="end">AP</text>
+
+  <!-- ============ Footnotes ============ -->
+  <line x1="20" y1="536" x2="940" y2="536" stroke="#243140"/>
+  <text x="20" y="560" font-size="11.5" font-weight="700" fill="#e6edf3">What crosses each link</text>
+  <text x="20" y="582" font-size="11" fill="#7d8da1"><tspan fill="#22d3ee" font-weight="700">BLE</tspan> — one-way broadcast from the Victron gear. Any unit in range could listen, but only the master is configured with the keys.</text>
+  <text x="20" y="602" font-size="11" fill="#7d8da1"><tspan fill="#34d399" font-weight="700">ESP-NOW</tspan> — the master broadcasts a compact snapshot every 250 ms (battery, sources, env, alerts, clock, profile). Slaves filter on the</text>
+  <text x="20" y="618" font-size="11" fill="#7d8da1">master’s id, so two Vicmon systems in range never mix. Pairing is two-sided and deliberate: a window opened on both ends.</text>
+  <text x="20" y="638" font-size="11" fill="#7d8da1"><tspan fill="#7d8da1" font-weight="700">History pull</tspan> — on connect a slave asks for the trend backlog and fills its own rings, so its Graph page is not empty. Resumable.</text>
+  <text x="20" y="658" font-size="11" fill="#7d8da1"><tspan fill="#fbbf24" font-weight="700">WiFi</tspan> — every unit, master or slave, runs its own AP and serves the whole web app from what it holds locally.</text>
+  <text x="20" y="678" font-size="11" fill="#7d8da1">Firmware travels the ESP-NOW link too: push or pull a clone between paired units, no cable.</text>
+</svg>
