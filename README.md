@@ -23,9 +23,16 @@ WiFi access point.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Supported & tested hardware — which ESP32 boards and which Victron devices, and what is verified vs merely written. |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Getting firmware onto a unit, including **prebuilt images that need no PlatformIO** — over the air, from a browser, or with `esptool`. |
 | [PROJECT_PLAN.md](PROJECT_PLAN.md) | Architecture, decisions and the gotchas learned the hard way. |
+| [docs/CREDITS.md](docs/CREDITS.md) | Protocol references, vendored code, every linked library, and what was used but not shipped. |
 | [PROJECT_SPEC.md](PROJECT_SPEC.md) | The original brief. |
 
+![The Vicmon web dashboard: animated energy flow, battery detail, charge banner](docs/img/web-mimic.jpg)
+
 ![Vicmon topology: Victron gear over BLE into one collector, mirrored to slave displays over ESP-NOW](docs/topology.svg)
+
+**Any supported board can be the master** — the roles above are a runtime flag, not a
+board or a build. A single Guition collecting, displaying and serving the web app on
+its own is a complete system; see [the minimum setup](docs/SETUP.md#start-here-one-board-does-everything).
 
 ## What works now
 
@@ -130,7 +137,13 @@ container/decryption details and the full module architecture are documented in
 
 ## Credits / references
 
+The short list — the full one, including every linked library and what was used but
+not shipped, is in **[docs/CREDITS.md](docs/CREDITS.md)**.
+
 - Victron "Extra Manufacturer Data" specification (advertisement format)
 - [`keshavdv/victron-ble`](https://github.com/keshavdv/victron-ble) — Python reference
 - [`wytr/VictronSolarDisplayEsp`](https://github.com/wytr/VictronSolarDisplayEsp) — ESP reference
 - AES from the public-domain [`kokke/tiny-AES-c`](https://github.com/kokke/tiny-AES-c)
+- [`me-processware/JC3248W535-Driver`](https://github.com/me-processware/JC3248W535-Driver) — Guition panel bring-up baseline
+- NimBLE-Arduino, ESP32Async AsyncTCP/ESPAsyncWebServer, Arduino_GFX, ArduinoJson, Bosch BME68x
+- Adafruit GFX bitmap fonts (from GNU FreeFont), used by both LCD renderers

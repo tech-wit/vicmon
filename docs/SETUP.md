@@ -1,4 +1,21 @@
-# How it fits together, and an example setup
+# How it fits together, and two example setups
+
+## Start here: one board does everything
+
+**Any supported board can be the master** — Guition, LilyGo, M5Capsule, AtomS3 or a
+bare ESP32-S3. Master is a runtime flag, not a build or a board. The simplest useful
+Vicmon is a single unit that collects, displays and serves the web app at once:
+
+![The minimum setup: one Guition acting as collector, display and web server at once](topology-simple.svg)
+
+That is a complete system. No pairing, no second unit, no router. You add displays
+later only because you want the numbers somewhere else in the vehicle — and when you
+do, this board stays the master.
+
+Pick whichever board suits **where the Bluetooth range is**, then decide separately
+where you want screens.
+
+## Scaling up: a collector plus displays
 
 ![Vicmon topology: Victron gear over BLE into one collector, mirrored to slave displays over ESP-NOW](topology.svg)
 
@@ -15,7 +32,9 @@ slave is not a dumb terminal: it has its own trend history (pulled from the mast
 on connect), its own WiFi AP and the full web app.
 
 Because master/slave is a runtime flag, the same firmware is on all of them and any
-board can be re-roled from its screen, its web page or the serial console.
+board can be re-roled from its screen, its web page or the serial console. Nothing
+about a board fixes its role: a Guition can be the master with a Capsule as a
+headless slave just as readily as the other way round.
 
 ### What crosses each link
 
@@ -34,16 +53,20 @@ never mix. Pairing is two-sided and deliberate — a window has to be open on bo
 
 The deployment in the diagram, and a working configuration for it:
 
+This is the author's own deployment — one of many possible shapes, not the required one:
+
 | Unit | Board | Where | Role |
 |---|---|---|---|
 | Collector | **M5Capsule** | in the car, near the Victron gear | master — BLE, history, microSD log, RTC clock, buzzer, ENV Pro |
 | Kitchen display | **Guition JC3248W535** | back of the ute / kitchen setup | slave — touch dashboard |
 | Cabin display | **LilyGo T-Display-S3** | cabin | slave — two-button dashboard |
 
-The Capsule is a good collector precisely because it has no screen: it is small, it
-runs off its internal battery through the power-hold pin, its RTC keeps the clock
-without NTP, and its microSD holds the long history. The screens go where you
-actually look at them.
+The Capsule is a good collector *here* precisely because it has no screen: it is
+small, it runs off its internal battery through the power-hold pin, its RTC keeps the
+clock without NTP, and its microSD holds the long history. The screens then go where
+you actually look at them. Swap it around freely — put the Guition near the gear as
+the master and the Capsule becomes an optional headless node, or drop the Capsule
+entirely and let a display collect for itself.
 
 ### 1. Bring up the collector
 
@@ -52,6 +75,8 @@ actually look at them.
    open `http://192.168.4.1/`.
 3. **Devices** → the Victron gear should be listed under *Discovered nearby*. Adopt
    each one and paste its encryption key from VictronConnect.
+
+   ![The Devices page: configured devices with live values, and the discovery list](img/web-devices.jpg)
 4. **Settings → System settings** → set the **battery capacity** in Ah. Nothing else
    knows it: it is not in the Victron advertisement, so remaining-Ah and time-to-go
    depend on you entering it.
@@ -61,6 +86,10 @@ actually look at them.
    accounts for goes unattributed and the Week chart stays empty.
 6. **Settings → Date & time** → set the clock once. On the Capsule it goes into the
    RTC and survives power loss, and the master broadcasts it to every slave.
+
+   ![Settings: the derived Charger and Load bindings, and the battery capacity field](img/web-settings.jpg)
+
+   *Panel signals with the two derived bindings, and the battery capacity below them.*
 
 ### 2. Add each display
 
@@ -76,6 +105,8 @@ On the display board:
    — everything it owns lives on Network.
 4. The slave starts showing live values within a second or two, then fills its Graph
    page from the master's backlog over the next few seconds.
+
+![The Network page: pairing, role switch and the wireless firmware clone](img/web-network.jpg)
 
 Repeat for the second display. Nothing on the master needs to change — the snapshot
 is a broadcast, so adding a display costs it nothing.
@@ -100,6 +131,31 @@ crosses the vehicle to the displays.
 If a slave shows **stale** it kept the last-known frame and is telling you the link
 dropped, not that the numbers are wrong. If it shows the master as *foreign*, the two
 are on different wire-protocol versions and need the same firmware.
+
+## The web app
+
+The same app is served by every unit, master or slave, from its own AP.
+
+![The Mimic page: animated energy flow, battery detail and the charge banner](img/web-mimic.jpg)
+
+*Mimic — sources feeding the battery, the flow line animating in the direction of
+charge, and the battery detail: voltage, current, watts, remaining Ah and the
+time-to-full. The banner and the SoC fill take the charge-state colour.*
+
+![Trend and Environment charts](img/web-charts.jpg)
+
+*Trend over the selected window with SoC on its own right-hand axis, and the
+Environment pair beneath it — each pair shares a chart but not an axis.*
+
+![The Stats page: Today / Trip / Total meters and the last-7-days energy chart](img/web-stats.jpg)
+
+*Stats — net in/out amp-hours per scope, split by source, with per-scope resets.*
+
+![The Diag page: memory, decoded fields and raw decrypted advertisement bytes](img/web-diag.jpg)
+
+*Diag — live memory, then every configured device's decoded fields next to the raw
+decrypted advertisement bytes. This is the page for confirming a parser against
+VictronConnect.*
 
 ## Where things live in the web app
 

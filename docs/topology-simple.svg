@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400"
+     font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <title>The minimum Vicmon setup: one Guition acting as master, display and web server at once</title>
+  <defs>
+    <marker id="sBle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="sWifi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="400" fill="#0f1720"/>
+
+  <text x="28" y="36" font-size="21" font-weight="700" fill="#e6edf3">The minimum setup — one board does everything</text>
+  <text x="28" y="58" font-size="12.5" fill="#7d8da1">Any supported board can be the master. Here a Guition is the collector, the display and the web server at once — no second unit, no pairing.</text>
+
+  <!-- Victron gear -->
+  <text x="20" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">VICTRON GEAR</text>
+  <rect x="20" y="104" width="180" height="52" rx="10" fill="#172230" stroke="#243140"/>
+  <text x="34" y="127" font-size="12.5" font-weight="700" fill="#e6edf3">SmartShunt / BMV</text>
+  <text x="34" y="145" font-size="10.5" fill="#7d8da1">SoC · V · A · consumed Ah</text>
+  <circle cx="186" cy="118" r="3.5" fill="#22d3ee"/>
+
+  <rect x="20" y="172" width="180" height="52" rx="10" fill="#172230" stroke="#243140"/>
+  <text x="34" y="195" font-size="12.5" font-weight="700" fill="#e6edf3">SmartSolar MPPT</text>
+  <text x="34" y="213" font-size="10.5" fill="#7d8da1">PV W · batt V/A</text>
+  <circle cx="186" cy="186" r="3.5" fill="#22d3ee"/>
+
+  <text x="20" y="256" font-size="11" fill="#7d8da1">…and any other Victron device</text>
+  <text x="20" y="274" font-size="11" fill="#7d8da1">with Instant Readout enabled.</text>
+
+  <path d="M204,130 H326" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#sBle)"/>
+  <path d="M204,198 H326" stroke="#22d3ee" stroke-width="1.6" fill="none" marker-end="url(#sBle)"/>
+  <text x="265" y="123" font-size="10.5" font-weight="700" fill="#22d3ee" text-anchor="middle">BLE</text>
+  <text x="265" y="191" font-size="10.5" font-weight="700" fill="#22d3ee" text-anchor="middle">BLE</text>
+
+  <!-- The one board -->
+  <text x="330" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">ONE BOARD, ROLE: MASTER</text>
+  <rect x="330" y="104" width="300" height="196" rx="12" fill="#172230" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="344" y="128" font-size="13.5" font-weight="700" fill="#e6edf3">Guition JC3248W535</text>
+  <text x="344" y="146" font-size="10.5" fill="#7d8da1">3.5″ touch · on the wall where you look</text>
+  <line x1="344" y1="158" x2="616" y2="158" stroke="#243140"/>
+  <text x="344" y="178" font-size="11" fill="#e6edf3">decrypts + aggregates the Victron gear</text>
+  <text x="344" y="198" font-size="11" fill="#e6edf3">keeps history, meters and alerts</text>
+  <text x="344" y="218" font-size="11" fill="#e6edf3">draws its own 7-page dashboard</text>
+  <text x="344" y="238" font-size="11" fill="#e6edf3">serves the web app on its own AP</text>
+  <line x1="344" y1="252" x2="616" y2="252" stroke="#243140"/>
+  <text x="344" y="272" font-size="10.5" fill="#34d399">No pairing, no second unit, no router.</text>
+  <text x="344" y="290" font-size="10.5" fill="#7d8da1">Add slave displays later and this stays the master.</text>
+  <circle cx="616" cy="118" r="3.5" fill="#fbbf24"/>
+  <text x="608" y="122" font-size="9.5" fill="#fbbf24" text-anchor="end">AP</text>
+
+  <!-- Phone -->
+  <text x="700" y="92" font-size="10.5" font-weight="700" fill="#7d8da1" letter-spacing="1.4">OPTIONAL</text>
+  <rect x="700" y="104" width="240" height="78" rx="10" fill="#172230" stroke="#243140"/>
+  <text x="714" y="128" font-size="12.5" font-weight="700" fill="#e6edf3">Phone / laptop</text>
+  <text x="714" y="148" font-size="10.5" fill="#7d8da1">joins the board’s WiFi AP for the</text>
+  <text x="714" y="164" font-size="10.5" fill="#7d8da1">full web app, charts and config.</text>
+  <path d="M634,140 H696" stroke="#fbbf24" stroke-width="1.6" fill="none" marker-end="url(#sWifi)"/>
+
+  <text x="700" y="216" font-size="11" fill="#7d8da1">The screen alone is enough for</text>
+  <text x="700" y="234" font-size="11" fill="#7d8da1">day-to-day use: pages, pairing,</text>
+  <text x="700" y="252" font-size="11" fill="#7d8da1">tunables and firmware updates</text>
+  <text x="700" y="270" font-size="11" fill="#7d8da1">are all reachable by touch.</text>
+
+  <line x1="20" y1="324" x2="940" y2="324" stroke="#243140"/>
+  <text x="20" y="348" font-size="11" fill="#7d8da1"><tspan fill="#e6edf3" font-weight="700">Master is a runtime flag, not a board.</tspan> Any supported board — Guition, LilyGo, M5Capsule, AtomS3, a bare ESP32-S3 — can be the master. Swap</text>
+  <text x="20" y="366" font-size="11" fill="#7d8da1">roles from the screen, the web page or the serial console; it reboots into the other role, and the same firmware image runs either way.</text>
+  <text x="20" y="386" font-size="11" fill="#7d8da1">Pick the master for where the <tspan fill="#e6edf3">Bluetooth range</tspan> is, not for what it looks like. See the multi-unit layout in topology.svg.</text>
+</svg>
