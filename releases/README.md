@@ -32,6 +32,12 @@ forever: binaries can't be pruned later without rewriting history. Twenty releas
 ~60 MB. That is a fine trade for a handful of real releases and a poor one for every
 development build, so publish deliberately — tagged versions, not every flash.
 
-If it ever does get heavy, the alternative is attaching the same four files to a
-release on the Forgejo host instead, which keeps them out of git history entirely.
-The build side doesn't change; only where the files land.
+The same files are also attached to the matching **GitHub Release**, which costs the
+repo nothing — Release assets do not live in git:
+
+```bash
+gh release create v<version> dist/vicmon-<version>-*.bin dist/SHA256SUMS dist/manifest.json
+```
+
+So if the history ever does get heavy, drop the in-tree copies and keep the Release
+assets alone. The build side doesn't change; only where the files land.

@@ -34,9 +34,9 @@ This keeps NVS, so devices, keys, profiles, bindings and pairing all survive.
 
 ## 3. Prebuilt image with esptool (a blank board)
 
-Built images are committed in **[`releases/`](../releases/)** — `releases/v0.7.32/`
-and so on — so there is nothing to build and nothing to fetch from a release server.
-Flash them over USB. **No PlatformIO needed.**
+Built images are available two ways — committed in **[`releases/`](../releases/)**
+(`releases/v0.7.32/`) and attached to the matching **GitHub Release**. Either way
+there is nothing to build. Flash them over USB; **no PlatformIO needed.**
 
 ```bash
 pipx install esptool          # or: pip install --user esptool
@@ -113,10 +113,18 @@ git add releases/v0.7.32 && git commit -m "Release 0.7.32"
 git tag v0.7.32 && git push && git push --tags
 ```
 
-Each release costs ~3 MB of history, permanently — see
+Then attach the same files to the GitHub Release, so they are downloadable from the
+Releases page as well as from the tree:
+
+```bash
+gh release create v0.7.32 dist/vicmon-0.7.32-*.bin dist/SHA256SUMS dist/manifest.json \
+  --title "Vicmon 0.7.32" --notes "…"
+```
+
+Each in-tree release costs ~3 MB of history, permanently — see
 [`releases/README.md`](../releases/README.md). Publish tagged versions, not every
-development build. If it gets heavy, attach the same four files to a release on the
-Forgejo host instead and stop committing them; only the destination changes.
+development build; if the history gets heavy, drop the in-tree copies and keep only
+the Release assets, which do not live in git at all.
 
 ### Flash layout (8MB, `default_8MB.csv`)
 
