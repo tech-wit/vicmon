@@ -1,3 +1,6 @@
+// Adafruit GFX bitmap font, from the Adafruit-GFX-Library font set, converted
+// from GNU FreeFont (URW++ Nimbus Sans). GPL with the font exception: embedding
+// it in a program does not affect that program's licence. See docs/CREDITS.md.
 #pragma once
 
 const uint8_t FreeSansBold18pt7bBitmaps[] PROGMEM = {

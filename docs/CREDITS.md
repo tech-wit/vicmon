@@ -52,11 +52,20 @@ M5Stack's schematics and pinouts for the **M5Capsule** (StampS3), **Unit ENV Pro
 several were wrong or board-revision-specific (the Capsule v1.1 LED power rail on
 GPIO38 being the memorable one).
 
-## Licensing note
+## Licensing
 
-This repo currently has **no LICENSE file**. Worth settling before it goes anywhere
-public, because the vendored pieces carry their own terms: tiny-AES-c is public
-domain (The Unlicense), the Bosch driver is BSD-3, Arduino_GFX and NimBLE are
-permissive, and the GFX fonts descend from GNU FreeFont (GPL with a font exception).
-Nothing here is a problem for private use; it is a question worth answering before
-publishing.
+Vicmon itself is **MIT** — see [`../LICENSE`](../LICENSE).
+
+The vendored and linked pieces keep their own terms, all compatible with that:
+
+| Component | Terms |
+|---|---|
+| `lib/victron/tiny_aes.*` (from kokke/tiny-AES-c) | The Unlicense — public domain |
+| `lib/guition/fonts/*.h` (Adafruit GFX, from GNU FreeFont) | GPL **with the font exception**, which explicitly allows embedding a font in a program without affecting that program's licence |
+| Bosch BME68x driver | BSD-3-Clause |
+| NimBLE-Arduino, AsyncTCP, ESPAsyncWebServer, Arduino_GFX, ArduinoJson | Permissive (MIT / Apache-2.0 / BSD-3) |
+| arduino-esp32 / ESP-IDF | LGPL-2.1 / Apache-2.0 per component |
+
+The linked libraries are fetched by PlatformIO rather than redistributed here — with
+one exception: the prebuilt images under [`../releases/`](../releases/) contain them
+compiled in, so those binaries carry those libraries' terms too.

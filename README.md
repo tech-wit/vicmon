@@ -135,6 +135,11 @@ container/decryption details and the full module architecture are documented in
 - **Config survives reflash** — only a deliberate `pio run -t erase` clears NVS.
 - **Matching is by key, not MAC** — robust against Victron's rotating addresses.
 
+## License
+
+MIT — see [LICENSE](LICENSE). Third-party components keep their own (permissive)
+terms; the breakdown is in [docs/CREDITS.md](docs/CREDITS.md#licensing).
+
 ## Credits / references
 
 The short list — the full one, including every linked library and what was used but
