@@ -4,3 +4,6 @@
 *.o
 *.elf
 *.bin
+
+# release artefacts (published on the release, not committed)
+dist/
