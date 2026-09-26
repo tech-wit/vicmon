@@ -154,6 +154,12 @@ Build a standalone ESP32-based display system to monitor Victron Bluetooth devic
 - LVGL library for display graphics
 - ESP-NOW examples for peer-to-peer
 
+> Written at the outset. What was *actually* used — including the references that
+> turned out to matter (`keshavdv/victron-ble` for the field layouts, the Victron
+> "Extra Manufacturer Data" spec, `me-processware/JC3248W535-Driver` for the panel)
+> and the fact that LVGL was evaluated and dropped — is recorded in
+> [docs/CREDITS.md](docs/CREDITS.md).
+
 ## Notes
 - No internet dependency after setup
 - Must work in remote/offline environments

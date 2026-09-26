@@ -172,8 +172,18 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
   lives in the web app.
 - [`docs/HARDWARE.md`](docs/HARDWARE.md) — the support matrix: boards and Victron
   devices, verified vs unproven.
+- [`docs/topology-simple.svg`](docs/topology-simple.svg) — the minimum setup: one board
+  as collector, display and web server at once. Makes the point that **master is a
+  runtime flag, not a board**.
 - [`docs/DEPLOY.md`](docs/DEPLOY.md) — the four ways to get firmware onto a unit, the
   flash layout, and `tools/release.sh`.
+- [`docs/CREDITS.md`](docs/CREDITS.md) — references, vendored code, linked libraries,
+  and the note that the repo still has no LICENSE file.
+- [`docs/img/`](docs/img/) — web-app screenshots, captured live off the bench master.
+  **Redact before adding more:** the Devices page renders the real AES keys, the AP
+  card the WiFi password, and both show device MACs.
+- [`releases/`](releases/) — committed firmware images per version (~3 MB each,
+  permanent in history); `tools/release.sh --publish` puts them there.
 
 Redraw the SVGs by editing them directly (hand-authored, no toolchain); check with
 `rsvg-convert -w 1200 docs/topology.svg -o /tmp/t.png`.
@@ -394,7 +404,8 @@ Offset  Size  Field
   (signed 0.001 A), consumed Ah (0.1 Ah), SoC (0.1 %).
 
 Authoritative refs: Victron "Extra Manufacturer Data" PDF; `keshavdv/victron-ble`;
-`wytr/VictronSolarDisplayEsp`.
+`wytr/VictronSolarDisplayEsp`. Full credits — every reference, vendored file and
+linked library, plus what was used and dropped — in [`docs/CREDITS.md`](docs/CREDITS.md).
 
 ## Design decisions & gotchas (learned the hard way)
 
