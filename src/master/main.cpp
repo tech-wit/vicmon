@@ -51,7 +51,7 @@
 // master id is known; the default is only a placeholder before then.
 char kApSsid[24] = "Vicmon";         // default Vicmon-<mac3>; overridable via NVS (loadApCfg)
 char kApPass[24] = "vicmon1234";     // >= 8 chars; overridable via NVS (loadApCfg)
-const char* kFwVersion = "0.7.31";    // shown on the display Settings page + OTA version compare
+const char* kFwVersion = "0.7.32";    // shown on the display Settings page + OTA version compare
 
 DeviceConfig gConfig;
 sig::SignalMap gSignals;
@@ -1085,7 +1085,7 @@ float gSocWarn = 50;         // % — warn at/below
 float gSocCrit = 30;         // % — critical at/below
 float gVlow = 11.8f;         // V — critical at/below
 float gVhigh = 15.0f;        // V — critical at/above
-bool gBuzzerEnable = true;   // M5Capsule buzzer follows the SoC-critical alert (0 = mute)
+bool gBuzzerEnable = true;   // M5Capsule buzzer follows the SoC-critical alert, muted while charging (0 = always mute)
 String settingsNs(int profile) {
     return profile == 0 ? String("vicset") : "vicset" + String(profile);
 }
@@ -1895,13 +1895,17 @@ void loop() {
     if (gHwBoard == HW_M5CAPSULE) {
         // Audible alarm tracks the SoC-critical alert specifically (battery capacity),
         // not the whole worst-severity (which also covers voltage / stale devices).
+        // It also goes quiet while the battery is charging: the low SoC is already
+        // being dealt with, so the chirp has nothing left to tell anyone. The
+        // visual alert (LED / web / display) still shows the critical state.
         sig::Resolved soc = R(sig::Role::BatterySOC, now);
+        ChargeMode mode = chargeMode(R(sig::Role::BatteryA, now));
         bool socCrit = soc.valid && gSocCrit > 0 && soc.value <= gSocCrit;
-        capsuleServiceBuzzer(socCrit, now);
+        capsuleServiceBuzzer(socCrit && mode != ChargeMode::Charging, now);
         capsuleLogSample(now);  // append to the daily SD CSV (paced 60 s internally)
         // Drive the Capsule's WS2812 (GPIO21). The generic updateLed() call below is
         // compiled out in this display-capable universal image, so do it here.
-        updateLed(worst, chargeMode(R(sig::Role::BatteryA, now)));
+        updateLed(worst, mode);
     }
 #endif
 #ifndef VICMON_DISPLAY

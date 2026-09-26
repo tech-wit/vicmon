@@ -757,7 +757,7 @@ static void bindingsPage(HtmlOut& h) {
          "<p class=muted>Shown as a banner on the mimic and on the onboard LED "
          "(red = critical, amber = warning, green = charging). 0 disables a check. "
          "A configured device that stops broadcasting also raises a warning. On an "
-         "M5Capsule the buzzer chirps while the battery is SoC-critical.</p></div>";
+         "M5Capsule the buzzer chirps while the battery is SoC-critical, and goes quiet while it is charging.</p></div>";
 
     h.lit(kFootLit, strlen(kFootLit));
 }

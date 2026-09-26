@@ -13,7 +13,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
 | 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 7-page renderer incl. Environment, 2-button nav, one universal image w/ runtime board-detect) |
-| — | **M5Stack M5Capsule** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm, microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
+| — | **M5Stack M5Capsule** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm (muted while charging, 0.7.32), microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
 | — | **Environment sensing** (Unit ENV Pro / BME688) | ✅ done + verified — temperature / humidity / pressure / gas on Grove Port A, in the history rings, web Environment chart, **Guition LCD Environment page** (2 dual-axis charts) and **LilyGo Environment page** (one pair at a time, B cycles), both sharing the Graph zoom window; SD CSV and the ESP-NOW snapshot; pairing on the Capsule button with a flashing LED |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 

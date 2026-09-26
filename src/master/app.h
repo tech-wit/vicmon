@@ -222,7 +222,7 @@ extern float gDeadband;       // A; |current| below this reads as idle
 extern int gTzOffsetMin;      // local time offset from UTC, minutes (+10h AEST)
 extern float gSocWarn;        // % — warn at/below
 extern float gSocCrit;        // % — critical at/below
-extern bool gBuzzerEnable;    // M5Capsule buzzer: sound the SoC-critical alarm (default on)
+extern bool gBuzzerEnable;    // M5Capsule buzzer: sound the SoC-critical alarm, except while charging (default on)
 extern float gVlow;           // V — critical at/below
 extern float gVhigh;          // V — critical at/above
 extern String gStaSsid, gStaPass;
@@ -339,7 +339,7 @@ bool capsuleProbe();          // detect: does the BM8563 RTC ACK on the internal
 void capsuleBringUp();        // power-hold + I2C/RTC + buzzer + SD; seeds system time from RTC
 uint32_t capsuleRtcUtc();     // read the RTC as a UTC epoch (0 if unset/invalid)
 void capsuleRtcSet(uint32_t utc);            // write a UTC epoch to the RTC
-void capsuleServiceBuzzer(bool socCrit, uint32_t now);  // beep pattern while SoC-critical (paced)
+void capsuleServiceBuzzer(bool alarm, uint32_t now);  // beep pattern while the alarm holds (paced)
 void capsuleLogSample(uint32_t now);         // append a CSV row to the daily SD log (paced 60 s)
 bool capsuleRtcOk();          // RTC present and holding a valid time
 bool capsuleSdOk();           // microSD card mounted for logging

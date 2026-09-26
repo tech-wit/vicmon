@@ -5,7 +5,8 @@
 //   • BM8563 RTC  -> the time source (seeds the system clock at boot; written back
 //                    whenever NTP/manual sets it), so the daily-stats rollover and
 //                    the SD log work with a real calendar WITHOUT needing NTP.
-//   • Buzzer      -> audible alarm that follows the SoC-critical alert.
+//   • Buzzer      -> audible alarm that follows the SoC-critical alert (muted
+//                    while charging).
 //   • microSD     -> long-history CSV log (one file per day), far beyond the 24 h
 //                    on-chip ring buffer.
 //   • Power-hold  -> latch the power circuit on so it keeps running off its internal
@@ -321,23 +322,24 @@ void capsuleLedTest() {
 }
 
 // ---- buzzer ----------------------------------------------------------------
-// Non-blocking alarm: while the SoC-critical condition holds, emit a short beep
-// roughly every 30 s. Silent otherwise, or if the user disabled the buzzer.
-void capsuleServiceBuzzer(bool socCrit, uint32_t now) {
+// Non-blocking alarm: while the caller holds `alarm` true, emit a short beep
+// roughly every 30 s. Silent otherwise, or if the user disabled the buzzer. The
+// caller decides what sounds it (SoC-critical, and not charging) — see loop().
+void capsuleServiceBuzzer(bool alarm, uint32_t now) {
     static bool     beeping = false;
     static uint32_t beepOffAt = 0, nextBeepAt = 0;
-    if (!gBuzzerEnable) socCrit = false;
+    if (!gBuzzerEnable) alarm = false;
     if (beeping && (int32_t)(now - beepOffAt) >= 0) {  // end an in-progress beep
         ledcWriteTone(BUZZER_CH, 0);
         beeping = false;
     }
-    if (!socCrit) { nextBeepAt = 0; return; }
-    if (nextBeepAt == 0) nextBeepAt = now;             // beep immediately on entering crit
+    if (!alarm) { nextBeepAt = 0; return; }
+    if (nextBeepAt == 0) nextBeepAt = now;             // beep immediately on entering the alarm
     if (!beeping && (int32_t)(now - nextBeepAt) >= 0) {
         ledcWriteTone(BUZZER_CH, 3000);
         beeping = true;
         beepOffAt  = now + 150;                        // 150 ms chirp
-        nextBeepAt = now + 30000;                      // repeat every 30 s while critical
+        nextBeepAt = now + 30000;                      // repeat every 30 s while it holds
     }
 }
 
