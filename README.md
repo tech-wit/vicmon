@@ -15,6 +15,18 @@ WiFi access point.
 > a runtime NVS flag. See `PROJECT_PLAN.md` for the architecture and `PROJECT_SPEC.md`
 > for the original brief.
 
+## Documentation
+
+| | |
+|---|---|
+| [docs/SETUP.md](docs/SETUP.md) | How the pieces fit together, what crosses each link, and a worked example: one collector in the car, two displays elsewhere in the vehicle. |
+| [docs/HARDWARE.md](docs/HARDWARE.md) | Supported & tested hardware — which ESP32 boards and which Victron devices, and what is verified vs merely written. |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Getting firmware onto a unit, including **prebuilt images that need no PlatformIO** — over the air, from a browser, or with `esptool`. |
+| [PROJECT_PLAN.md](PROJECT_PLAN.md) | Architecture, decisions and the gotchas learned the hard way. |
+| [PROJECT_SPEC.md](PROJECT_SPEC.md) | The original brief. |
+
+![Vicmon topology: Victron gear over BLE into one collector, mirrored to slave displays over ESP-NOW](docs/topology.svg)
+
 ## What works now
 
 - Decrypts & parses Victron advertisements (BMV/SmartShunt, Orion XS DC-DC and SmartSolar MPPT all verified vs VictronConnect; AC charger parser present but unverified).
@@ -40,7 +52,9 @@ WiFi access point.
 - **M5Stack M5Capsule** (StampS3, headless) — a compact node whose extras the firmware uses directly: its **BM8563 RTC** as the clock source (no NTP needed), a **buzzer** low-battery alarm (sounds while SoC-critical, and goes quiet while charging), a **microSD** card for long-history CSV logging (one file per day), and its **side button + RGB LED** — a short press opens/closes the ESP-NOW pairing window and the LED flashes amber while it's open. Stays powered off its internal battery via the power-hold pin. *On a Capsule v1.1 (Stamp-S3A) the RGB LED sits behind a power switch on GPIO38, which the firmware drives high at boot — without it the LED is unpowered and silently ignores everything.*
 - **M5Stack Unit ENV Pro** (Bosch BME688, I²C 0x77) — optional environment sensor on the Capsule's Grove **Port A**. Sampled in forced mode without blocking the main loop.
 - **Other headless nodes:** any ESP32-S3 (bare dev board, M5Stack AtomS3, …). The same firmware runs as a master (BLE + AP) or a screenless slave, chosen at runtime.
-- Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect.
+- Any Victron device with **"Instant readout via Bluetooth" enabled** in VictronConnect — **SmartShunt/BMV**, **Orion XS DC-DC** and **SmartSolar MPPT** are verified against VictronConnect; the AC-charger parser is written but untested.
+
+Full support matrix, per board and per Victron device, with what is verified vs unproven: **[docs/HARDWARE.md](docs/HARDWARE.md)**.
 
 ## Quick start
 
@@ -58,6 +72,11 @@ python3 -m venv .piovenv && .piovenv/bin/pip install platformio   # first time
 # read the serial log (pio's own monitor needs an interactive TTY)
 .piovenv/bin/python tools/monitor.py --port /dev/ttyACM0 --seconds 20
 ```
+
+No PlatformIO? Grab a release and flash the prebuilt image with `esptool` or straight
+from a browser — or, if the unit is already running, upload it over WiFi or clone it
+from another unit with no cable at all. See **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+`./tools/release.sh` builds the release artefacts.
 
 One app (`src/master/`, split into `main`/`web`/`display`/`espnow`/`ble_ingest`
 behind `app.h`) runs on every board, with the **master/slave role chosen at

@@ -162,6 +162,22 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 | Environment sensor | **M5Stack Unit ENV Pro** (BME688) | On the Capsule's Grove Port A — `Wire1`, SDA=GPIO13/SCL=GPIO15 @100 kHz, I2C 0x77. Temperature / humidity / pressure / gas resistance. ✅ verified. |
 | Victron devices (test) | **BMV/SmartShunt** + **Orion XS 1400 DC-DC** + **SmartSolar MPPT** | BMV, Orion XS & solar decode verified vs VictronConnect. |
 
+## Diagrams & user-facing docs
+
+- [`docs/topology.svg`](docs/topology.svg) — Victron gear over BLE into one collector,
+  mirrored to slave displays over ESP-NOW, with what crosses each link.
+- [`docs/ble-decode.svg`](docs/ble-decode.svg) — the advertisement byte layout and the
+  scan → match → key-check → decrypt → unpack → publish pipeline.
+- [`docs/SETUP.md`](docs/SETUP.md) — the worked multi-unit example and where each card
+  lives in the web app.
+- [`docs/HARDWARE.md`](docs/HARDWARE.md) — the support matrix: boards and Victron
+  devices, verified vs unproven.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) — the four ways to get firmware onto a unit, the
+  flash layout, and `tools/release.sh`.
+
+Redraw the SVGs by editing them directly (hand-authored, no toolchain); check with
+`rsvg-convert -w 1200 docs/topology.svg -o /tmp/t.png`.
+
 ## Repository layout (actual)
 
 ```
