@@ -24,6 +24,11 @@ struct VictronKey {
     victron::Record type;
     uint8_t key[16];
 };
+// Fill these in with your own devices before flashing: the key is the 32 hex
+// characters from VictronConnect -> the device -> Product info -> Encryption key.
+// Left as zeros on purpose — a real key committed here would be compiled into
+// every image built from this repo. This scanner is a Phase-1 diagnostic; the
+// real app (src/master/) stores keys in NVS, entered through its web UI.
 static const VictronKey kKeys[] = {
     {"BMV", victron::Record::BatteryMonitor,
      {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

@@ -38,10 +38,11 @@ String DeviceConfig::ns() const {
 void DeviceConfig::begin(int profile) {
     profile_ = profile;
     load();
-    if (count_ == 0 && profile_ == 0) {  // seed only the original profile
-        seedDefaults();
-        save();
-    }
+    // Deliberately NO seeded devices. A device entry carries a Victron AES key,
+    // so anything seeded here would be a real key compiled into every image and
+    // written into the NVS of any board that boots it. A fresh unit starts empty;
+    // devices are adopted from "Discovered nearby" on the Devices page, pasting
+    // each key from VictronConnect.
 }
 
 void DeviceConfig::load() {
@@ -111,13 +112,4 @@ bool DeviceConfig::remove(const char* name) {
         }
     }
     return false;
-}
-
-void DeviceConfig::seedDefaults() {
-    const uint8_t bmv[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    const uint8_t orion[16] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-    add("BMV", victron::Record::BatteryMonitor, bmv);
-    add("OrionXS", victron::Record::OrionXs, orion);
 }

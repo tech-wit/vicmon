@@ -33,7 +33,6 @@ public:
 
 private:
     void load();
-    void seedDefaults();
     String ns() const;
 
     DeviceSlot slots_[kMax];
