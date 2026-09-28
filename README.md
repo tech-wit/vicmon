@@ -9,7 +9,16 @@ the app is open. Vicmon is a cheap ESP32 screen that sits on your dash or wall a
 shows them all the time. It listens to the same Bluetooth broadcasts VictronConnect
 uses, so nothing needs rewiring and nothing is changed on your Victron devices.
 
-![Vicmon on a Guition 3.5" touch screen, showing the battery charging at 35%](docs/img/guition-dash.jpg)
+<table>
+<tr>
+<td width="62%"><img src="docs/img/guition-dash.jpg" alt="Vicmon on a Guition 3.5-inch touch screen, showing the battery charging at 35%"></td>
+<td width="38%"><img src="docs/img/guition-installed.jpg" alt="The Guition screen set into a carpeted panel in a 4WD canopy, above a switch panel, showing the Mimic page"></td>
+</tr>
+<tr>
+<td align="center">On the bench: the Dash page, charging</td>
+<td align="center">Installed in a 4WD canopy</td>
+</tr>
+</table>
 
 ## What you get
 
