@@ -14,7 +14,7 @@ not a build option — any board can be either.
 |---|---|---|---|
 | **[Guition JC3248W535](https://www.guition.com/esp32-display-module/3-5-inch-esp32s3-display-module)** (ESP32-S3, 16MB flash / 8MB OPI PSRAM) | 3.5" 480×320 IPS, capacitive touch | master or slave; 7-page touch dashboard | ✅ verified, in daily use |
 | **[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** (ESP32-S3, PSRAM) | 1.9" 320×170 ST7789, two buttons | master or slave; 7-page button dashboard | ✅ verified |
-| **[M5Stack M5Capsule v1.1](https://docs.m5stack.com/en/core/M5Capsule)** (Stamp-S3A, ESP32-S3FN8, **no PSRAM**) | none | headless master or slave; adds RTC, buzzer, microSD, power-hold | ✅ verified on **v1.1**. The original v1.0 (StampS3) should also work, but is untested. |
+| **[M5Stack M5Capsule v1.1](https://docs.m5stack.com/en/core/Capsule_v1.1)** (Stamp-S3A, ESP32-S3FN8, **no PSRAM**) | none | headless master or slave; adds RTC, buzzer, microSD, power-hold | ✅ verified on **v1.1**. The original v1.0 (StampS3) should also work, but is untested. |
 | **[M5Stack AtomS3 Lite](https://docs.m5stack.com/en/core/AtomS3%20Lite)** (ESP32-S3, no PSRAM) | none | headless master or slave | ✅ verified (the original dev master) |
 | Any other **ESP32-S3** dev board | none | headless master or slave | should work — `detectBoard()` falls back to headless. Not tested board by board. |
 | **ESP32 WROOM-32** (classic ESP32, not S3) | none | Phase-1 BLE scanner only (`env:wroom`) | ⚠️ **not** the universal image — no web app, no ESP-NOW, no display |
