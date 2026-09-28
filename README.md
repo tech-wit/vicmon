@@ -29,7 +29,9 @@ uses, so nothing needs rewiring and nothing is changed on your Victron devices.
 - **History graphs** covering the last minute to the last 24 hours, kept even when
   the power goes off.
 - **Daily energy totals.** How much went in and out today, this trip, and in total.
-- **Cabin temperature, humidity and air pressure** if you add the optional sensor.
+- **Cabin temperature, humidity, air pressure and an air-quality trend** if you add
+  the optional [M5Stack ENV Pro sensor](https://shop.m5stack.com/products/env-pro-unit-with-temperature-humidity-pressure-and-gas-sensor-bme688).
+  It shows on the Env screen, the web dashboard and every paired display.
 - **Alarms** for low battery, low or high voltage, or a device dropping out, shown
   on screen and on the status light. There's a buzzer on the M5Capsule board.
 - **A web dashboard on your phone.** Vicmon makes its own WiFi hotspot, so any phone
@@ -95,12 +97,19 @@ where you set everything up. Click a picture to see it full size.
    | **[M5Stack AtomS3 Lite](https://shop.m5stack.com/products/atoms3-lite-esp32s3-dev-kit)** | No screen. Tiny (24 mm square) | A cheap hidden collector |
    | Any other ESP32-S3 board | No screen | Tinkering |
 
-   Optional: the **[M5Stack ENV Pro sensor](https://shop.m5stack.com/products/env-pro-unit-with-temperature-humidity-pressure-and-gas-sensor-bme688)**
-   plugs into the M5Capsule to add cabin temperature, humidity and pressure.
    The full details are in [docs/HARDWARE.md](docs/HARDWARE.md).
 
-3. **A USB-C cable and a computer with Chrome or Edge,** once, to load the software.
-4. **The [VictronConnect app](https://www.victronenergy.com/victronconnectapp) on your phone,** once, to copy each device's key.
+3. **Optional: a temperature and air sensor.**
+
+   | Sensor | What it adds | How it connects |
+   |---|---|---|
+   | **[M5Stack ENV Pro](https://shop.m5stack.com/products/env-pro-unit-with-temperature-humidity-pressure-and-gas-sensor-bme688)** (Bosch BME688, about US$20) | Cabin temperature, humidity, air pressure, and a relative air-quality trend. All four are graphed and kept in the history, like the battery readings. | Plugs into the **M5Capsule's** Grove port with the cable that comes with it. No soldering. The Capsule is currently the only board it works on. |
+
+   The readings show on every screen, even though the sensor sits on the Capsule. A
+   Capsule collecting near the batteries shares them with the Guition on the dash.
+
+4. **A USB-C cable and a computer with Chrome or Edge,** once, to load the software.
+5. **The [VictronConnect app](https://www.victronenergy.com/victronconnectapp) on your phone,** once, to copy each device's key.
 
 ## Getting started
 
