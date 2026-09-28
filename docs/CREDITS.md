@@ -46,7 +46,7 @@ All pulled by PlatformIO — see `platformio.ini`.
 
 ## Hardware documentation
 
-M5Stack's schematics and pinouts for the **M5Capsule** (StampS3), **Unit ENV Pro** and
+M5Stack's schematics and pinouts for the **M5Capsule v1.1** (Stamp-S3A), **Unit ENV Pro** and
 **AtomS3**; LilyGo's for the **T-Display-S3**. Every pin in the Hardware table of
 `PROJECT_PLAN.md` was confirmed on the bench rather than trusted from a datasheet —
 several were wrong or board-revision-specific (the Capsule v1.1 LED power rail on

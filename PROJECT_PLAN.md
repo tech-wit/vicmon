@@ -13,7 +13,7 @@ development can resume cleanly when the display/slave hardware arrives.
 | 2 | Aggregation + WiFi AP web app (grew well beyond the original scope) | ✅ done (headless on AtomS3) |
 | 3 | Master display (Guition board) | ✅ done on hardware — Arduino_GFX dashboard, 5 pages, touch nav (LVGL dropped, see below) |
 | 4 | Slaves + ESP-NOW transport | ✅ done + verified on hardware — masterId filtering, two-sided pairing, slave config AP, graph-history sync, **wireless OTA clone** (push/pull, version-aware, auto-reboot); **LilyGo T-Display-S3 display done** (compact 7-page renderer incl. Environment, 2-button nav, one universal image w/ runtime board-detect) |
-| — | **M5Stack M5Capsule** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm (muted while charging, 0.7.32), microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
+| — | **M5Stack M5Capsule v1.1** (headless peripheral board) | ✅ done + verified — BM8563 RTC clock source, buzzer SoC-critical alarm (muted while charging, 0.7.32), microSD daily-CSV history log, power-hold; positive board-detect via the RTC |
 | — | **Environment sensing** (Unit ENV Pro / BME688) | ✅ done + verified — temperature / humidity / pressure / gas on Grove Port A, in the history rings, web Environment chart, **Guition LCD Environment page** (2 dual-axis charts) and **LilyGo Environment page** (one pair at a time, B cycles), both sharing the Graph zoom window; SD CSV and the ESP-NOW snapshot; pairing on the Capsule button with a flashing LED |
 | 5 | Vehicle integration (mounting, power, polish) + optional GATT | ⛔ not started |
 
@@ -37,7 +37,7 @@ favour. The `s3` image compiles in every backend and picks one at boot from
 buttons), and `BOARD_M5CAPSULE` (headless — RTC/buzzer/microSD peripherals,
 detected via its BM8563 RTC). Any other S3 runs headless.
 
-**Memory (no-PSRAM boards).** The M5Capsule (StampS3, no PSRAM) has ~58 KB free
+**Memory (no-PSRAM boards).** The M5Capsule v1.1 (Stamp-S3A, no PSRAM) has ~58 KB free
 heap out of the box, which was too little to serve the large Settings/Devices
 pages. Fixed by streaming those pages as small chunked pieces (no big contiguous
 String, no `send()` copy) and by reclaiming static RAM — the slave-only
@@ -158,7 +158,7 @@ either role — it scans + serves the web UI, or receives + serves a config AP.
 | Original dev board | **ESP32 WROOM-32** | Used for Phase-1 bring-up; dropped off USB mid-session (CP210x). `wroom` env still builds the Phase-1 scanner. |
 | Master w/ display | **Guition JC3248W535** | ESP32-S3, 16MB/8MB PSRAM, 3.5" 320×480 IPS, cap touch. ✅ verified. |
 | Display w/ buttons | **LilyGo T-Display-S3** | ESP32-S3, 1.9" 320×170, two buttons. ✅ verified. |
-| Headless peripheral | **M5Stack M5Capsule** (StampS3) | ESP32-S3FN8, no PSRAM. BM8563 RTC (I2C 0x51 on SDA=8/SCL=10) as clock source, buzzer GPIO2, microSD SPI (SCK14/MOSI12/MISO39/CS11), power-hold GPIO46, WS2812 GPIO21 (**v1.1: LED power rail GPIO38 must be driven HIGH** or it stays dark and silently ignores every write), button GPIO42 (active LOW). ✅ verified. |
+| Headless peripheral | **M5Stack M5Capsule v1.1** (Stamp-S3A; v1.0 StampS3 untested) | ESP32-S3FN8, no PSRAM. BM8563 RTC (I2C 0x51 on SDA=8/SCL=10) as clock source, buzzer GPIO2, microSD SPI (SCK14/MOSI12/MISO39/CS11), power-hold GPIO46, WS2812 GPIO21 (**v1.1: LED power rail GPIO38 must be driven HIGH** or it stays dark and silently ignores every write), button GPIO42 (active LOW). ✅ verified. |
 | Environment sensor | **M5Stack Unit ENV Pro** (BME688) | On the Capsule's Grove Port A — `Wire1`, SDA=GPIO13/SCL=GPIO15 @100 kHz, I2C 0x77. Temperature / humidity / pressure / gas resistance. ✅ verified. |
 | Victron devices (test) | **BMV/SmartShunt** + **Orion XS 1400 DC-DC** + **SmartSolar MPPT** | BMV, Orion XS & solar decode verified vs VictronConnect. |
 

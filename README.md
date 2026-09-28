@@ -123,7 +123,7 @@ where you set everything up. Click a picture to see it full size.
    |---|---|---|
    | <img src="docs/img/guition-dash.jpg" width="160" alt="Guition JC3248W535"><br>**[Guition JC3248W535](https://www.guition.com/esp32-display-module/3-5-inch-esp32s3-display-module)** ⭐ | 3.5" colour touch screen with the ESP32 built in. Usually about US$11–18 online; search for "JC3248W535", and get the **C** (capacitive touch) version. [Buyer's notes](https://www.atomic14.com/esp32/boards/guition-jc3248w535/). | The main screen: the photos above |
    | <img src="docs/img/lilygo-dash.jpg" width="160" alt="LilyGo T-Display-S3"><br>**[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** | Small 1.9" screen with two buttons | A compact second display, like the car console above |
-   | <img src="docs/img/capsule-envpro.jpg" width="160" alt="M5Capsule with an ENV Pro sensor"><br>**[M5Stack M5Capsule](https://shop.m5stack.com/products/m5stack-capsule-kit-v1-1-with-m5stamps3a)** | No screen. Small box with a clock, buzzer, microSD logging and battery | A hidden collector near the batteries, with a low-battery alarm |
+   | <img src="docs/img/capsule-envpro.jpg" width="160" alt="M5Capsule with an ENV Pro sensor"><br>**[M5Stack M5Capsule v1.1](https://shop.m5stack.com/products/m5stack-capsule-kit-v1-1-with-m5stamps3a)** | No screen. Small box with a clock, buzzer, microSD logging and battery | A hidden collector near the batteries, with a low-battery alarm |
    | **[M5Stack AtomS3 Lite](https://shop.m5stack.com/products/atoms3-lite-esp32s3-dev-kit)** | No screen. Tiny (24 mm square) | A cheap hidden collector |
    | Any other ESP32-S3 board | No screen | Tinkering |
 
@@ -239,7 +239,7 @@ displays elsewhere.
 ## Hardware details
 
 - **Displays:** Guition JC3248W535 (3.5" 480×320 capacitive touch, ESP32-S3 + PSRAM) and LilyGo T-Display-S3 (1.9" 320×170, two buttons). Both are fully supported, and the firmware detects at boot which panel is wired to the board.
-- **M5Stack M5Capsule** (StampS3, headless): a compact node whose extras the firmware uses directly:
+- **M5Stack M5Capsule v1.1** (Stamp-S3A, headless; the tested variant, though the original v1.0 should also work): a compact node whose extras the firmware uses directly:
   - its **BM8563 RTC** as the clock source, so no NTP is needed;
   - a **buzzer** low-battery alarm, which sounds while SoC is critical and goes quiet while charging;
   - a **microSD** card for long-history CSV logging, one file per day;
