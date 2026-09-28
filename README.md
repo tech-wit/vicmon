@@ -96,7 +96,19 @@ where you set everything up. Click a picture to see it full size.
 
 ## What you need
 
-1. **Victron gear with Bluetooth "Instant readout".** Any of these work:
+1. **Victron gear with Bluetooth "Instant readout".** In general that means
+   Victron's **"Smart"** models, which have Bluetooth built in: SmartSolar,
+   SmartShunt, BMV-712 Smart, Orion XS, Blue Smart chargers and so on. If
+   VictronConnect shows an *Instant readout* switch for the device, Vicmon can
+   hear it.
+
+   **Tested so far** are the models in the table below. Other Smart models should be
+   compatible, but some broadcast their readings in a different format and may need
+   a small code addition before their numbers show up. The Orion Smart DC-DC
+   charger, Phoenix inverters and MultiPlus are examples.
+
+   Models without built-in Bluetooth, such as **BlueSolar** chargers and the
+   BMV-700/702, can't work, because they don't broadcast anything.
 
    | Victron device | What Vicmon shows | Status |
    |---|---|---|

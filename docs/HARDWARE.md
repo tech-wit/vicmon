@@ -50,6 +50,21 @@ Vicmon reads Victron's **"Instant Readout"** BLE advertisements. For each device
 need to enable *Instant readout via Bluetooth* in VictronConnect and copy out its
 **encryption key** (VictronConnect → the device → Product info → Encryption key).
 
+**What should be compatible:** in practice, Victron's **"Smart"** range: the
+models with Bluetooth built in (SmartSolar, SmartShunt, BMV-712 Smart, Orion XS,
+Blue Smart chargers, Phoenix Smart…). If VictronConnect offers an *Instant readout*
+toggle for a device, its data reaches Vicmon.
+
+Whether Vicmon can *decode* the data depends on the device's **record type**, as the
+table below shows. Only the devices marked verified have been tested. Other Smart
+models that share a verified record type (e.g. other SmartSolar sizes) should work
+as they are. A model whose record type isn't parsed yet needs a parser added before
+its readings appear. Until then it still shows up under **Discovered nearby**.
+
+Devices **without built-in Bluetooth** (BlueSolar MPPT, BMV-700/702) never broadcast
+Instant Readout, so they can't work. As far as we know, adding a VE.Direct Bluetooth
+Smart dongle doesn't change that.
+
 ![How a Victron advertisement is decoded](ble-decode.svg)
 
 | Device | Record | Fields Vicmon decodes | Status |
