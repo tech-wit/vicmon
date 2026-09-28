@@ -48,6 +48,24 @@ uses, so nothing needs rewiring and nothing is changed on your Victron devices.
 | ![Env: temperature, humidity, pressure and air quality over the last hour](docs/img/guition-env.jpg) | ![Week: daily amp-hours in and out, plus Today / Trip / Total meters](docs/img/guition-week.jpg) |
 | **Env** — cabin temperature, humidity and pressure | **Week** — daily energy in and out |
 
+### The small screen
+
+The same readings on a LilyGo T-Display-S3, mounted on a car's centre console. It's
+paired to the main unit and flicks between pages with its two buttons.
+
+<table>
+<tr>
+<td width="33%"><img src="docs/img/lilygo-dash.jpg" alt="LilyGo on the centre console showing the Dashboard page: 94%, 13.27V, discharging"></td>
+<td width="33%"><img src="docs/img/lilygo-flow.jpg" alt="LilyGo showing the Power Flow page: solar, alternator and charger feeding the battery, and the load"></td>
+<td width="33%"><img src="docs/img/lilygo-env.jpg" alt="LilyGo showing the Environment page: temperature and humidity graphs"></td>
+</tr>
+<tr>
+<td align="center"><b>Dashboard</b></td>
+<td align="center"><b>Power flow</b></td>
+<td align="center"><b>Environment</b></td>
+</tr>
+</table>
+
 ### The web dashboard
 
 The same data in a browser, from any phone or laptop on Vicmon's WiFi. This is also
@@ -92,8 +110,8 @@ where you set everything up. Click a picture to see it full size.
    | Board | What it's like | Good for |
    |---|---|---|
    | <img src="docs/img/guition-dash.jpg" width="160" alt="Guition JC3248W535"><br>**[Guition JC3248W535](https://www.guition.com/esp32-display-module/3-5-inch-esp32s3-display-module)** ⭐ | 3.5" colour touch screen with the ESP32 built in. Usually about US$11–18 online; search for "JC3248W535", and get the **C** (capacitive touch) version. [Buyer's notes](https://www.atomic14.com/esp32/boards/guition-jc3248w535/). | The main screen: the photos above |
-   | **[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** | Small 1.9" screen with two buttons | A compact second display |
-   | **[M5Stack M5Capsule](https://shop.m5stack.com/products/m5stack-capsule-kit-v1-1-with-m5stamps3a)** | No screen. Small box with a clock, buzzer, microSD logging and battery | A hidden collector near the batteries, with a low-battery alarm |
+   | <img src="docs/img/lilygo-dash.jpg" width="160" alt="LilyGo T-Display-S3"><br>**[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** | Small 1.9" screen with two buttons | A compact second display, like the car console above |
+   | <img src="docs/img/capsule-envpro.jpg" width="160" alt="M5Capsule with an ENV Pro sensor"><br>**[M5Stack M5Capsule](https://shop.m5stack.com/products/m5stack-capsule-kit-v1-1-with-m5stamps3a)** | No screen. Small box with a clock, buzzer, microSD logging and battery | A hidden collector near the batteries, with a low-battery alarm |
    | **[M5Stack AtomS3 Lite](https://shop.m5stack.com/products/atoms3-lite-esp32s3-dev-kit)** | No screen. Tiny (24 mm square) | A cheap hidden collector |
    | Any other ESP32-S3 board | No screen | Tinkering |
 
@@ -104,6 +122,8 @@ where you set everything up. Click a picture to see it full size.
    | Sensor | What it adds | How it connects |
    |---|---|---|
    | **[M5Stack ENV Pro](https://shop.m5stack.com/products/env-pro-unit-with-temperature-humidity-pressure-and-gas-sensor-bme688)** (Bosch BME688, about US$20) | Cabin temperature, humidity, air pressure, and a relative air-quality trend. All four are graphed and kept in the history, like the battery readings. | Plugs into the **M5Capsule's** Grove port with the cable that comes with it. No soldering. The Capsule is currently the only board it works on. |
+
+   <img src="docs/img/capsule-envpro.jpg" width="450" alt="An M5Capsule (left) connected to an ENV Pro sensor (right) by its Grove cable">
 
    The readings show on every screen, even though the sensor sits on the Capsule. A
    Capsule collecting near the batteries shares them with the Guition on the dash.
