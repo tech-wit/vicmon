@@ -135,6 +135,12 @@ container/decryption details and the full module architecture are documented in
 - **Config survives reflash** — only a deliberate `pio run -t erase` clears NVS.
 - **Matching is by key, not MAC** — robust against Victron's rotating addresses.
 
+## Development
+
+Vicmon was developed with the help of [Claude](https://claude.ai) (Anthropic's AI
+assistant), using Claude Code for design, firmware, the web UI and testing, with
+all hardware work and verification done on real devices.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party components keep their own (permissive)
