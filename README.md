@@ -37,9 +37,33 @@ uses, so nothing needs rewiring and nothing is changed on your Victron devices.
 | ![Env: temperature, humidity, pressure and air quality over the last hour](docs/img/guition-env.jpg) | ![Week: daily amp-hours in and out, plus Today / Trip / Total meters](docs/img/guition-week.jpg) |
 | **Env** — cabin temperature, humidity and pressure | **Week** — daily energy in and out |
 
-And the same data in a browser, from any phone on Vicmon's WiFi:
+### The web dashboard
 
-![The Vicmon web dashboard: animated energy flow, battery detail, charge banner](docs/img/web-mimic.jpg)
+The same data in a browser, from any phone or laptop on Vicmon's WiFi. This is also
+where you set everything up. Click a picture to see it full size.
+
+<table>
+<tr>
+<td width="33%"><a href="docs/img/web-mimic.jpg"><img src="docs/img/web-mimic.jpg" alt="Mimic page: animated energy flow, battery detail and the charge banner"></a></td>
+<td width="33%"><a href="docs/img/web-mimic-graphs.jpg"><img src="docs/img/web-mimic-graphs.jpg" alt="Trend and environment graphs at the foot of the Mimic page"></a></td>
+<td width="33%"><a href="docs/img/web-stats.jpg"><img src="docs/img/web-stats.jpg" alt="Stats page: Today / Trip / Total meters and the 7-day energy chart"></a></td>
+</tr>
+<tr>
+<td align="center"><b>Mimic</b>: live energy flow</td>
+<td align="center"><b>Graphs</b>: trend and environment</td>
+<td align="center"><b>Stats</b>: energy meters and the last 7 days</td>
+</tr>
+<tr>
+<td><a href="docs/img/web-devices.jpg"><img src="docs/img/web-devices.jpg" alt="Devices page: configured devices with live values and the discovery list"></a></td>
+<td><a href="docs/img/web-settings.jpg"><img src="docs/img/web-settings.jpg" alt="Settings page: signal bindings and battery capacity"></a></td>
+<td><a href="docs/img/web-network.jpg"><img src="docs/img/web-network.jpg" alt="Network page: pairing, role switch, firmware clone and the WiFi hotspot"></a></td>
+</tr>
+<tr>
+<td align="center"><b>Devices</b>: add your Victron gear</td>
+<td align="center"><b>Settings</b>: battery size and what feeds each reading</td>
+<td align="center"><b>Network</b>: WiFi, pairing and updates</td>
+</tr>
+</table>
 
 ## What you need
 
