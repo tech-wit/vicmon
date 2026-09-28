@@ -12,10 +12,10 @@ not a build option — any board can be either.
 
 | Board | Screen | Role it is used in | Status |
 |---|---|---|---|
-| **Guition JC3248W535** (ESP32-S3, 16MB flash / 8MB OPI PSRAM) | 3.5" 480×320 IPS, capacitive touch | master or slave; 7-page touch dashboard | ✅ verified, in daily use |
-| **LilyGo T-Display-S3** (ESP32-S3, PSRAM) | 1.9" 320×170 ST7789, two buttons | master or slave; 7-page button dashboard | ✅ verified |
-| **M5Stack M5Capsule** (StampS3, ESP32-S3FN8, **no PSRAM**) | none | headless master or slave; adds RTC, buzzer, microSD, power-hold | ✅ verified |
-| **M5Stack AtomS3 Lite** (ESP32-S3, no PSRAM) | none | headless master or slave | ✅ verified (the original dev master) |
+| **[Guition JC3248W535](https://www.guition.com/esp32-display-module/3-5-inch-esp32s3-display-module)** (ESP32-S3, 16MB flash / 8MB OPI PSRAM) | 3.5" 480×320 IPS, capacitive touch | master or slave; 7-page touch dashboard | ✅ verified, in daily use |
+| **[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** (ESP32-S3, PSRAM) | 1.9" 320×170 ST7789, two buttons | master or slave; 7-page button dashboard | ✅ verified |
+| **[M5Stack M5Capsule](https://docs.m5stack.com/en/core/M5Capsule)** (StampS3, ESP32-S3FN8, **no PSRAM**) | none | headless master or slave; adds RTC, buzzer, microSD, power-hold | ✅ verified |
+| **[M5Stack AtomS3 Lite](https://docs.m5stack.com/en/core/AtomS3%20Lite)** (ESP32-S3, no PSRAM) | none | headless master or slave | ✅ verified (the original dev master) |
 | Any other **ESP32-S3** dev board | none | headless master or slave | should work — `detectBoard()` falls back to headless. Not tested board by board. |
 | **ESP32 WROOM-32** (classic ESP32, not S3) | none | Phase-1 BLE scanner only (`env:wroom`) | ⚠️ **not** the universal image — no web app, no ESP-NOW, no display |
 
@@ -37,7 +37,7 @@ Notes that bite:
 
 | Part | Where | Status |
 |---|---|---|
-| **M5Stack Unit ENV Pro** (Bosch BME688) | M5Capsule Grove **Port A** (`Wire1`, SDA 13 / SCL 15, I²C 0x77) | ✅ verified — temperature, humidity, pressure, gas resistance |
+| **[M5Stack Unit ENV Pro](https://docs.m5stack.com/en/unit/ENV%20Pro%20Unit)** (Bosch BME688) | M5Capsule Grove **Port A** (`Wire1`, SDA 13 / SCL 15, I²C 0x77) | ✅ verified — temperature, humidity, pressure, gas resistance |
 | **microSD** | M5Capsule slot (SPI: SCK 14 / MOSI 12 / MISO 39 / CS 11) | ✅ verified — one CSV per day |
 | **BM8563 RTC** | M5Capsule, I²C 0x51 (SDA 8 / SCL 10) | ✅ verified — used as the clock source instead of NTP |
 
@@ -54,9 +54,9 @@ need to enable *Instant readout via Bluetooth* in VictronConnect and copy out it
 
 | Device | Record | Fields Vicmon decodes | Status |
 |---|---|---|---|
-| **SmartShunt / BMV-7xx** battery monitor | `0x02` | SoC, voltage, current, consumed Ah, time-to-go, aux (starter V / midpoint / temperature), alarm bits | ✅ verified against VictronConnect |
-| **Orion XS 1400** DC-DC charger | `0x0F` | input/output voltage, input/output current, device state, charger error | ✅ verified against VictronConnect |
-| **SmartSolar MPPT** solar charger | `0x01` | PV power, battery V/A, yield today, load current, device state, charger error | ✅ verified against VictronConnect |
+| **[SmartShunt](https://www.victronenergy.com/battery-monitors/smart-battery-shunt) / [BMV-7xx](https://www.victronenergy.com/battery-monitors/bmv-712-smart)** battery monitor | `0x02` | SoC, voltage, current, consumed Ah, time-to-go, aux (starter V / midpoint / temperature), alarm bits | ✅ verified against VictronConnect |
+| **[Orion XS 1400](https://www.victronenergy.com/dc-dc-converters/orion-xs-dc-dc-battery-chargers)** DC-DC charger | `0x0F` | input/output voltage, input/output current, device state, charger error | ✅ verified against VictronConnect |
+| **[SmartSolar MPPT](https://www.victronenergy.com/solar-charge-controllers)** solar charger | `0x01` | PV power, battery V/A, yield today, load current, device state, charger error | ✅ verified against VictronConnect |
 | **Blue Smart AC charger** (IP22/IP65 class) | `0x08` | device state, charger error, battery V/A | ⚠️ **parser written, never tested** — no AC charger on hand. The `/diag` page makes confirming it a 5-minute job for anyone who has one. |
 | Phoenix Inverter (`0x03`), DC-DC converter (`0x04`), SmartLithium (`0x05`) | — | — | ❌ named in the record enum, but **not parsed and not selectable** |
 

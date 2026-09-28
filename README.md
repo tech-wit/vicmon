@@ -67,14 +67,31 @@ where you set everything up. Click a picture to see it full size.
 
 ## What you need
 
-1. **Victron gear with Bluetooth "Instant readout".** Tested: SmartShunt / BMV
-   battery monitors, Orion XS DC-DC chargers and SmartSolar MPPT solar chargers.
-2. **A screen.** The recommended one is the **Guition JC3248W535**, a 3.5" touch
-   screen with the ESP32 built in, which is what's in the photos. A LilyGo
-   T-Display-S3 (smaller, with buttons) also works, as do a few screenless boards.
-   See [docs/HARDWARE.md](docs/HARDWARE.md) for the full list.
+1. **Victron gear with Bluetooth "Instant readout".** Any of these work:
+
+   | Victron device | What Vicmon shows | Status |
+   |---|---|---|
+   | [SmartShunt](https://www.victronenergy.com/battery-monitors/smart-battery-shunt) or [BMV-712 Smart](https://www.victronenergy.com/battery-monitors/bmv-712-smart) battery monitor | State of charge, voltage, current, Ah used, time to go, starter battery | ✅ tested |
+   | [Orion XS](https://www.victronenergy.com/dc-dc-converters/orion-xs-dc-dc-battery-chargers) DC-DC charger | Input and output voltage and current, charging state | ✅ tested |
+   | [SmartSolar MPPT](https://www.victronenergy.com/solar-charge-controllers) solar charger | Solar power, charge current, yield today, charging state | ✅ tested |
+   | Blue Smart AC charger | Charging state, voltage, current | ⚠️ should work, not yet tested |
+
+2. **A board to run it on.** The Guition is the one to get if you want a screen:
+
+   | Board | What it's like | Good for |
+   |---|---|---|
+   | <img src="docs/img/guition-dash.jpg" width="160" alt="Guition JC3248W535"><br>**[Guition JC3248W535](https://www.guition.com/esp32-display-module/3-5-inch-esp32s3-display-module)** ⭐ | 3.5" colour touch screen with the ESP32 built in. Usually about US$11–18 online; search for "JC3248W535", and get the **C** (capacitive touch) version. [Buyer's notes](https://www.atomic14.com/esp32/boards/guition-jc3248w535/). | The main screen: the photos above |
+   | **[LilyGo T-Display-S3](https://lilygo.cc/en-us/products/t-display-s3)** | Small 1.9" screen with two buttons | A compact second display |
+   | **[M5Stack M5Capsule](https://shop.m5stack.com/products/m5stack-capsule-kit-v1-1-with-m5stamps3a)** | No screen. Small box with a clock, buzzer, microSD logging and battery | A hidden collector near the batteries, with a low-battery alarm |
+   | **[M5Stack AtomS3 Lite](https://shop.m5stack.com/products/atoms3-lite-esp32s3-dev-kit)** | No screen. Tiny (24 mm square) | A cheap hidden collector |
+   | Any other ESP32-S3 board | No screen | Tinkering |
+
+   Optional: the **[M5Stack ENV Pro sensor](https://shop.m5stack.com/products/env-pro-unit-with-temperature-humidity-pressure-and-gas-sensor-bme688)**
+   plugs into the M5Capsule to add cabin temperature, humidity and pressure.
+   The full details are in [docs/HARDWARE.md](docs/HARDWARE.md).
+
 3. **A USB-C cable and a computer with Chrome or Edge,** once, to load the software.
-4. **The VictronConnect app on your phone,** once, to copy each device's key.
+4. **The [VictronConnect app](https://www.victronenergy.com/victronconnectapp) on your phone,** once, to copy each device's key.
 
 ## Getting started
 
